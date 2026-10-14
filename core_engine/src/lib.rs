@@ -7,6 +7,7 @@
 mod asr;
 pub mod chunking;
 mod error;
+mod llm;
 mod memory;
 mod state;
 mod vad;
@@ -195,8 +196,12 @@ pub unsafe extern "C" fn LLM_Summarize(_transcript: *const c_char, _out: *mut *m
 /// # Safety
 /// Pointers must follow the header contract. Currently always returns NotImplemented.
 #[no_mangle]
-pub unsafe extern "C" fn LLM_RefineText(_text: *const c_char, _out: *mut *mut c_char) -> c_int {
-    status(not_implemented("LLM_RefineText"))
+pub unsafe extern "C" fn LLM_RefineText(text: *const c_char, out: *mut *mut c_char) -> c_int {
+    status((|| {
+        let input = read_str(text, "text")?;
+        let refined = state::refine_text(input)?;
+        write_out(out, &refined)
+    })())
 }
 
 /// # Safety

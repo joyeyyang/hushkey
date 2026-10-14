@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 libc = "0.2"
+llama-cpp-2 = { version = "0.1.159", default-features = false }
 
 [build-dependencies]
 cc = "1"

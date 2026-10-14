@@ -1,33 +1,59 @@
 import AppKit
 import Foundation
 
-/// Coordinates hotkey -> mic -> core ASR -> text injection.
-/// Core and audio calls run off the main thread; UI updates run on the main thread.
+/// Coordinates setup -> hotkey -> mic -> core ASR -> text injection.
+/// Core and audio calls run on coreQueue; all UI updates run on the main thread.
 final class AppController {
     private let hud = HUDWindow()
     private var capture: AudioCapture?
     private var hotkey: Hotkey?
     private var active = false
+    private var ready = false
     private let coreQueue = DispatchQueue(label: "ovc.core")
-    private let modelsDir: String
-
-    init(modelsDir: String) {
-        self.modelsDir = modelsDir
-    }
 
     func start() {
-        coreQueue.async { [modelsDir] in
-            do {
-                try Core.initialize(modelsDir: modelsDir)
-                try Core.loadASR()
-            } catch {
-                DispatchQueue.main.async { self.hud.show(text: "Model load failed: \(error)") }
-            }
-        }
+        hud.show(text: "Preparing models…")
         hotkey = Hotkey { [weak self] in self?.toggle() }
         if hotkey?.register() != true {
             hud.show(text: "Option+Space hotkey could not be registered")
         }
+        coreQueue.async {
+            do {
+                let dir = try Self.modelsDirectory { message in
+                    DispatchQueue.main.async { self.hud.show(text: message) }
+                }
+                try Core.initialize(modelsDir: dir.path)
+                try Core.loadASR()
+                ModelInstaller.log("core ready: \(dir.path)")
+                DispatchQueue.main.async {
+                    self.ready = true
+                    self.hud.show(text: "Ready. Press Option+Space to dictate.")
+                }
+            } catch {
+                ModelInstaller.log("setup failed: \(error)")
+                DispatchQueue.main.async { self.hud.show(text: "Setup failed: \(error)") }
+            }
+        }
+    }
+
+    /// Developer override: OVC_MODELS points at an existing models directory (no download).
+    /// Otherwise models live in Application Support, or $OVC_DATA_DIR/models if set (testing).
+    static func modelsDirectory(progress: @escaping (String) -> Void) throws -> URL {
+        let env = ProcessInfo.processInfo.environment
+        if let dir = env["OVC_MODELS"] {
+            return URL(fileURLWithPath: dir)
+        }
+        let base: URL
+        if let dataDir = env["OVC_DATA_DIR"] {
+            base = URL(fileURLWithPath: dataDir)
+        } else {
+            base = try FileManager.default
+                .url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                .appendingPathComponent("OfflineVoiceAssistant")
+        }
+        let root = base.appendingPathComponent("models")
+        try ModelInstaller.ensureInstalled(root: root, progress: progress)
+        return root
     }
 
     private func toggle() {
@@ -37,10 +63,16 @@ final class AppController {
     }
 
     private func begin() {
+        guard ready else {
+            hud.show(text: "Still preparing models…")
+            return
+        }
         guard AudioCapture.microphoneAuthorized() else {
             AudioCapture.requestMicrophone { granted in
                 DispatchQueue.main.async {
-                    self.hud.show(text: granted ? "Microphone granted; press Option+Space again" : "Microphone permission denied (System Settings > Privacy > Microphone)")
+                    self.hud.show(text: granted
+                        ? "Microphone granted; press Option+Space again"
+                        : "Microphone permission denied (System Settings > Privacy > Microphone)")
                 }
             }
             return
@@ -95,12 +127,8 @@ final class AppController {
     }
 }
 
-let modelsDirectory = ProcessInfo.processInfo.environment["OVC_MODELS"]
-    ?? (FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/OfflineVoiceAssistant/models").path)
-
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
-let controller = AppController(modelsDir: modelsDirectory)
+let controller = AppController()
 controller.start()
 app.run()

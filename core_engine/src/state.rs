@@ -184,3 +184,16 @@ fn file_len(p: &Path) -> Result<u64> {
         .map(|m| m.len())
         .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", p.display())))
 }
+
+/// Refine a transcript with the Qwen model. Loads the model for this call only and
+/// releases it on return, so the LLM's weights do not stay resident between calls.
+pub fn refine_text(text: &str) -> Result<String> {
+    let dir = lock()
+        .models_dir
+        .clone()
+        .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
+    let model = dir.join("llm/qwen2.5-0.5b-instruct-q4_k_m.gguf");
+    file_len(&model)?;
+    let prompt = crate::llm::refine_prompt(text);
+    crate::llm::generate(&model, &prompt)
+}
