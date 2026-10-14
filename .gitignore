@@ -1,0 +1,11 @@
+target/
+models/*.onnx
+models/*.gguf
+models/*.bin
+models/downloads/
+models/sherpa/
+build/
+dist/
+*.dmg
+.build/
+.DS_Store
