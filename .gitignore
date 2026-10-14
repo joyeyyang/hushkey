@@ -9,3 +9,7 @@ dist/
 *.dmg
 .build/
 .DS_Store
+core_engine/vendor/
+models/asr/
+models/llm/
+models/rag/
