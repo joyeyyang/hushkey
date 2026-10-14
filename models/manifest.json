@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "budget_note": "Models are downloaded on first launch, not bundled. App bundle target <= 700 MB.",
-  "language_note": "Taiwanese Hokkien (台語) is NOT in the official SenseVoice language list (zh, en, ja, ko, yue). Do not claim support until verified with real recordings.",
+  "language_note": "Taiwanese Hokkien (台語) is NOT supported by the chosen ASR model (SenseVoice official languages: zh, en, ja, ko, yue). Accepted by the project owner as unsupported.",
   "models": [
     {
       "id": "asr-sensevoice-small-int8",
