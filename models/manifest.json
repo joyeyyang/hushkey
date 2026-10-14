@@ -1,16 +1,17 @@
 {
   "schema_version": 1,
-  "notes": "Taiwanese Hokkien (台語) is NOT in the official SenseVoice language list (zh, en, ja, ko, yue). Verify with real recordings before relying on it.",
+  "budget_note": "Models are downloaded on first launch, not bundled. App bundle target <= 700 MB.",
+  "language_note": "Taiwanese Hokkien (台語) is NOT in the official SenseVoice language list (zh, en, ja, ko, yue). Do not claim support until verified with real recordings.",
   "models": [
     {
       "id": "asr-sensevoice-small-int8",
       "role": "ASR",
       "source_repo": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
       "source_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx",
-      "file": "sensevoice/model.int8.onnx",
+      "file": "asr/model.int8.onnx",
       "bytes": 239233841,
-      "sha256": "PENDING",
-      "license": "see upstream LICENSE (FunASR model license / Apache-2.0 as published by FunAudioLLM)",
+      "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+      "license": "MIT (FunASR; upstream references https://github.com/modelscope/FunASR)",
       "languages_official": ["zh", "en", "ja", "ko", "yue"],
       "taiwanese_hokkien_supported": false
     },
@@ -19,10 +20,10 @@
       "role": "ASR",
       "source_repo": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
       "source_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt",
-      "file": "sensevoice/tokens.txt",
-      "bytes": "PENDING",
+      "file": "asr/tokens.txt",
+      "bytes": 315894,
       "sha256": "PENDING",
-      "license": "same as above"
+      "license": "MIT (FunASR)"
     },
     {
       "id": "llm-qwen2.5-0.5b-instruct-q4_k_m",
@@ -33,7 +34,7 @@
       "bytes": 491400032,
       "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
       "license": "Apache-2.0",
-      "note": "GGUF Q4_K_M, not INT4. Upstream LFS sha256 from HF tree API."
+      "note": "GGUF Q4_K_M (not strictly INT4)."
     },
     {
       "id": "rag-embeddinggemma-300m",
@@ -43,8 +44,8 @@
       "file": "rag/embeddinggemma-300m.safetensors",
       "bytes": 1211486072,
       "sha256": "PENDING",
-      "license": "Gemma Terms of Use (not Apache-2.0)",
-      "note": "Unquantized 1.2 GB safetensors. A quantized GGUF/ONNX conversion is required to fit the 700 MB budget; not yet produced."
+      "license": "Gemma Terms of Use (not Apache-2.0); accept terms on HF before download",
+      "note": "Unquantized 1.2 GB. Exceeds 700 MB budget; quantized conversion not yet produced. RAG is blocked until a quantized artifact is verified."
     }
   ]
 }
