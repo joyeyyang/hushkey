@@ -43,10 +43,10 @@ fn ffi_lifecycle_and_error_paths() {
         let bogus = CString::new("bogus").unwrap();
         assert_eq!(Agent_Load(bogus.as_ptr()), ERR_INVALID_ARG);
 
-        // Unimplemented LLM/RAG entry points report NOT_IMPLEMENTED.
+        // LLM_RefineText without an initialized models dir fails explicitly and writes no output.
         let text = CString::new("hi").unwrap();
         let mut out: *mut c_char = std::ptr::null_mut();
-        assert_eq!(LLM_RefineText(text.as_ptr(), &mut out), ERR_NOT_IMPLEMENTED);
+        assert_eq!(LLM_RefineText(text.as_ptr(), &mut out), ERR_INVALID_STATE);
         assert!(out.is_null());
 
         // Submitting audio with a wrong sample rate is rejected before any model work.
