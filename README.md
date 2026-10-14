@@ -8,13 +8,14 @@ Fully offline voice input for macOS: press **Option+Space**, speak, the transcri
 |---|---|
 | Rust core: C ABI, error codes, string ownership | Built, unit-tested |
 | ASR (SenseVoice Small int8, via sherpa-onnx) | Verified on one Mandarin sample; model load 1.4 s, 5.6 s audio decoded in 165 ms |
-| Memory | Target relaxed to 550 MB peak RSS (owner decision). Measured ASR-only peak ~520-527 MB; ASR+LLM not yet measured |
+| Memory | Target 550 MB peak RSS. **Not met:** ASR + LLM in one process measured 670–920 MB peak (`ru_maxrss`, not reproducible across runs). ASR alone ~400–560 MB. Pending owner decision (split processes / smaller quant / accept ~900 MB) |
 | Smart Chunking (5 min VAD cut, 20-char overlap dedup) | Implemented; cut and dedup unit-tested. Not exercised on a >5 min recording |
-| LLM (Qwen2.5-0.5B Q4_K_M) | Downloaded and hash-verified; **not wired into the core** (`LLM_*` return NOT_IMPLEMENTED) |
+| LLM (Qwen2.5-0.5B Q4_K_M) | Wired into `LLM_RefineText` via llama.cpp, loaded per call. Refines a sample transcript correctly (removed filler, added punctuation). ~1 s warm, ~45 s on first call in one run (cold Metal shader compile) |
 | RAG (EmbeddingGemma) | **Not available.** Upstream is 1.2 GB unquantized; no verified quantized artifact |
 | Taiwanese Hokkien (台語) | **Not supported; accepted by owner.** Official SenseVoice languages: zh, en, ja, ko, yue |
+| First-launch model setup | Implemented in app (`ModelInstaller`): manifest bundled, size + SHA-256 verified, atomic move, progress in HUD. No resume (restarts on interruption). Cached path verified; fresh download run pending |
 | macOS hotkey / HUD / mic / text injection | Compiled and launched from the `.app`. **Not verified end-to-end** (needs GUI session and granted permissions) |
-| Packaging | `.app` and `.dmg` built; DMG 10 MiB (models downloaded on first launch) |
+| Packaging | `.app` and `.dmg` built; DMG 12 MiB (models downloaded on first launch) |
 | Signing / notarization | **Not done.** Ad-hoc signature only |
 | iOS / Android | Design notes only; not implemented |
 
@@ -24,7 +25,7 @@ Requires macOS 13+, Xcode 26, Rust, and the sherpa-onnx macOS arm64 shared libra
 (extract `sherpa-onnx-v1.13.8-osx-arm64-shared.tar.bz2` into `core_engine/vendor/`).
 
 ```sh
-scripts/download_models.sh   # ~730 MB; resumable; SHA-256 verified
+scripts/download_models.sh   # optional for developers; the app downloads on first launch
 scripts/verify_models.sh
 scripts/build_macos.sh       # cargo test + swift build + .app + ad-hoc codesign
 scripts/package_dmg.sh       # dist/OfflineVoiceAssistant.dmg
