@@ -13,7 +13,7 @@ Fully offline voice input for macOS: press **Option+Space**, speak, the transcri
 | LLM (Qwen2.5-0.5B Q4_K_M) | Wired into `LLM_RefineText` via llama.cpp, loaded per call. Refines a sample transcript correctly (removed filler, added punctuation). ~1 s warm, ~45 s on first call in one run (cold Metal shader compile) |
 | RAG (EmbeddingGemma) | **Not available.** Upstream is 1.2 GB unquantized; no verified quantized artifact |
 | Taiwanese Hokkien (台語) | **Not supported; accepted by owner.** Official SenseVoice languages: zh, en, ja, ko, yue |
-| First-launch model setup | Implemented in app (`ModelInstaller`): manifest bundled, size + SHA-256 verified, atomic move, progress in HUD. No resume (restarts on interruption). Cached path verified; fresh download run pending |
+| First-launch model setup | Implemented in app (`ModelInstaller`): manifest bundled, size + SHA-256 verified, atomic move, progress in HUD. No resume (restarts on interruption). Verified: fresh download from an empty directory fetched all three models (~730 MB), and `verify_models.sh` passes on the result. Cached path also verified |
 | macOS hotkey / HUD / mic / text injection | Compiled and launched from the `.app`. **Not verified end-to-end** (needs GUI session and granted permissions) |
 | Packaging | `.app` and `.dmg` built; DMG 12 MiB (models downloaded on first launch) |
 | Signing / notarization | **Not done.** Ad-hoc signature only |
