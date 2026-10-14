@@ -18,6 +18,9 @@ final class HUDWindow {
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
+        // Draggable from anywhere on the panel; stays where the user puts it.
+        panel.isMovableByWindowBackground = true
+        panel.isMovable = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         let bg = NSVisualEffectView(frame: panel.contentView!.bounds)
@@ -38,11 +41,15 @@ final class HUDWindow {
         bg.addSubview(label)
     }
 
+    private var placed = false
+
     func show(text: String) {
         label.stringValue = text
-        if let screen = NSScreen.main {
+        // Place once at the default spot; afterwards keep the user's dragged position.
+        if !placed, let screen = NSScreen.main {
             let f = screen.visibleFrame
             panel.setFrameOrigin(NSPoint(x: f.midX - panel.frame.width / 2, y: f.minY + 80))
+            placed = true
         }
         panel.orderFrontRegardless()
     }

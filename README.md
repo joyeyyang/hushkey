@@ -8,7 +8,8 @@ Fully offline voice input for macOS: press **Option+Space**, speak, the transcri
 |---|---|
 | Rust core: C ABI, error codes, string ownership | Built, unit-tested |
 | ASR (SenseVoice Small int8, via sherpa-onnx) | Verified on one Mandarin sample; model load 1.4 s, 5.6 s audio decoded in 165 ms |
-| Memory | Target 550 MB peak RSS. **Not met:** ASR + LLM in one process measured 670–920 MB peak (`ru_maxrss`, not reproducible across runs). ASR alone ~400–560 MB. Pending owner decision (split processes / smaller quant / accept ~900 MB) |
+| Memory | Target 550 MB peak RSS. **Partly met:** LLM now runs in a separate worker (`ovc-llm-worker`) that exits per call. Measured: main process peak 553 MB (ASR path, unchanged by LLM), worker peak 535 MB. **Main process still ~3 MB over target, from ASR alone** |
+| LLM worker isolation | Implemented; LLM memory is returned to the OS on each call |
 | Smart Chunking (5 min VAD cut, 20-char overlap dedup) | Implemented; cut and dedup unit-tested. Not exercised on a >5 min recording |
 | LLM (Qwen2.5-0.5B Q4_K_M) | Wired into `LLM_RefineText` via llama.cpp, loaded per call. Refines a sample transcript correctly (removed filler, added punctuation). ~1 s warm, ~45 s on first call in one run (cold Metal shader compile) |
 | RAG (EmbeddingGemma) | **Not available.** Upstream is 1.2 GB unquantized; no verified quantized artifact |

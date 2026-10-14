@@ -185,8 +185,9 @@ fn file_len(p: &Path) -> Result<u64> {
         .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", p.display())))
 }
 
-/// Refine a transcript with the Qwen model. Loads the model for this call only and
-/// releases it on return, so the LLM's weights do not stay resident between calls.
+/// Refine a transcript in a separate worker process. The worker loads the LLM, answers
+/// one request, and exits, so its memory is returned to the OS. The parent never maps the
+/// LLM weights, which keeps this process's peak RSS to the ASR path alone.
 pub fn refine_text(text: &str) -> Result<String> {
     let dir = lock()
         .models_dir
@@ -194,6 +195,59 @@ pub fn refine_text(text: &str) -> Result<String> {
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
     let model = dir.join("llm/qwen2.5-0.5b-instruct-q4_k_m.gguf");
     file_len(&model)?;
-    let prompt = crate::llm::refine_prompt(text);
-    crate::llm::generate(&model, &prompt)
+    let worker = worker_path()?;
+    run_worker(&worker, &model, text)
+}
+
+/// The worker is installed next to the core library (Contents/Frameworks in the app bundle),
+/// or next to the current executable for development runs.
+fn worker_path() -> Result<PathBuf> {
+    let exe = std::env::current_exe()
+        .map_err(|e| EngineError::new(ErrorCode::Internal, format!("current_exe: {e}")))?;
+    let dir = exe.parent().unwrap_or(Path::new("."));
+    // dev: target/release/examples/<exe> -> target/release/ ; app: Contents/MacOS -> Contents/Frameworks
+    let candidates = [
+        dir.join("ovc-llm-worker"),
+        dir.join("../ovc-llm-worker"),
+        dir.join("../Frameworks/ovc-llm-worker"),
+    ];
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(EngineError::new(
+        ErrorCode::NotLoaded,
+        format!("ovc-llm-worker not found next to {}", exe.display()),
+    ))
+}
+
+fn run_worker(worker: &Path, model: &Path, text: &str) -> Result<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(worker)
+        .arg(model)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| EngineError::new(ErrorCode::Internal, format!("spawn worker: {e}")))?;
+    {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| EngineError::new(ErrorCode::Internal, format!("write to worker: {e}")))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| EngineError::new(ErrorCode::Internal, format!("wait worker: {e}")))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(EngineError::new(
+            ErrorCode::Inference,
+            format!("LLM worker failed ({}): {err}", out.status),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }

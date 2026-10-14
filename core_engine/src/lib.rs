@@ -7,7 +7,7 @@
 mod asr;
 pub mod chunking;
 mod error;
-mod llm;
+pub mod llm;
 mod memory;
 mod state;
 mod vad;
@@ -17,6 +17,8 @@ use std::path::PathBuf;
 
 use error::{clear_last_error, last_error, set_last_error, EngineError, ErrorCode};
 pub use memory::OvcMemoryUsage;
+
+pub use llm::{generate as llm_generate, refine_prompt as llm_prompt};
 
 type Result<T, E = EngineError> = std::result::Result<T, E>;
 
