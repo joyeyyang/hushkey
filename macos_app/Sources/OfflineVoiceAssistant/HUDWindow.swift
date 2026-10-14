@@ -1,0 +1,53 @@
+import AppKit
+
+/// Floating capsule HUD shown above other windows. Non-activating, so it does not steal focus
+/// from the target text field.
+final class HUDWindow {
+    private let panel: NSPanel
+    private let label = NSTextField(labelWithString: "")
+
+    init() {
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 56),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = .floating
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        let bg = NSVisualEffectView(frame: panel.contentView!.bounds)
+        bg.material = .hudWindow
+        bg.blendingMode = .behindWindow
+        bg.state = .active
+        bg.wantsLayer = true
+        bg.layer?.cornerRadius = 28
+        bg.layer?.masksToBounds = true
+        bg.autoresizingMask = [.width, .height]
+        panel.contentView = bg
+
+        label.frame = bg.bounds.insetBy(dx: 16, dy: 10)
+        label.autoresizingMask = [.width, .height]
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 2
+        bg.addSubview(label)
+    }
+
+    func show(text: String) {
+        label.stringValue = text
+        if let screen = NSScreen.main {
+            let f = screen.visibleFrame
+            panel.setFrameOrigin(NSPoint(x: f.midX - panel.frame.width / 2, y: f.minY + 80))
+        }
+        panel.orderFrontRegardless()
+    }
+
+    func hide() {
+        panel.orderOut(nil)
+    }
+}

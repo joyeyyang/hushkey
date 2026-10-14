@@ -12,8 +12,15 @@
       "bytes": 239233841,
       "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
       "license": "MIT (FunASR; upstream references https://github.com/modelscope/FunASR)",
-      "languages_official": ["zh", "en", "ja", "ko", "yue"],
-      "taiwanese_hokkien_supported": false
+      "languages_official": [
+        "zh",
+        "en",
+        "ja",
+        "ko",
+        "yue"
+      ],
+      "taiwanese_hokkien_supported": false,
+      "download": true
     },
     {
       "id": "asr-sensevoice-tokens",
@@ -22,8 +29,9 @@
       "source_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt",
       "file": "asr/tokens.txt",
       "bytes": 315894,
-      "sha256": "PENDING",
-      "license": "MIT (FunASR)"
+      "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+      "license": "MIT (FunASR)",
+      "download": true
     },
     {
       "id": "llm-qwen2.5-0.5b-instruct-q4_k_m",
@@ -34,7 +42,8 @@
       "bytes": 491400032,
       "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
       "license": "Apache-2.0",
-      "note": "GGUF Q4_K_M (not strictly INT4)."
+      "note": "GGUF Q4_K_M (not strictly INT4).",
+      "download": true
     },
     {
       "id": "rag-embeddinggemma-300m",
@@ -45,7 +54,8 @@
       "bytes": 1211486072,
       "sha256": "PENDING",
       "license": "Gemma Terms of Use (not Apache-2.0); accept terms on HF before download",
-      "note": "Unquantized 1.2 GB. Exceeds 700 MB budget; quantized conversion not yet produced. RAG is blocked until a quantized artifact is verified."
+      "note": "Unquantized 1.2 GB safetensors. Excluded from download and from the 700 MB budget until a quantized artifact is produced and verified.",
+      "download": false
     }
   ]
 }

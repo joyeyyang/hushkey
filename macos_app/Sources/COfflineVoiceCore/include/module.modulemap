@@ -1,0 +1,4 @@
+module COfflineVoiceCore {
+    header "offline_voice_core.h"
+    export *
+}
