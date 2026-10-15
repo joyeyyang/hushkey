@@ -29,6 +29,7 @@ final class AppController {
                 DispatchQueue.main.async {
                     self.ready = true
                     ModelInstaller.log("ready: press Option+Space to dictate")
+                    if let wav = SelfTest.wavPath { self.runSelfTest(wav) }
                 }
             } catch {
                 ModelInstaller.log("setup failed: \(error)")
@@ -55,6 +56,37 @@ final class AppController {
         let root = base.appendingPathComponent("models")
         try ModelInstaller.ensureInstalled(root: root, progress: progress)
         return root
+    }
+
+    /// Test-only: run the dictation path on a WAV file instead of the microphone, then exit.
+    private func runSelfTest(_ path: String) {
+        let samples: [Float]
+        do {
+            samples = try SelfTest.readWav(URL(fileURLWithPath: path))
+        } catch {
+            ModelInstaller.log("selftest: \(error)")
+            exit(2)
+        }
+        ModelInstaller.log("selftest: \(samples.count) samples (\(samples.count / 16_000)s) from \(path)")
+        active = true
+        coreQueue.async {
+            do { try Core.startASR() } catch {
+                ModelInstaller.log("selftest: startASR failed: \(error)")
+                exit(3)
+            }
+            // Feed in 1-second blocks, as the microphone tap would.
+            let block = 16_000
+            var i = 0
+            while i < samples.count {
+                let end = min(i + block, samples.count)
+                do { try Core.submit(Array(samples[i..<end])) } catch {
+                    ModelInstaller.log("selftest: submit failed: \(error)")
+                    exit(3)
+                }
+                i = end
+            }
+            DispatchQueue.main.async { self.finish() }
+        }
     }
 
     private func toggle() {
@@ -104,17 +136,40 @@ final class AppController {
         active = false
         hud.show(text: "Transcribing…")
         coreQueue.async {
+            let raw: String
             do {
-                let text = try Core.stopASR()
-                DispatchQueue.main.async { self.deliver(text) }
+                raw = try Core.stopASR()
             } catch {
                 DispatchQueue.main.async { self.hud.show(text: "\(error)") }
+                return
             }
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if SelfTest.wavPath != nil { ModelInstaller.log("selftest asr: \(trimmed)") }
+            guard !trimmed.isEmpty else {
+                DispatchQueue.main.async { self.deliver("") }
+                return
+            }
+            DispatchQueue.main.async { self.hud.show(text: "Polishing...") }
+            // LLM polish is best-effort: any failure falls back to the raw transcript.
+            let final: String
+            do {
+                let polished = try Core.refine(trimmed).trimmingCharacters(in: .whitespacesAndNewlines)
+                final = polished.isEmpty ? trimmed : polished
+            } catch {
+                ModelInstaller.log("refine failed, using raw transcript: \(error)")
+                final = trimmed
+            }
+            DispatchQueue.main.async { self.deliver(final) }
         }
     }
 
     private func deliver(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if SelfTest.wavPath != nil {
+            // Self-test: report the final text and exit instead of pasting.
+            ModelInstaller.log("selftest result: \(trimmed)")
+            exit(trimmed.isEmpty ? 4 : 0)
+        }
         guard !trimmed.isEmpty else {
             hud.show(text: "No speech detected")
             return

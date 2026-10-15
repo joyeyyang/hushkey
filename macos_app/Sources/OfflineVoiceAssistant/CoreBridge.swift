@@ -43,6 +43,16 @@ enum Core {
         }
     }
 
+    /// Polish a transcript with the LLM. Throws if the LLM is unavailable or fails;
+    /// callers decide the fallback (the raw transcript).
+    static func refine(_ text: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_RefineText(text, &out))
+        guard let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
+
     static func stopASR() throws -> String {
         var out: UnsafeMutablePointer<CChar>?
         try check(ASR_Stop(&out))
