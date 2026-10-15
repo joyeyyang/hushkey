@@ -12,26 +12,27 @@ final class AppController {
     private let coreQueue = DispatchQueue(label: "ovc.core")
 
     func start() {
-        hud.show(text: "Preparing models…")
+        // Make sure no HUD is on screen during model setup; it appears only on hotkey actions.
+        hud.hide()
         hotkey = Hotkey { [weak self] in self?.toggle() }
         if hotkey?.register() != true {
-            hud.show(text: "Option+Space hotkey could not be registered")
+            ModelInstaller.log("Option+Space hotkey could not be registered")
         }
         coreQueue.async {
             do {
                 let dir = try Self.modelsDirectory { message in
-                    DispatchQueue.main.async { self.hud.show(text: message) }
+                    ModelInstaller.log(message)
                 }
                 try Core.initialize(modelsDir: dir.path)
                 try Core.loadASR()
                 ModelInstaller.log("core ready: \(dir.path)")
                 DispatchQueue.main.async {
                     self.ready = true
-                    self.hud.show(text: "Ready. Press Option+Space to dictate.")
+                    ModelInstaller.log("ready: press Option+Space to dictate")
                 }
             } catch {
                 ModelInstaller.log("setup failed: \(error)")
-                DispatchQueue.main.async { self.hud.show(text: "Setup failed: \(error)") }
+                DispatchQueue.main.async { self.ready = false }
             }
         }
     }

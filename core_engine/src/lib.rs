@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use error::{clear_last_error, last_error, set_last_error, EngineError, ErrorCode};
 pub use memory::OvcMemoryUsage;
 
-pub use llm::{generate as llm_generate, refine_prompt as llm_prompt};
+pub use llm::{refine as llm_refine, summarize_one as llm_summarize_one, SECTION_ACTIONS, SECTION_DECISIONS, SECTION_SUMMARY};
 
 type Result<T, E = EngineError> = std::result::Result<T, E>;
 
@@ -189,10 +189,14 @@ pub unsafe extern "C" fn ASR_Stop(out: *mut *mut c_char) -> c_int {
 // ---- LLM / RAG (not yet implemented; return explicit NotImplemented) ---------
 
 /// # Safety
-/// Pointers must follow the header contract. Currently always returns NotImplemented.
+/// Pointers must follow the header contract.
 #[no_mangle]
-pub unsafe extern "C" fn LLM_Summarize(_transcript: *const c_char, _out: *mut *mut c_char) -> c_int {
-    status(not_implemented("LLM_Summarize"))
+pub unsafe extern "C" fn LLM_Summarize(transcript: *const c_char, out: *mut *mut c_char) -> c_int {
+    status((|| {
+        let input = read_str(transcript, "transcript")?;
+        let summary = state::summarize_text(input)?;
+        write_out(out, &summary)
+    })())
 }
 
 /// # Safety

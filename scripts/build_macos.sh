@@ -31,6 +31,10 @@ cp "$ROOT/models/manifest.json" "$APP/Contents/Resources/models-manifest.json"
 cp "$ROOT/core_engine/target/release/deps/liboffline_voice_core.dylib" "$APP/Contents/Frameworks/" 2>/dev/null \
   || cp "$ROOT/core_engine/target/release/liboffline_voice_core.dylib" "$APP/Contents/Frameworks/"
 cp "$SHERPA_DIR"/lib/libsherpa-onnx-c-api.dylib "$SHERPA_DIR"/lib/libonnxruntime*.dylib "$APP/Contents/Frameworks/"
+# LLM worker runs out of process; the core looks for it in Contents/Frameworks (see state.rs).
+WORKER="$ROOT/core_engine/target/release/ovc-llm-worker"
+[[ -x "$WORKER" ]] || { echo "missing LLM worker at $WORKER (cargo build --release must produce it)" >&2; exit 1; }
+cp "$WORKER" "$APP/Contents/Frameworks/ovc-llm-worker"
 
 echo "== relink install names to bundle-relative paths"
 BIN="$APP/Contents/MacOS/OfflineVoiceAssistant"

@@ -39,6 +39,8 @@ final class HUDWindow {
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 2
         bg.addSubview(label)
+        // Hidden until a hotkey action shows it. Nothing is visible during model setup.
+        panel.orderOut(nil)
     }
 
     private var placed = false

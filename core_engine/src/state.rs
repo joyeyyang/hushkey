@@ -189,15 +189,52 @@ fn file_len(p: &Path) -> Result<u64> {
 /// one request, and exits, so its memory is returned to the OS. The parent never maps the
 /// LLM weights, which keeps this process's peak RSS to the ASR path alone.
 pub fn refine_text(text: &str) -> Result<String> {
+    let model = llm_model_path()?;
+    run_worker(&worker_path()?, "refine", &model, text, "")
+}
+
+fn llm_model_path() -> Result<PathBuf> {
     let dir = lock()
         .models_dir
         .clone()
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
     let model = dir.join("llm/qwen2.5-0.5b-instruct-q4_k_m.gguf");
     file_len(&model)?;
-    let worker = worker_path()?;
-    run_worker(&worker, &model, text)
+    Ok(model)
 }
+
+/// Structured meeting summary: 摘要 / 决策 / 待办.
+///
+/// Each section is a separate model call, so the program owns the layout and does not rely
+/// on the model following a format. Long transcripts are reduced by map-reduce:
+/// map over 600-char chunks (20-char overlap), then run each section over the joined notes.
+pub fn summarize_text(transcript: &str) -> Result<String> {
+    use crate::{SECTION_ACTIONS, SECTION_DECISIONS, SECTION_SUMMARY};
+    let model = llm_model_path()?;
+    let worker = worker_path()?;
+    let chunks = crate::chunking::split_text(transcript, SUMMARY_CHUNK_CHARS, SUMMARY_OVERLAP_CHARS);
+    if chunks.is_empty() {
+        return Err(EngineError::new(ErrorCode::InvalidArg, "transcript is empty"));
+    }
+    // Map: one short note per chunk, only when the transcript spans several chunks.
+    let source = if chunks.len() == 1 {
+        chunks[0].clone()
+    } else {
+        let mut notes = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            notes.push(run_worker(&worker, "summary", &model, chunk, SECTION_SUMMARY)?);
+        }
+        notes.join("\n")
+    };
+    let summary = run_worker(&worker, "summary", &model, &source, SECTION_SUMMARY)?;
+    let decisions = run_worker(&worker, "summary", &model, &source, SECTION_DECISIONS)?;
+    let actions = run_worker(&worker, "summary", &model, &source, SECTION_ACTIONS)?;
+    Ok(format!("## 摘要\n{}\n\n## 决策\n{}\n\n## 待办\n{}", summary.trim(), decisions.trim(), actions.trim()))
+}
+
+/// Map chunk size in characters and the overlap between adjacent chunks.
+const SUMMARY_CHUNK_CHARS: usize = 600;
+const SUMMARY_OVERLAP_CHARS: usize = 20;
 
 /// The worker is installed next to the core library (Contents/Frameworks in the app bundle),
 /// or next to the current executable for development runs.
@@ -222,12 +259,14 @@ fn worker_path() -> Result<PathBuf> {
     ))
 }
 
-fn run_worker(worker: &Path, model: &Path, text: &str) -> Result<String> {
+fn run_worker(worker: &Path, task: &str, model: &Path, text: &str, instruction: &str) -> Result<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
     let mut child = Command::new(worker)
+        .arg(task)
         .arg(model)
+        .arg(instruction)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
