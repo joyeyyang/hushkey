@@ -1,0 +1,433 @@
+import AppKit
+
+/// The app's main window: a single persistent control panel with three tabs
+/// (轉錄 / 關鍵字 / 設定). It stays open until the user closes it; closing it does
+/// not quit the app (the menu-bar icon reopens it).
+final class MainWindow: NSWindow {
+    private let keywords: Keywords
+
+    // Callbacks into AppController.
+    var onToggleDictation: (() -> Void)?
+    var onToggleMeeting: (() -> Void)?
+    var onOpenMeetingsFolder: (() -> Void)?
+    var onThemeChange: ((NSAppearance?) -> Void)?
+    var onHotkeyChange: ((String) -> Void)?
+    var onPolishChange: ((Bool) -> Void)?
+    var onConfirmChange: ((Bool) -> Void)?
+    var onQuit: (() -> Void)?
+
+    // 轉錄 tab
+    private let statusLabel = NSTextField(labelWithString: "模型：尚未載入")
+    private let permissionLabel = NSTextField(wrappingLabelWithString: "")
+    private let permissionButton = NSButton(title: "開啟「輔助使用」設定", target: nil, action: nil)
+    private let recheckButton = NSButton(title: "我已經開好了，重新檢查", target: nil, action: nil)
+
+    /// Called when the user asks the app to re-read the Accessibility state
+    /// (typically right after enabling it in System Settings).
+    var onRecheckPermission: (() -> Void)?
+    private let dictationButton = NSButton(title: "開始聽寫", target: nil, action: nil)
+    private let meetingButton = NSButton(title: "開始會議", target: nil, action: nil)
+    private let folderButton = NSButton(title: "開啟會議資料夾", target: nil, action: nil)
+    private let hintLabel = NSTextField(wrappingLabelWithString:
+        "按 Option+Space 開始／停止聽寫。停止後結果會出現在下方；按 Enter 貼到目前輸入框，按 Esc 取消。")
+    private let transcriptView = NSTextView()
+
+    // 關鍵字 tab
+    private let keywordField = NSTextField()
+    private let addKeywordButton = NSButton(title: "新增", target: nil, action: nil)
+    private let keywordTable = NSTableView()
+
+    // 設定 tab
+    private let themePopUp = NSPopUpButton()
+    private let hotkeyField = NSTextField()
+    private let polishCheckbox = NSButton(checkboxWithTitle: "用 AI 整理逐字稿（潤飾、去除口頭禪）", target: nil, action: nil)
+    private let confirmCheckbox = NSButton(checkboxWithTitle: "貼上前先顯示文字讓我確認（按 Enter 才貼）", target: nil, action: nil)
+    private let resetButton = NSButton(title: "重設為預設", target: nil, action: nil)
+    private let quitButton = NSButton(title: "結束 Offline Voice Assistant", target: nil, action: nil)
+    private let themeTitles = ["跟隨系統", "淺色", "深色"]
+    private let themeCodes = ["system", "light", "dark"]
+
+    init(keywords: Keywords) {
+        self.keywords = keywords
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        self.title = "Offline Voice Assistant"
+        self.isReleasedWhenClosed = false
+        self.minSize = NSSize(width: 440, height: 420)
+        buildUI()
+        syncSettings()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    // MARK: - Public API used by AppController
+
+    func updateState(dictating: Bool, meeting: Bool) {
+        dictationButton.title = dictating ? "停止聽寫" : "開始聽寫"
+        meetingButton.title = meeting ? "停止會議" : "開始會議"
+    }
+
+    func setStatus(_ text: String) {
+        statusLabel.stringValue = text
+    }
+
+    /// Shows or hides the Accessibility-permission banner. Without that
+    /// permission the app can only copy the text, not paste it.
+    func setAccessibilityGranted(_ granted: Bool) {
+        permissionLabel.stringValue = granted ? ""
+            : "⚠️ 系統回報尚未取得「輔助使用」權限，無法自動貼上（文字只會複製到剪貼簿）。請按下方按鈕開啟設定 →「隱私權與安全性 → 輔助使用」，確認清單中有 OfflineVoiceAssistant 而且開關是開啟的。若剛剛才開啟，請把 App 完全結束再重新打開。"
+        permissionLabel.isHidden = granted
+        permissionButton.isHidden = granted
+        recheckButton.isHidden = granted
+    }
+
+    func setTranscript(_ text: String) {
+        transcriptView.string = text
+        transcriptView.scrollToBeginningOfDocument(nil)
+    }
+
+    // MARK: - UI construction
+
+    private func buildUI() {
+        let tabView = NSTabView()
+        tabView.translatesAutoresizingMaskIntoConstraints = false
+        tabView.addTabViewItem(makeItem("轉錄", buildTranscribeTab()))
+        tabView.addTabViewItem(makeItem("關鍵字", buildKeywordsTab()))
+        tabView.addTabViewItem(makeItem("設定", buildSettingsTab()))
+        contentView!.addSubview(tabView)
+        NSLayoutConstraint.activate([
+            tabView.leadingAnchor.constraint(equalTo: contentView!.leadingAnchor, constant: 8),
+            tabView.trailingAnchor.constraint(equalTo: contentView!.trailingAnchor, constant: -8),
+            tabView.topAnchor.constraint(equalTo: contentView!.topAnchor, constant: 8),
+            tabView.bottomAnchor.constraint(equalTo: contentView!.bottomAnchor, constant: -8),
+        ])
+    }
+
+    private func makeItem(_ title: String, _ view: NSView) -> NSTabViewItem {
+        let item = NSTabViewItem(identifier: title)
+        item.label = title
+        item.view = view
+        return item
+    }
+
+    private func pin(_ stack: NSStackView, in view: NSView, pinBottom: Bool = true) {
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        var constraints = [
+            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: view.topAnchor),
+        ]
+        if pinBottom {
+            constraints.append(stack.bottomAnchor.constraint(equalTo: view.bottomAnchor))
+        }
+        NSLayoutConstraint.activate(constraints)
+    }
+
+    private func buildTranscribeTab() -> NSView {
+        let view = NSView()
+        statusLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        for (button, action) in [(dictationButton, #selector(didTapDictation)),
+                                 (meetingButton, #selector(didTapMeeting)),
+                                 (folderButton, #selector(didTapFolder))] {
+            button.bezelStyle = .rounded
+            button.target = self
+            button.action = action
+        }
+
+        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.textColor = .secondaryLabelColor
+
+        permissionLabel.font = .systemFont(ofSize: 11)
+        permissionLabel.textColor = .systemRed
+        permissionLabel.isHidden = true
+        permissionButton.bezelStyle = .rounded
+        permissionButton.target = self
+        permissionButton.action = #selector(didTapPermission)
+        permissionButton.isHidden = true
+        recheckButton.bezelStyle = .rounded
+        recheckButton.target = self
+        recheckButton.action = #selector(didTapRecheckPermission)
+        recheckButton.isHidden = true
+
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        transcriptView.isEditable = false
+        transcriptView.isSelectable = true
+        transcriptView.font = .systemFont(ofSize: 13)
+        transcriptView.textContainerInset = NSSize(width: 6, height: 6)
+        transcriptView.minSize = NSSize(width: 0, height: 0)
+        transcriptView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        transcriptView.isVerticallyResizable = true
+        transcriptView.isHorizontallyResizable = false
+        transcriptView.autoresizingMask = [.width]
+        transcriptView.textContainer?.widthTracksTextView = true
+        transcriptView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        transcriptView.frame = NSRect(origin: .zero, size: scroll.contentSize)
+        scroll.documentView = transcriptView
+
+        let stack = NSStackView(views: [statusLabel, permissionLabel,
+                                        permissionButton, recheckButton,
+                                        dictationButton, meetingButton, folderButton, hintLabel, scroll])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+
+        // The form can be taller than the window -- the permission banner adds a
+        // label and two buttons. Scroll it rather than letting AppKit clip the
+        // bottom (which is what happened before), and let it stretch to fill the
+        // window when there is room to spare.
+        let formScroll = NSScrollView()
+        formScroll.translatesAutoresizingMaskIntoConstraints = false
+        formScroll.hasVerticalScroller = true
+        formScroll.autohidesScrollers = true
+        formScroll.drawsBackground = false
+        let document = NSView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        formScroll.documentView = document
+        view.addSubview(formScroll)
+        NSLayoutConstraint.activate([
+            formScroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            formScroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            formScroll.topAnchor.constraint(equalTo: view.topAnchor),
+            formScroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            document.leadingAnchor.constraint(equalTo: formScroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: formScroll.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: formScroll.contentView.topAnchor),
+            document.widthAnchor.constraint(equalTo: formScroll.contentView.widthAnchor),
+            document.heightAnchor.constraint(greaterThanOrEqualTo: formScroll.contentView.heightAnchor),
+        ])
+        pin(stack, in: document)
+
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
+        for full in [statusLabel, permissionLabel, hintLabel, scroll] {
+            full.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
+        }
+        return view
+    }
+
+    private func buildKeywordsTab() -> NSView {
+        let view = NSView()
+        let info = NSTextField(wrappingLabelWithString:
+            "關鍵字（人名、專案代號等）會提示 AI 別寫錯。輸入後按 Enter 或「新增」；在清單上雙擊可刪除。")
+        info.font = .systemFont(ofSize: 11)
+        info.textColor = .secondaryLabelColor
+
+        keywordField.placeholderString = "例如：李明宏、OVC 專案"
+        keywordField.delegate = self
+        addKeywordButton.bezelStyle = .rounded
+        addKeywordButton.target = self
+        addKeywordButton.action = #selector(didTapAddKeyword)
+        let row = NSStackView(views: [keywordField, addKeywordButton])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        keywordField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+
+        keywordTable.headerView = nil
+        keywordTable.rowHeight = 24
+        keywordTable.delegate = self
+        keywordTable.dataSource = self
+        keywordTable.target = self
+        keywordTable.doubleAction = #selector(didTapDeleteKeyword)
+        keywordTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("keyword"))
+        keywordTable.addTableColumn(column)
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.documentView = keywordTable
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        keywordTable.frame = NSRect(origin: .zero, size: scroll.contentSize)
+        keywordTable.autoresizingMask = [.width]
+        keywordTable.sizeLastColumnToFit()
+
+        let stack = NSStackView(views: [info, row, scroll])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        pin(stack, in: view)
+
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+        for full in [info, row, scroll] {
+            full.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
+        }
+        return view
+    }
+
+    private func buildSettingsTab() -> NSView {
+        let view = NSView()
+        let themeLabel = NSTextField(labelWithString: "外觀主題")
+        themeLabel.font = .systemFont(ofSize: 13)
+        themeLabel.textColor = .secondaryLabelColor
+        themePopUp.addItems(withTitles: themeTitles)
+        themePopUp.selectItem(at: 0)
+        themePopUp.target = self
+        themePopUp.action = #selector(didChangeTheme)
+
+        let hotkeyLabel = NSTextField(labelWithString: "啟用熱鍵")
+        hotkeyLabel.font = .systemFont(ofSize: 13)
+        hotkeyLabel.textColor = .secondaryLabelColor
+        hotkeyField.placeholderString = "例如：Option+Space"
+        hotkeyField.delegate = self
+        hotkeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+
+        let help = NSTextField(wrappingLabelWithString:
+            "熱鍵格式：修飾鍵 + 按鍵，例如 Option+Space、Control+Shift+R。\n"
+            + "淺色模式為米色底 (#F5F0E6)，深色模式為黑底，跟隨系統則依 macOS 設定。\n"
+            + "若 AI 整理結果不理想，可關閉「用 AI 整理逐字稿」，直接使用語音辨識原始結果。")
+        help.font = .systemFont(ofSize: 11)
+        help.textColor = .tertiaryLabelColor
+
+        polishCheckbox.target = self
+        polishCheckbox.action = #selector(didTogglePolish)
+
+        confirmCheckbox.target = self
+        confirmCheckbox.action = #selector(didToggleConfirm)
+
+        resetButton.bezelStyle = .rounded
+        resetButton.target = self
+        resetButton.action = #selector(didTapReset)
+
+        quitButton.bezelStyle = .rounded
+        quitButton.target = self
+        quitButton.action = #selector(didTapQuit)
+
+        let stack = NSStackView(views: [themeLabel, themePopUp, hotkeyLabel, hotkeyField, help,
+                                        polishCheckbox, confirmCheckbox, resetButton, quitButton])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        pin(stack, in: view, pinBottom: false)
+        for full in [themePopUp, hotkeyField, help] {
+            full.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
+        }
+        return view
+    }
+
+    // MARK: - Settings state
+
+    private var selectedTheme: String {
+        get {
+            let i = themePopUp.indexOfSelectedItem
+            return (i >= 0 && i < themeCodes.count) ? themeCodes[i] : "system"
+        }
+        set { if let i = themeCodes.firstIndex(of: newValue) { themePopUp.selectItem(at: i) } }
+    }
+
+    private func syncSettings() {
+        let defaults = UserDefaults.standard
+        selectedTheme = defaults.string(forKey: "settings.theme") ?? "system"
+        hotkeyField.stringValue = defaults.string(forKey: "settings.hotkey") ?? "Option+Space"
+        polishCheckbox.state = (defaults.object(forKey: "settings.polish") as? Bool ?? true) ? .on : .off
+        confirmCheckbox.state = (defaults.object(forKey: "settings.confirmInsert") as? Bool ?? false) ? .on : .off
+        keywordTable.reloadData()
+    }
+
+    private func saveSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(selectedTheme, forKey: "settings.theme")
+        defaults.set(hotkeyField.stringValue, forKey: "settings.hotkey")
+    }
+
+    // MARK: - Actions
+
+    @objc private func didTapDictation() { onToggleDictation?() }
+    @objc private func didTapMeeting() { onToggleMeeting?() }
+    @objc private func didTapFolder() { onOpenMeetingsFolder?() }
+
+    @objc private func didTapPermission() { TextInjector.requestAccessibility() }
+    @objc private func didTapRecheckPermission() { onRecheckPermission?() }
+
+    @objc private func didTapAddKeyword() {
+        let trimmed = keywordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        keywords.add(trimmed)
+        keywordField.stringValue = ""
+        keywordTable.reloadData()
+    }
+
+    @objc private func didTapDeleteKeyword() {
+        let row = keywordTable.clickedRow
+        guard row >= 0 && row < keywords.all.count else { return }
+        keywords.remove(keywords.all[row])
+        keywordTable.reloadData()
+    }
+
+    @objc private func didTogglePolish() {
+        onPolishChange?(polishCheckbox.state == .on)
+    }
+
+    @objc private func didToggleConfirm() {
+        onConfirmChange?(confirmCheckbox.state == .on)
+    }
+
+    @objc private func didTapQuit() {
+        onQuit?()
+    }
+
+    @objc private func didChangeTheme() {
+        saveSettings()
+        switch selectedTheme {
+        case "light": onThemeChange?(NSAppearance(named: .aqua))
+        case "dark": onThemeChange?(NSAppearance(named: .darkAqua))
+        default: onThemeChange?(nil)  // follow the system appearance
+        }
+    }
+
+    @objc private func didTapReset() {
+        selectedTheme = "system"
+        hotkeyField.stringValue = "Option+Space"
+        polishCheckbox.state = .on
+        confirmCheckbox.state = .off
+        saveSettings()
+        didChangeTheme()
+        onHotkeyChange?(hotkeyField.stringValue)
+        didTogglePolish()
+        didToggleConfirm()
+    }
+}
+
+// MARK: - NSTextFieldDelegate
+
+extension MainWindow: NSTextFieldDelegate {
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        if field === keywordField {
+            didTapAddKeyword()
+        } else if field === hotkeyField {
+            let value = hotkeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return }
+            hotkeyField.stringValue = value
+            saveSettings()
+            onHotkeyChange?(value)
+        }
+    }
+}
+
+// MARK: - Keyword table
+
+extension MainWindow: NSTableViewDataSource, NSTableViewDelegate {
+    func numberOfRows(in tableView: NSTableView) -> Int { keywords.all.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let cell = NSTextField(labelWithString: keywords.all[row])
+        cell.isBezeled = false
+        cell.drawsBackground = false
+        cell.isEditable = false
+        cell.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        cell.alignment = .left
+        cell.textColor = .labelColor
+        return cell
+    }
+}

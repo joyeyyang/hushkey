@@ -6,6 +6,9 @@ import ApplicationServices
 /// Fallback: leave text on the pasteboard and report `.copiedOnly` so the user can paste manually.
 enum InjectionResult {
     case pasted
+    /// Accessibility is not granted, so the text was only copied. Distinct from
+    /// `.copiedOnly` so the caller can surface the fix instead of a bare note.
+    case needsPermission(reason: String)
     case copiedOnly(reason: String)
 }
 
@@ -25,7 +28,8 @@ enum TextInjector {
         pb.setString(text, forType: .string)
 
         guard hasAccessibility else {
-            return .copiedOnly(reason: "Accessibility permission not granted; text copied to clipboard")
+            requestAccessibility()
+            return .needsPermission(reason: "未取得輔助使用權限，無法自動貼上（文字已複製）。請到「系統設定 → 隱私權與安全性 → 輔助使用」開啟 OfflineVoiceAssistant，再重新試一次")
         }
         guard postCommandV() else {
             return .copiedOnly(reason: "could not create CGEvent; text copied to clipboard")

@@ -6,9 +6,22 @@ final class AudioCapture {
     private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
     private var converter: AVAudioConverter?
     private let onSamples: ([Float]) -> Void
+    private let onLevel: ((Float) -> Void)?
 
-    init(onSamples: @escaping ([Float]) -> Void) {
+    init(onSamples: @escaping ([Float]) -> Void, onLevel: ((Float) -> Void)? = nil) {
         self.onSamples = onSamples
+        self.onLevel = onLevel
+    }
+
+    /// Rough loudness for the level meter: RMS in dB mapped onto 0…1 over the
+    /// -55…0 dBFS range, which covers speech without pinning the meter.
+    static func level(of samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sum: Float = 0
+        for s in samples { sum += s * s }
+        let rms = (sum / Float(samples.count)).squareRoot()
+        let db = 20 * log10(max(rms, 1e-7))
+        return max(0, min(1, (db + 55) / 55))
     }
 
     static func microphoneAuthorized() -> Bool {
@@ -50,6 +63,7 @@ final class AudioCapture {
         }
         guard err == nil, let ch = out.floatChannelData, out.frameLength > 0 else { return }
         let samples = Array(UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
+        onLevel?(Self.level(of: samples))
         onSamples(samples)
     }
 }

@@ -4,13 +4,14 @@
   "language_note": "Taiwanese Hokkien (台語) is NOT supported by the chosen ASR model (SenseVoice official languages: zh, en, ja, ko, yue). Accepted by the project owner as unsupported.",
   "models": [
     {
-      "id": "asr-sensevoice-small-int8",
+      "id": "asr-sensevoice-small-fp32",
       "role": "ASR",
       "source_repo": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
-      "source_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx",
-      "file": "asr/model.int8.onnx",
-      "bytes": 239233841,
-      "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+      "source_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.onnx",
+      "file": "asr/model.onnx",
+      "bytes": 937617178,
+      "sha256": "977016bd9c79f9eb343430b5cc305e07ab64d5212dff41b0dcfa1694bee9a8cb",
+      "note": "Full-precision SenseVoice (upgraded from the int8 build). On identical test audio the transcript matched int8; kept for slightly better robustness on noisy/difficult audio. The loader prefers this file and falls back to model.int8.onnx when absent.",
       "license": "MIT (FunASR; upstream references https://github.com/modelscope/FunASR)",
       "languages_official": [
         "zh",
@@ -34,15 +35,15 @@
       "download": true
     },
     {
-      "id": "llm-qwen2.5-0.5b-instruct-q4_k_m",
+      "id": "llm-qwen2.5-1.5b-instruct-q4_k_m",
       "role": "LLM",
-      "source_repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-      "source_url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-      "file": "llm/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-      "bytes": 491400032,
-      "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+      "source_repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+      "source_url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "file": "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "bytes": 1117320736,
+      "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
       "license": "Apache-2.0",
-      "note": "GGUF Q4_K_M (not strictly INT4).",
+      "note": "GGUF Q4_K_M (not strictly INT4). Bigger than the earlier 0.5B; produces clearer, easy-to-read bullet points.",
       "download": true
     },
     {

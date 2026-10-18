@@ -48,7 +48,33 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN" 2>/dev/null
 otool -L "$BIN" | grep -q "@rpath/liboffline_voice_core.dylib" || { echo "relink failed" >&2; exit 1; }
 install_name_tool -add_rpath "@loader_path" "$CORE" 2>/dev/null || true
 
-echo "== codesign (ad-hoc; Developer ID signing and notarization are NOT performed here)"
-codesign --force --deep --sign - --entitlements "$ROOT/macos_app/Resources/OfflineVoiceAssistant.entitlements" "$APP"
+# Sign with a stable identity whenever the machine has one. macOS keys the
+# Accessibility and Microphone grants to the app's signing identity, so an
+# ad-hoc signature -- whose cdhash changes on every rebuild -- silently loses
+# the grant: System Settings still shows the switch ON while the running build
+# reports "no permission". A real certificate keeps the grant across rebuilds.
+# Apple Development is preferred because it also satisfies Gatekeeper locally.
+# Override with OVC_SIGN_IDENTITY, or force ad-hoc with OVC_SIGN_IDENTITY=-.
+SIGN_ID="${OVC_SIGN_IDENTITY:-}"
+if [ -z "$SIGN_ID" ]; then
+  SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)
+fi
+if [ -z "$SIGN_ID" ]; then
+  SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n 's/.*"\([^"]*\)".*/\1/p' | head -1)
+fi
+
+if [ -n "$SIGN_ID" ] && [ "$SIGN_ID" != "-" ]; then
+  echo "== codesign with identity: $SIGN_ID"
+  codesign --force --deep --sign "$SIGN_ID" \
+    --entitlements "$ROOT/macos_app/Resources/OfflineVoiceAssistant.entitlements" "$APP"
+else
+  echo "== codesign (ad-hoc: no signing identity found, so the Accessibility"
+  echo "   grant will have to be re-enabled after every rebuild)"
+  codesign --force --deep --sign - \
+    --entitlements "$ROOT/macos_app/Resources/OfflineVoiceAssistant.entitlements" "$APP"
+fi
 codesign --verify --deep --strict "$APP" && echo "codesign verify: ok"
+codesign -dv "$APP" 2>&1 | grep -E "^Authority=|^Identifier=" | head -2
 echo "built: $APP"

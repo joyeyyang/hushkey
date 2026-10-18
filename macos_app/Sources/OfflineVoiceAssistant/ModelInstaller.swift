@@ -39,7 +39,37 @@ enum ModelInstaller {
     }
 
     static func log(_ s: String) {
-        FileHandle.standardError.write(Data((s + "\n").utf8))
+        let line = "\(Self.timestamp()) \(s)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+        appendToFile(line)
+    }
+
+    private static func timestamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: Date())
+    }
+
+    /// Appends to a small log under Application Support so the app can be
+    /// diagnosed when it is launched from Finder (where stderr goes nowhere).
+    static let logFileURL: URL? = {
+        guard let base = try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true) else { return nil }
+        let dir = base.appendingPathComponent("OfflineVoiceAssistant", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("ova.log")
+    }()
+
+    private static func appendToFile(_ line: String) {
+        guard let url = logFileURL else { return }
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        guard let fh = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? fh.close() }
+        if let end = try? fh.seekToEnd() { _ = end }
+        try? fh.write(contentsOf: Data(line.utf8))
     }
 
     static func items() throws -> [Item] {

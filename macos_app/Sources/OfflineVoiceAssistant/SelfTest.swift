@@ -1,10 +1,20 @@
 import Foundation
 
 /// Test-only input source. When OVC_SELFTEST_WAV is set, the app feeds a WAV file through the
-/// same ASR -> polish -> deliver path as the hotkey flow, instead of the microphone.
+/// same ASR path the microphone uses, instead of the microphone. It stops at the
+/// transcript (no LLM polish, no paste) so it can run headless and exit with a status.
 /// Supported input: 16 kHz, mono, 16-bit PCM. Anything else is rejected, not converted.
 enum SelfTest {
     static var wavPath: String? { ProcessInfo.processInfo.environment["OVC_SELFTEST_WAV"] }
+
+    /// With OVC_SELFTEST_POLISH set, a WAV run continues past ASR into refine and
+    /// paste (the whole pipeline) and exits when the text has been delivered,
+    /// instead of stopping at the transcript.
+    static var runsFullPipeline: Bool { ProcessInfo.processInfo.environment["OVC_SELFTEST_POLISH"] != nil }
+
+    /// Set once a full-pipeline run has delivered its text, so the app exits
+    /// cleanly rather than sitting in the menu bar.
+    static var exitsWhenDone = false
 
     enum WavError: Error, CustomStringConvertible {
         case notRiffWave

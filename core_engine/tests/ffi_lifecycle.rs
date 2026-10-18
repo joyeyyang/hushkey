@@ -10,7 +10,6 @@ use offline_voice_core::*;
 const OK: i32 = 0;
 const ERR_INVALID_ARG: i32 = 1;
 const ERR_NOT_LOADED: i32 = 2;
-const ERR_NOT_IMPLEMENTED: i32 = 3;
 const ERR_INVALID_STATE: i32 = 6;
 
 fn last_error() -> String {

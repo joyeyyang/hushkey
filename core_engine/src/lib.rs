@@ -18,7 +18,11 @@ use std::path::PathBuf;
 use error::{clear_last_error, last_error, set_last_error, EngineError, ErrorCode};
 pub use memory::OvcMemoryUsage;
 
-pub use llm::{refine as llm_refine, summarize_one as llm_summarize_one, SECTION_ACTIONS, SECTION_DECISIONS, SECTION_SUMMARY};
+pub use llm::{
+    refine as llm_refine, refine_stages as llm_refine_stages, refine_two_stage as llm_refine_two_stage,
+    refine_with_keywords as llm_refine_with_keywords,
+    summarize_one as llm_summarize_one, SECTION_ACTIONS, SECTION_DECISIONS, SECTION_SUMMARY,
+};
 
 type Result<T, E = EngineError> = std::result::Result<T, E>;
 
@@ -179,6 +183,16 @@ pub unsafe extern "C" fn ASR_GetResult(out: *mut *mut c_char) -> c_int {
 /// # Safety
 /// `out` must be a valid pointer to writable storage for one `char*`.
 #[no_mangle]
+pub unsafe extern "C" fn ASR_Peek(out: *mut *mut c_char) -> c_int {
+    status((|| {
+        let text = state::asr_peek()?;
+        write_out(out, &text)
+    })())
+}
+
+/// # Safety
+/// `out` must be a valid pointer to writable storage for one `char*`.
+#[no_mangle]
 pub unsafe extern "C" fn ASR_Stop(out: *mut *mut c_char) -> c_int {
     status((|| {
         let text = state::asr_stop()?;
@@ -186,7 +200,7 @@ pub unsafe extern "C" fn ASR_Stop(out: *mut *mut c_char) -> c_int {
     })())
 }
 
-// ---- LLM / RAG (not yet implemented; return explicit NotImplemented) ---------
+// ---- LLM (out-of-process worker) --------------------------------------------
 
 /// # Safety
 /// Pointers must follow the header contract.
@@ -200,12 +214,42 @@ pub unsafe extern "C" fn LLM_Summarize(transcript: *const c_char, out: *mut *mut
 }
 
 /// # Safety
-/// Pointers must follow the header contract. Currently always returns NotImplemented.
+/// Pointers must follow the header contract.
 #[no_mangle]
 pub unsafe extern "C" fn LLM_RefineText(text: *const c_char, out: *mut *mut c_char) -> c_int {
     status((|| {
         let input = read_str(text, "text")?;
         let refined = state::refine_text(input)?;
+        write_out(out, &refined)
+    })())}
+
+#[no_mangle]
+pub unsafe extern "C" fn LLM_RefineTextWithKeywords(text: *const c_char, keywords_hint: *const c_char, out: *mut *mut c_char) -> c_int {
+    status((|| {
+        let input = read_str(text, "text")?;
+        let hint = if keywords_hint.is_null() { String::new() } else { read_str(keywords_hint, "keywords_hint")?.to_owned() };
+        let refined = state::refine_text_with_keywords(input, &hint)?;
+        write_out(out, &refined)
+    })())
+}
+
+/// Like `LLM_RefineTextWithKeywords`, but the caller chooses how many model
+/// passes to run: 0 = decide by transcript length, 1 = single condense pass,
+/// 2 = understand the speech first, then condense it.
+///
+/// # Safety
+/// Pointers must follow the header contract.
+#[no_mangle]
+pub unsafe extern "C" fn LLM_RefineTextWithKeywordsStages(
+    text: *const c_char,
+    keywords_hint: *const c_char,
+    stages: u32,
+    out: *mut *mut c_char,
+) -> c_int {
+    status((|| {
+        let input = read_str(text, "text")?;
+        let hint = if keywords_hint.is_null() { String::new() } else { read_str(keywords_hint, "keywords_hint")?.to_owned() };
+        let refined = state::refine_text_with_keywords_stages(input, &hint, stages)?;
         write_out(out, &refined)
     })())
 }

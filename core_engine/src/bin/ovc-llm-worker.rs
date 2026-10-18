@@ -24,7 +24,8 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     let result = match task {
-        "refine" => offline_voice_core::llm_refine(&model, input.trim()),
+        "refine" => offline_voice_core::llm_refine_with_keywords(&model, input.trim(), &instruction),
+        "refine-two-stage" => offline_voice_core::llm_refine_two_stage(&model, input.trim(), &instruction),
         "summary" => offline_voice_core::llm_summarize_one(&model, &instruction, input.trim()),
         other => {
             eprintln!("unknown task: {other}");

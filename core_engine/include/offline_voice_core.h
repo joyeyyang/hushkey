@@ -60,9 +60,11 @@ int32_t ASR_GetResult(char **out_text);
 /* Decodes remaining audio, ends the session, returns the full transcript. */
 int32_t ASR_Stop(char **out_text);
 
-/* ---- LLM / RAG: declared for the planned API; currently OVC_ERR_NOT_IMPLEMENTED ---- */
+/* ---- LLM: implemented via an out-of-process worker (see state.rs).
+ *      RAG: declared for the planned API; currently returns OVC_ERR_NOT_IMPLEMENTED. ---- */
 int32_t LLM_Summarize(const char *transcript, char **out_summary);
 int32_t LLM_RefineText(const char *text, char **out_text);
+int32_t LLM_RefineTextWithKeywords(const char *text, const char *keywords_hint, char **out_text);
 int32_t RAG_Search(const char *query, char **out_results_json);
 int32_t RAG_AddEntry(const char *entry_json);
 

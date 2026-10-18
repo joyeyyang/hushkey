@@ -68,7 +68,10 @@ pub fn load_asr() -> Result<()> {
         .models_dir
         .clone()
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
-    let model = dir.join("asr/model.int8.onnx");
+    // Prefer the full-precision (fp32) model when present; fall back to the
+    // int8 one so an older install keeps working.
+    let full = dir.join("asr/model.onnx");
+    let model = if full.exists() { full } else { dir.join("asr/model.int8.onnx") };
     let tokens = dir.join("asr/tokens.txt");
     let bytes = file_len(&model)? + file_len(&tokens)?;
     let threads = std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(2) as i32;
@@ -155,6 +158,28 @@ pub fn asr_result() -> Result<String> {
     Ok(sess.transcript.clone())
 }
 
+/// Live preview: decode whatever is still buffered and return the transcript as
+/// it would read right now, WITHOUT consuming the buffer or ending the session.
+///
+/// `asr_result` only moves once a whole 5-minute segment is committed, which
+/// never happens during a normal dictation -- so the HUD's live character count
+/// needs this instead. Re-decoding the same buffer is safe (the recogniser is
+/// stateless per call), but the cost grows with the audio held, so callers poll
+/// it slowly and stop once a recording gets long.
+pub fn asr_peek() -> Result<String> {
+    let mut guard = lock();
+    let State { asr, session, .. } = &mut *guard;
+    let rec = asr
+        .as_mut()
+        .ok_or_else(|| EngineError::new(ErrorCode::NotLoaded, "ASR model not loaded"))?;
+    let sess = active_session(session)?;
+    let mut full = sess.transcript.clone();
+    if !sess.buffer.is_empty() {
+        full.push_str(&rec.decode(&sess.buffer, SAMPLE_RATE)?);
+    }
+    Ok(full)
+}
+
 /// Decode remaining buffered audio, end the session, and return the full transcript.
 pub fn asr_stop() -> Result<String> {
     let mut guard = lock();
@@ -189,8 +214,38 @@ fn file_len(p: &Path) -> Result<u64> {
 /// one request, and exits, so its memory is returned to the OS. The parent never maps the
 /// LLM weights, which keeps this process's peak RSS to the ASR path alone.
 pub fn refine_text(text: &str) -> Result<String> {
+    refine_text_with_keywords(text, "")
+}
+
+pub fn refine_text_with_keywords(text: &str, keywords_hint: &str) -> Result<String> {
+    refine_text_with_keywords_stages(text, keywords_hint, 0)
+}
+
+/// Refine a transcript, choosing how many model passes to run.
+///
+/// The two-stage path (understand, then tidy) was tried and measured against the
+/// single pass on the same drafts: it kept one long rambling paragraph more
+/// completely, but it cost a second generation and introduced errors the single
+/// pass did not make -- a three-point dictation came back as "改議會" (garbled
+/// from "會議改到"), and a polite request became "我以為可能是..." (a statement,
+/// not a request). The single pass with worked examples is both more faithful
+/// and faster, so it is the default.
+///
+/// `stages` is 0 for the default, 1 for a single tidy pass, 2 for
+/// understand-then-tidy. `OVC_REFINE_STAGES` (1 or 2) overrides the choice so
+/// both shapes can be compared on the same input.
+pub fn refine_text_with_keywords_stages(text: &str, keywords_hint: &str, stages: u32) -> Result<String> {
+    let _ = text;
     let model = llm_model_path()?;
-    run_worker(&worker_path()?, "refine", &model, text, "")
+    let stages = match std::env::var("OVC_REFINE_STAGES").ok().and_then(|v| v.trim().parse::<u32>().ok()) {
+        Some(forced @ (1 | 2)) => forced,
+        _ => stages,
+    };
+    let task = match stages {
+        2 => "refine-two-stage",
+        _ => "refine",
+    };
+    run_worker(&worker_path()?, task, &model, text, keywords_hint)
 }
 
 fn llm_model_path() -> Result<PathBuf> {
@@ -198,12 +253,12 @@ fn llm_model_path() -> Result<PathBuf> {
         .models_dir
         .clone()
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
-    let model = dir.join("llm/qwen2.5-0.5b-instruct-q4_k_m.gguf");
+    let model = dir.join("llm/qwen2.5-1.5b-instruct-q4_k_m.gguf");
     file_len(&model)?;
     Ok(model)
 }
 
-/// Structured meeting summary: 摘要 / 决策 / 待办.
+/// Structured meeting summary: 摘要 / 決策 / 待辦.
 ///
 /// Each section is a separate model call, so the program owns the layout and does not rely
 /// on the model following a format. Long transcripts are reduced by map-reduce:
@@ -229,7 +284,7 @@ pub fn summarize_text(transcript: &str) -> Result<String> {
     let summary = run_worker(&worker, "summary", &model, &source, SECTION_SUMMARY)?;
     let decisions = run_worker(&worker, "summary", &model, &source, SECTION_DECISIONS)?;
     let actions = run_worker(&worker, "summary", &model, &source, SECTION_ACTIONS)?;
-    Ok(format!("## 摘要\n{}\n\n## 决策\n{}\n\n## 待办\n{}", summary.trim(), decisions.trim(), actions.trim()))
+    Ok(format!("## 摘要\n{}\n\n## 決策\n{}\n\n## 待辦\n{}", summary.trim(), decisions.trim(), actions.trim()))
 }
 
 /// Map chunk size in characters and the overlap between adjacent chunks.
