@@ -2,16 +2,17 @@
   "schema_version": 1,
   "budget_note": "Models are downloaded on first launch, not bundled. App bundle target <= 700 MB.",
   "language_note": "Taiwanese Hokkien (台語) is NOT supported by the chosen ASR model (SenseVoice official languages: zh, en, ja, ko, yue). Accepted by the project owner as unsupported.",
+  "selection_note": "Entries with download:true are fetched on first launch. The rest are offered by the model manager, which writes the chosen LLM filename to UserDefaults and exports it as OVC_LLM_MODEL for the engine.",
   "models": [
     {
-      "id": "asr-sensevoice-small-fp32",
+      "id": "asr-sensevoice-small-int8",
       "role": "ASR",
       "source_repo": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
-      "source_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.onnx",
-      "file": "asr/model.onnx",
-      "bytes": 937617178,
-      "sha256": "977016bd9c79f9eb343430b5cc305e07ab64d5212dff41b0dcfa1694bee9a8cb",
-      "note": "Full-precision SenseVoice (upgraded from the int8 build). On identical test audio the transcript matched int8; kept for slightly better robustness on noisy/difficult audio. The loader prefers this file and falls back to model.int8.onnx when absent.",
+      "source_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx",
+      "file": "asr/model.int8.onnx",
+      "bytes": 239233841,
+      "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+      "note": "Default ASR. On identical test audio the transcript matched the full-precision model, and it is 698 MB smaller, which matters on an 8 GB machine.",
       "license": "MIT (FunASR; upstream references https://github.com/modelscope/FunASR)",
       "languages_official": [
         "zh",
@@ -35,7 +36,76 @@
       "download": true
     },
     {
-      "id": "llm-qwen2.5-1.5b-instruct-q4_k_m",
+      "id": "asr-sensevoice-small-fp32",
+      "role": "ASR",
+      "source_repo": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+      "source_url": "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.onnx",
+      "file": "asr/model.onnx",
+      "bytes": 937617178,
+      "sha256": "977016bd9c79f9eb343430b5cc305e07ab64d5212dff41b0dcfa1694bee9a8cb",
+      "note": "Full-precision fallback, still loaded when model.int8.onnx is absent. Not downloaded by default any more.",
+      "license": "MIT (FunASR; upstream references https://github.com/modelscope/FunASR)",
+      "languages_official": [
+        "zh",
+        "en",
+        "ja",
+        "ko",
+        "yue"
+      ],
+      "taiwanese_hokkien_supported": false,
+      "download": false
+    },
+    {
+      "id": "llm-qwen3.5-2b-q4-k-m",
+      "role": "LLM",
+      "source_repo": "unsloth/Qwen3.5-2B-GGUF",
+      "source_url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+      "file": "llm/Qwen3.5-2B-Q4_K_M.gguf",
+      "bytes": 1280835840,
+      "sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+      "license": "Apache-2.0",
+      "default": true,
+      "note": "Default LLM. ChatML like Qwen2.5, but its chat template opens a reasoning block: generation must be prefilled with a closed, empty think block or the model streams its reasoning into the answer (handled in llm.rs from the GGUF chat template).",
+      "download": true
+    },
+    {
+      "id": "llm-qwen3.5-2b-q5-k-m",
+      "role": "LLM",
+      "source_repo": "unsloth/Qwen3.5-2B-GGUF",
+      "source_url": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q5_K_M.gguf",
+      "file": "llm/Qwen3.5-2B-Q5_K_M.gguf",
+      "bytes": 1435238656,
+      "sha256": "1885b3a9195f8cc09da9a7a7a75afdc1e8d5cbf9fc4a499c3961dddea37098ac",
+      "license": "Apache-2.0",
+      "note": "Same model at higher precision: ~155 MB more for a little more robustness.",
+      "download": false
+    },
+    {
+      "id": "llm-qwen3.5-0.8b-q4-k-m",
+      "role": "LLM",
+      "source_repo": "unsloth/Qwen3.5-0.8B-GGUF",
+      "source_url": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf",
+      "file": "llm/Qwen3.5-0.8B-Q4_K_M.gguf",
+      "bytes": 532517120,
+      "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+      "license": "Apache-2.0",
+      "note": "Fastest option, roughly half the size. Expect weaker cleanup on long or messy speech.",
+      "download": false
+    },
+    {
+      "id": "llm-qwen3.5-4b-q4-k-m",
+      "role": "LLM",
+      "source_repo": "unsloth/Qwen3.5-4B-GGUF",
+      "source_url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
+      "file": "llm/Qwen3.5-4B-Q4_K_M.gguf",
+      "bytes": 2740937888,
+      "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+      "license": "Apache-2.0",
+      "note": "Quality option. Its peak footprint is about 3 GB, which does not fit comfortably next to the ASR model on an 8 GB machine; not recommended there.",
+      "download": false
+    },
+    {
+      "id": "llm-qwen2.5-1.5b-instruct-q4-k-m",
       "role": "LLM",
       "source_repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
       "source_url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
@@ -43,8 +113,8 @@
       "bytes": 1117320736,
       "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
       "license": "Apache-2.0",
-      "note": "GGUF Q4_K_M (not strictly INT4). Bigger than the earlier 0.5B; produces clearer, easy-to-read bullet points.",
-      "download": true
+      "note": "Legacy default, kept as the engine's fallback when the selected model is missing.",
+      "download": false
     },
     {
       "id": "rag-embeddinggemma-300m",

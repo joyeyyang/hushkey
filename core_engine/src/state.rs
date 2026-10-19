@@ -68,10 +68,12 @@ pub fn load_asr() -> Result<()> {
         .models_dir
         .clone()
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
-    // Prefer the full-precision (fp32) model when present; fall back to the
-    // int8 one so an older install keeps working.
-    let full = dir.join("asr/model.onnx");
-    let model = if full.exists() { full } else { dir.join("asr/model.int8.onnx") };
+    // Prefer the int8 build. On identical test audio its transcript matched the
+    // full-precision model exactly, and it saves ~666 MB of resident memory --
+    // which matters on an 8 GB machine that also runs the LLM worker. The fp32
+    // file stays as a fallback for installs that predate this choice.
+    let int8 = dir.join("asr/model.int8.onnx");
+    let model = if int8.exists() { int8 } else { dir.join("asr/model.onnx") };
     let tokens = dir.join("asr/tokens.txt");
     let bytes = file_len(&model)? + file_len(&tokens)?;
     let threads = std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(2) as i32;
@@ -248,12 +250,34 @@ pub fn refine_text_with_keywords_stages(text: &str, keywords_hint: &str, stages:
     run_worker(&worker_path()?, task, &model, text, keywords_hint)
 }
 
+/// Filename of the LLM inside `llm/`. `OVC_LLM_MODEL` overrides it so another
+/// model can be selected at runtime (the model manager sets it from the user's
+/// choice); the constant is the default the manifest ships.
+const DEFAULT_LLM_FILE: &str = "Qwen3.5-2B-Q4_K_M.gguf";
+/// Previous default, kept so an install that has not downloaded the new one yet
+/// still has a working model.
+const LEGACY_LLM_FILE: &str = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+
 fn llm_model_path() -> Result<PathBuf> {
     let dir = lock()
         .models_dir
         .clone()
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
-    let model = dir.join("llm/qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    let chosen = std::env::var("OVC_LLM_MODEL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && !v.contains('/') && !v.contains(".."))
+        .unwrap_or_else(|| DEFAULT_LLM_FILE.to_string());
+    let model = dir.join("llm").join(&chosen);
+    if model.exists() {
+        file_len(&model)?;
+        return Ok(model);
+    }
+    let legacy = dir.join("llm").join(LEGACY_LLM_FILE);
+    if legacy.exists() {
+        file_len(&legacy)?;
+        return Ok(legacy);
+    }
     file_len(&model)?;
     Ok(model)
 }

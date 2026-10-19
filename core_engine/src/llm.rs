@@ -401,6 +401,47 @@ pub fn generate_with(model_path: &Path, prompt: &str, max_new_tokens: usize) -> 
     generate_in(&model, prompt, max_new_tokens)
 }
 
+/// The assistant turn we end every prompt with.
+const ASSISTANT_TURN: &str = "<|im_start|>assistant\n";
+/// An empty reasoning block, already closed. Generation continues after it.
+const EMPTY_THINK_BLOCK: &str = " thinking\n\n</thinking>\n\n";
+
+/// Qwen3/Qwen3.5 chat templates open a reasoning block. We build prompts by
+/// hand rather than applying the template, so nothing closes that block for us:
+/// the model opens ` thinking` itself and streams its reasoning into the answer.
+/// Pre-filling a closed, empty block keeps generation inside the answer.
+fn insert_think_block(prompt: &str) -> std::borrow::Cow<'_, str> {
+    match prompt.rfind(ASSISTANT_TURN) {
+        Some(i) => {
+            let at = i + ASSISTANT_TURN.len();
+            let mut out = String::with_capacity(prompt.len() + EMPTY_THINK_BLOCK.len());
+            out.push_str(&prompt[..at]);
+            out.push_str(EMPTY_THINK_BLOCK);
+            out.push_str(&prompt[at..]);
+            std::borrow::Cow::Owned(out)
+        }
+        None => std::borrow::Cow::Borrowed(prompt),
+    }
+}
+
+/// Whether this model's own chat template has a reasoning block. Read from the
+/// GGUF metadata instead of a filename so Qwen2.5 -- which has none, and would
+/// echo the tags back as text -- is left alone.
+fn template_uses_thinking(model: &LlamaModel) -> bool {
+    model
+        .meta_val_str("tokenizer.chat_template")
+        .map(|t| t.contains(" thinking"))
+        .unwrap_or(false)
+}
+
+fn with_thinking_disabled<'a>(model: &LlamaModel, prompt: &'a str) -> std::borrow::Cow<'a, str> {
+    if template_uses_thinking(model) {
+        insert_think_block(prompt)
+    } else {
+        std::borrow::Cow::Borrowed(prompt)
+    }
+}
+
 /// Generate on an already-loaded model. A fresh context per call keeps the two
 /// stages of a two-stage refine from sharing a KV cache.
 fn generate_in(model: &LlamaModel, prompt: &str, max_new_tokens: usize) -> Result<String> {
@@ -414,6 +455,7 @@ fn generate_in(model: &LlamaModel, prompt: &str, max_new_tokens: usize) -> Resul
 
     // parse_special = true so "<|im_start|>" etc. become control tokens, not text.
     let vocab = model.vocab();
+    let prompt = with_thinking_disabled(model, prompt);
     let tokens = vocab.tokenize(prompt.as_bytes(), false, true);
     if tokens.len() >= N_CTX as usize {
         return Err(EngineError::new(ErrorCode::InvalidArg, "transcript too long for one LLM pass"));
@@ -515,4 +557,35 @@ pub fn summarize_one(model_path: &Path, instruction: &str, text: &str) -> Result
 /// `translate` task, where the target arrives as the instruction argument.
 pub fn translate(model_path: &Path, text: &str, target: &str) -> Result<String> {
     generate(model_path, &translate_prompt(text, target))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn think_block_lands_before_the_answer() {
+        let prompt = format!("{ASSISTANT_TURN}你好");
+        let out = insert_think_block(&prompt);
+        assert_eq!(out, format!("{ASSISTANT_TURN}{EMPTY_THINK_BLOCK}你好"));
+        assert!(out.ends_with("你好"), "the transcript must stay after the block");
+    }
+
+    #[test]
+    fn think_block_only_touches_the_last_turn() {
+        // Few-shot prompts repeat the assistant turn. Prefilling an earlier one
+        // would leave the real answer open, so the last turn is the only target.
+        let prompt = format!("{ASSISTANT_TURN}one{ASSISTANT_TURN}two");
+        let out = insert_think_block(&prompt);
+        assert_eq!(
+            out,
+            format!("{ASSISTANT_TURN}one{ASSISTANT_TURN}{EMPTY_THINK_BLOCK}two")
+        );
+    }
+
+    #[test]
+    fn think_block_is_a_no_op_without_an_assistant_turn() {
+        let prompt = "not a chat prompt";
+        assert_eq!(insert_think_block(prompt), prompt);
+    }
 }
