@@ -21,7 +21,8 @@ pub use memory::OvcMemoryUsage;
 pub use llm::{
     refine as llm_refine, refine_stages as llm_refine_stages, refine_two_stage as llm_refine_two_stage,
     refine_with_keywords as llm_refine_with_keywords,
-    summarize_one as llm_summarize_one, SECTION_ACTIONS, SECTION_DECISIONS, SECTION_SUMMARY,
+    summarize_one as llm_summarize_one, translate as llm_translate,
+    SECTION_ACTIONS, SECTION_DECISIONS, SECTION_SUMMARY,
 };
 
 type Result<T, E = EngineError> = std::result::Result<T, E>;
@@ -251,6 +252,20 @@ pub unsafe extern "C" fn LLM_RefineTextWithKeywordsStages(
         let hint = if keywords_hint.is_null() { String::new() } else { read_str(keywords_hint, "keywords_hint")?.to_owned() };
         let refined = state::refine_text_with_keywords_stages(input, &hint, stages)?;
         write_out(out, &refined)
+    })())
+}
+
+/// Translate a transcript into another language. `target` is "en" or "zh".
+///
+/// # Safety
+/// Pointers must follow the header contract.
+#[no_mangle]
+pub unsafe extern "C" fn LLM_Translate(text: *const c_char, target: *const c_char, out: *mut *mut c_char) -> c_int {
+    status((|| {
+        let input = read_str(text, "text")?;
+        let lang = if target.is_null() { "zh" } else { read_str(target, "target")? };
+        let translated = state::translate_text(input, lang)?;
+        write_out(out, &translated)
     })())
 }
 
