@@ -84,4 +84,14 @@ enum Core {
         defer { Core_FreeString(p) }
         return String(cString: p)
     }
+
+    /// Translate a finished line into "en" or "zh". Runs as its own model pass,
+    /// after the refine pass.
+    static func translate(_ text: String, to target: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_Translate(text, target, &out))
+        guard let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
 }

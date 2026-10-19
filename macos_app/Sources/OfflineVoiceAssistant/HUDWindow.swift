@@ -54,6 +54,8 @@ final class HUDWindow: NSObject {
     private var hintLabel: NSTextField!
 
     private var hideWork: DispatchWorkItem?
+    /// Pending revert of an in-recording `notice`. Non-nil while one is showing.
+    private var noticeWork: DispatchWorkItem?
     private var onSubmit: (() -> Void)?
 
     /// Called when the capsule's stop button is clicked.
@@ -190,12 +192,20 @@ final class HUDWindow: NSObject {
         handleView.frame = NSRect(x: m + 404, y: midY - 11, width: 14, height: 22)
 
         statusLabel.sizeToFit()
-        // Leave room for the ⋮⋮ grip on the right, and for the check on the left
-        // when a result is showing.
-        let leftPad: CGFloat = (mode == .result) ? 56 : 24
-        let rightPad: CGFloat = 74
-        statusLabel.frame = NSRect(x: m + leftPad, y: midY - statusLabel.frame.height / 2,
-                                   width: shapeW - leftPad - rightPad, height: min(statusLabel.frame.height, shapeH))
+        if mode == .recording, noticeWork != nil {
+            // In the waveform's slot: after the hairline divider, and stopping
+            // short of the right-aligned character count (which needs ~30 pt) so
+            // a notice never runs under it.
+            statusLabel.frame = NSRect(x: m + 78, y: midY - statusLabel.frame.height / 2,
+                                       width: 190, height: min(statusLabel.frame.height, shapeH))
+        } else {
+            // Leave room for the ⋮⋮ grip on the right, and for the check on the left
+            // when a result is showing.
+            let leftPad: CGFloat = (mode == .result) ? 56 : 24
+            let rightPad: CGFloat = 74
+            statusLabel.frame = NSRect(x: m + leftPad, y: midY - statusLabel.frame.height / 2,
+                                       width: shapeW - leftPad - rightPad, height: min(statusLabel.frame.height, shapeH))
+        }
 
         hintLabel.sizeToFit()
         textField.frame = NSRect(x: m + 18, y: m + 34, width: shapeW - 36, height: shapeH - 62)
@@ -208,6 +218,8 @@ final class HUDWindow: NSObject {
         self.onSubmit = onSubmit
         hideWork?.cancel()
         hideWork = nil
+        noticeWork?.cancel()
+        noticeWork = nil
 
         applyMode(mode)
         switch mode {
@@ -244,6 +256,36 @@ final class HUDWindow: NSObject {
     /// capsule never lingers on screen after the job is done.
     func flash(_ text: String, seconds: TimeInterval = 2.2) {
         show(text: text, mode: .display, autoHide: seconds)
+    }
+
+    /// A short warning shown INSIDE the recording capsule, in the waveform's slot:
+    /// the 朱紅 mic, the character count, the stop button and the drag handle all
+    /// stay where they are, and the waveform comes back when the warning expires.
+    ///
+    /// A recording must never be interrupted by a message. `flash` puts the
+    /// capsule into its display mode, which hides the stop button -- the only way
+    /// to end the recording from the capsule -- so a meeting that warned about
+    /// (say) system audio kept recording with no visible way to stop it.
+    /// Outside a recording there is nothing to protect, so it falls back to `flash`.
+    func notice(_ text: String, seconds: TimeInterval = 5) {
+        guard mode == .recording else {
+            flash(text, seconds: seconds)
+            return
+        }
+        noticeWork?.cancel()
+        statusLabel.stringValue = text
+        statusLabel.isHidden = false
+        waveView.isHidden = true
+        layoutContents()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.mode == .recording else { return }
+            self.noticeWork = nil
+            self.statusLabel.isHidden = true
+            self.waveView.isHidden = false
+            self.layoutContents()
+        }
+        noticeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
     /// The recording capsule: 朱紅 mic, live level, live character count.

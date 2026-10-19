@@ -5,13 +5,30 @@ import Foundation
 /// Core and audio calls run on coreQueue; all UI updates run on the main thread.
 final class AppController {
     private let keywords = Keywords()
+    private let history = HistoryStore()
     private let hud = HUDWindow()
+    /// The raw transcript behind the result currently being delivered, kept so
+    /// history can store both the original wording and the cleaned-up line.
+    private var lastRawTranscript = ""
     private var statusItem: StatusItem?
     private var mainWindow: MainWindow?
     private var capture: AudioCapture?
+    /// Records what the Mac plays during a meeting, so the other side of the
+    /// call is transcribed too. Only active when the setting is on.
+    private var systemTap: SystemAudioTap?
     private var hotkey: Hotkey?
     private var dictating = false
     private var meeting = false
+    /// True between a start being requested and the ASR session actually being up.
+    /// `dictating`/`meeting` are set on the main queue after an async hop, so a
+    /// second hotkey press inside that window passes both guards, starts a second
+    /// ASR session (rejected as "session already active") and replaces the
+    /// recorder without stopping the first. This claim is taken synchronously.
+    private var sessionStarting = false
+    /// Non-fatal problems that happened during the meeting currently being
+    /// recorded (e.g. the system-audio tap was refused). Kept so the saved file
+    /// and the final message can say what is missing from the recording.
+    private var meetingWarnings: [String] = []
     private var ready = false
     private var loading = false
     private var permissionTimer: Timer?
@@ -28,6 +45,16 @@ final class AppController {
     private static let themeKey = "settings.theme"
     private static let polishKey = "settings.polish"
     private static let confirmKey = "settings.confirmInsert"
+    private static let translateKey = "settings.translate"
+    private static let systemAudioKey = "settings.meetingSystemAudio"
+
+    /// "off", "en" (translate into English) or "zh" (into 繁體中文).
+    private var translateTarget: String { UserDefaults.standard.string(forKey: Self.translateKey) ?? "off" }
+
+    /// Whether meeting mode also captures the Mac's own audio output. Default on.
+    private var meetingSystemAudio: Bool {
+        UserDefaults.standard.object(forKey: Self.systemAudioKey) as? Bool ?? true
+    }
 
     /// Action requested before models finished loading; run once ready.
     private enum PendingAction { case none, dictation, meeting }
@@ -46,7 +73,7 @@ final class AppController {
 
     func start() {
         // The main window is the primary UI: a persistent control panel.
-        let window = MainWindow(keywords: keywords)
+        let window = MainWindow(keywords: keywords, history: history)
         window.onToggleDictation = { [weak self] in self?.toggleDictation() }
         window.onToggleMeeting = { [weak self] in self?.toggleMeeting() }
         window.onOpenMeetingsFolder = { [weak self] in self?.openMeetingsFolder() }
@@ -67,6 +94,24 @@ final class AppController {
         // The capsule's stop button ends the recording without the hotkey.
         hud.onStop = { [weak self] in self?.stopFromCapsule() }
 
+        // Picking an older line out of the history pastes it where the cursor is.
+        window.onPasteHistory = { [weak self] text in self?.pasteFromHistory(text) }
+
+        // Translation direction is read straight from UserDefaults at use time by
+        // MainWindow's own saveSettings, so this only needs to confirm the change.
+        window.onTranslateChange = { code in
+            ModelInstaller.log("translate set to \(code)")
+        }
+
+        // Meeting mode can also transcribe what the Mac plays (the other people
+        // on a call); the microphone is always recorded.
+        window.onSystemAudioChange = { [weak self] enabled in
+            UserDefaults.standard.set(enabled, forKey: Self.systemAudioKey)
+            ModelInstaller.log("meeting system audio set to \(enabled)")
+            // Apply it to a meeting that is already running, not just the next one.
+            self?.applyMeetingSystemAudioChange(enabled)
+        }
+
         // The menu-bar icon reopens the window and never quits the app.
         statusItem = StatusItem(
             onOpen: { [weak self] in self?.showMainWindow() },
@@ -79,6 +124,14 @@ final class AppController {
         // Restore the persisted appearance, if the user chose one.
         applySavedTheme()
         window.updateState(dictating: false, meeting: meeting)
+
+        // Quitting must not leave the microphone or the system-audio tap open.
+        // The tap is a process-wide Core Audio object (and lights the system-audio
+        // indicator), and Core holds the ASR stream, so both are closed here
+        // rather than left to process teardown.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.shutdown() }
 
         // Accessibility is required to paste into other apps; prompt for it and
         // keep the in-window banner up to date while the user grants it.
@@ -106,6 +159,8 @@ final class AppController {
     func showMainWindow() {
         guard let window = mainWindow else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
+        // Anything dictated while the window was closed should show up now.
+        window.refreshHistory()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -173,17 +228,50 @@ final class AppController {
     // MARK: - Public actions
 
     func toggleDictation() {
+        // One ASR session at a time. Without this guard the ASR call is rejected
+        // with "session already active" and the capsule sticks on the error, while
+        // the microphone that is already recording keeps going. The second half of
+        // the guard covers the window between the start request and the session
+        // being up, when neither `dictating` nor `meeting` is set yet.
+        guard !meeting, !sessionStarting else {
+            if meeting { hud.notice("會議錄音中，請先結束會議") }
+            return
+        }
         if !ready { pendingAction = .dictation; ensureModelsLoaded(); return }
         if dictating { stopDictation() } else { startDictation() }
     }
 
     func toggleMeeting() {
+        guard !dictating, !sessionStarting else {
+            if dictating { hud.notice("聽寫中，請先結束聽寫") }
+            return
+        }
         if !ready { pendingAction = .meeting; ensureModelsLoaded(); return }
         if meeting { stopMeeting() } else { startMeeting() }
     }
 
     func openMeetingsFolder() {
         NSWorkspace.shared.open(meetingsDirectory())
+    }
+
+    /// Stops every audio source and closes the core, on the way out.
+    ///
+    /// A meeting that is still running cannot be transcribed here -- the ASR pass
+    /// and the summary take longer than macOS allows a terminating app -- so the
+    /// recording is cut off and the log says so; the file is not half-written
+    /// because nothing was being written yet.
+    private func shutdown() {
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+        stopLiveCount()
+        capture?.stop()
+        capture = nil
+        systemTap?.stop()
+        systemTap = nil
+        if meeting || dictating {
+            ModelInstaller.log("shutdown while recording: \(meeting ? "meeting" : "dictation") discarded")
+        }
+        Core.shutdown()
     }
 
     // MARK: - 主題套用
@@ -270,12 +358,18 @@ final class AppController {
             }
             return
         }
+        guard !sessionStarting else { return }
+        sessionStarting = true
         coreQueue.async {
             do { try Core.startASR() } catch {
-                DispatchQueue.main.async { self.hud.show(text: "\(error)") }
+                DispatchQueue.main.async {
+                    self.sessionStarting = false
+                    self.hud.flash("\(error)", seconds: 5)
+                }
                 return
             }
             DispatchQueue.main.async {
+                self.sessionStarting = false
                 self.dictating = true
                 self.setRecordingState()
                 self.hud.startRecording()
@@ -333,14 +427,21 @@ final class AppController {
             }
             return
         }
+        guard !sessionStarting else { return }
+        sessionStarting = true
         coreQueue.async {
             do { try Core.startASR() } catch {
-                DispatchQueue.main.async { self.hud.show(text: "\(error)") }
+                DispatchQueue.main.async {
+                    self.sessionStarting = false
+                    self.hud.flash("\(error)", seconds: 5)
+                }
                 return
             }
             DispatchQueue.main.async {
+                self.sessionStarting = false
                 self.meeting = true
                 self.dictating = false
+                self.meetingWarnings = []
                 self.setRecordingState()
                 self.hud.startRecording()
                 self.startLiveCount()
@@ -360,25 +461,97 @@ final class AppController {
                     self.setRecordingState()
                     self.capture = nil
                     self.coreQueue.async { _ = try? Core.stopASR() }
+                    return
                 }
+                self.startSystemTap()
             }
+        }
+    }
+
+    /// Starts the system-audio tap alongside the microphone, if the user asked
+    /// for it. A failure here is never fatal: the meeting keeps recording the
+    /// microphone, and the reason goes to the window and the log.
+    ///
+    /// The capsule shows one short line -- the long reason names a System
+    /// Settings path and does not fit in 190 pt -- and the full text goes to the
+    /// window and the log. `hud.notice` is used rather than `hud.flash`: it does
+    /// not take the recording away.
+    private func startSystemTap() {
+        guard meetingSystemAudio else { return }
+        guard SystemAudioTap.isSupported else {
+            reportSystemAudioFailure("此 macOS 版本不支援錄製電腦播放的聲音（需要 macOS 14.2 以上），這次只錄麥克風。")
+            return
+        }
+        let tap = SystemAudioTap(onSamples: { [weak self] samples in
+            self?.coreQueue.async { try? Core.submit(samples) }
+        })
+        do {
+            try tap.start()
+            systemTap = tap
+            ModelInstaller.log("meeting system audio tap started")
+        } catch {
+            reportSystemAudioFailure(error.localizedDescription)
+        }
+    }
+
+    /// Explains a system-audio failure: short line in the capsule, full text in
+    /// the main window and the log, since only one of those is wide enough. The
+    /// capsule line is also remembered so the meeting's own summary can say the
+    /// other side of the call is missing.
+    private func reportSystemAudioFailure(_ reason: String) {
+        let message = "只錄麥克風：\(reason)"
+        ModelInstaller.log("meeting system audio tap failed: \(reason)")
+        meetingWarnings.append("系統音訊未錄到（\(reason)）")
+        hud.notice("系統音訊未錄到，只錄麥克風", seconds: 5)
+        mainWindow?.setTranscript(message)
+    }
+
+    /// Applies a change to the "record the Mac's own audio" setting while a
+    /// meeting is already running, so the checkbox is not silently deferred to
+    /// the next meeting.
+    private func applyMeetingSystemAudioChange(_ enabled: Bool) {
+        guard meeting else { return }
+        if enabled {
+            guard systemTap == nil else { return }
+            startSystemTap()
+        } else if let tap = systemTap {
+            tap.stop()
+            systemTap = nil
+            ModelInstaller.log("meeting system audio tap stopped by setting")
         }
     }
 
     private func stopMeeting() {
         capture?.stop()
         capture = nil
+        systemTap?.stop()
+        systemTap = nil
         meeting = false
         stopLiveCount()
         setRecordingState()
-        hud.show(text: "整理會議中…")
+        hud.show(text: "整理會議中…長會議需要幾分鐘")
         coreQueue.async {
             do {
                 let transcript = try Core.stopASR()
+                // Nothing was picked up: a saved file would be an empty record
+                // that reads like a successful meeting.
+                let body = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !body.isEmpty else {
+                    DispatchQueue.main.async {
+                        self.hud.flash("沒有錄到聲音，未儲存會議記錄", seconds: 5)
+                        self.mainWindow?.setTranscript("（這次會議沒有錄到聲音，未儲存檔案。）")
+                    }
+                    return
+                }
                 let saved = try self.saveMeeting(transcript)
                 DispatchQueue.main.async {
                     self.mainWindow?.setTranscript(transcript)
-                    self.hud.flash("已儲存會議記錄：\(saved.lastPathComponent)", seconds: 4)
+                    if self.meetingWarnings.isEmpty {
+                        self.hud.flash("已儲存會議記錄：\(saved.lastPathComponent)", seconds: 4)
+                    } else {
+                        self.hud.flash("已儲存（部分內容未錄到，詳見紀錄）", seconds: 5)
+                    }
+                    self.meetingWarnings = []
                 }
             } catch {
                 DispatchQueue.main.async { self.hud.flash("\(error)", seconds: 5) }
@@ -431,14 +604,24 @@ final class AppController {
     private func saveMeeting(_ transcript: String) throws -> URL {
         let dir = meetingsDirectory()
         let stamp = Self.stampFormatter.string(from: Date())
+        // The recognizer and the model both drift into Simplified; the file is
+        // for a Taiwanese reader, so normalize once here rather than in each pass.
+        let traditional = toTraditional(transcript)
         let txt = dir.appendingPathComponent("meeting-\(stamp).txt")
-        try transcript.write(to: txt, atomically: true, encoding: .utf8)
+        try traditional.write(to: txt, atomically: true, encoding: .utf8)
         // Summary is optional: a long transcript spawns several worker passes,
         // each of which reloads the model. Failure just means no .md file.
-        if !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           let summary = try? Core.summarize(transcript), !summary.isEmpty {
+        if !traditional.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let summary = try? Core.summarize(traditional), !summary.isEmpty {
             let md = dir.appendingPathComponent("meeting-\(stamp).md")
-            try? "\(summary)\n\n---\n\n\(transcript)\n".write(to: md, atomically: true, encoding: .utf8)
+            // A meeting recorded without the system-audio tap is missing the
+            // other side of the call. Say so in the file: a reader cannot tell a
+            // one-sided transcript from a quiet room.
+            let caveat = meetingWarnings.isEmpty
+                ? ""
+                : "> 錄音提示：\(self.meetingWarnings.joined(separator: "；"))\n\n"
+            try? "\(caveat)\(toTraditional(summary))\n\n---\n\n\(traditional)\n"
+                .write(to: md, atomically: true, encoding: .utf8)
         }
         return txt
     }
@@ -453,6 +636,7 @@ final class AppController {
 
     private func deliver(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        lastRawTranscript = trimmed
         // Regression self-test: exercise both HUD paths (the editable show that
         // used to crash with doesNotRecognizeSelector, and the auto-paste path)
         // and exit cleanly if the app survives.
@@ -492,17 +676,45 @@ final class AppController {
             finish(text)
             return
         }
-        hud.show(text: "AI 整理中…")
+        hud.show(text: translateTarget == "off" ? "AI 整理中…" : "整理並翻譯中…")
         coreQueue.async {
-            let polished = self.polish(text)
+            let polished = self.translateIfNeeded(self.polish(text))
             DispatchQueue.main.async { self.finish(polished) }
         }
+    }
+
+    /// Translate the finished line when the user asked for it. It runs as its own
+    /// model pass AFTER the refine pass: refine must not change the language,
+    /// translation must, and asking one prompt to do both produced drafts that
+    /// came back half-translated. A translation that fails, or that comes back as
+    /// a note instead of a translation, falls back to the cleaned text so the
+    /// dictation is never lost.
+    private func translateIfNeeded(_ text: String) -> String {
+        let target = translateTarget
+        guard target == "en" || target == "zh" else { return text }
+        guard let raw = try? Core.translate(text, to: target) else {
+            ModelInstaller.log("translate unavailable; keeping the cleaned text")
+            return text
+        }
+        let translated = normalizeOutput(toTraditional(stripLabel(raw.trimmingCharacters(in: .whitespacesAndNewlines))))
+        // The model sometimes answers with an explanation instead of a
+        // translation; the target script must actually be present, and a
+        // translation that is five times the original is a note, not a line.
+        let hasLatin = translated.unicodeScalars.contains { (65...90).contains($0.value) || (97...122).contains($0.value) }
+        let plausible = (target == "en") ? hasLatin : translated.containsCJK
+        guard !translated.isEmpty, plausible, translated.count <= text.count * 5 else {
+            ModelInstaller.log("translate output looked wrong; keeping the cleaned text")
+            return text
+        }
+        ModelInstaller.log("translated to \(target): \(preview(translated))")
+        return translated
     }
 
     /// Shows the result in the window and either inserts it immediately or (if
     /// the user asked to confirm first) shows an editable HUD and waits for Enter.
     private func finish(_ polished: String) {
         mainWindow?.setTranscript(polished)
+        recordHistory(polished)
         if SelfTest.exitsWhenDone { ModelInstaller.log("selftest polished: \(polished)") }
         // A full-pipeline self-test always pastes directly: the saved "confirm
         // first" preference would otherwise leave it waiting for an Enter key
@@ -549,10 +761,35 @@ final class AppController {
         }
     }
 
+    // MARK: - History
+
+    /// Stores a finished line so it can be found and pasted again later. Skipped
+    /// during scripted self-tests, which would otherwise fill the list with
+    /// their own fixtures.
+    private func recordHistory(_ polished: String) {
+        guard !isSelfTest else { return }
+        history.add(HistoryEntry(date: Date(), polished: polished, raw: lastRawTranscript))
+        mainWindow?.refreshHistory()
+    }
+
+    /// Paste a line the user picked out of the history list. The window has to
+    /// get out of the way first, otherwise the synthesized paste lands in our
+    /// own list instead of the app the user was working in.
+    private func pasteFromHistory(_ text: String) {
+        mainWindow?.orderOut(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            self.hud.showResult(text, seconds: 2.2)
+            self.insertDirect(text)
+        }
+    }
+
+    private var isSelfTest: Bool {
+        SelfTest.wavPath != nil || ProcessInfo.processInfo.environment["OVC_SELFTEST_HUD"] != nil
+    }
+
     /// Editable-HUD path: hide the HUD first so the paste does not land in our
     /// own text field (which would duplicate the text).
-    private func insertAfterHidingHUD(_ text: String) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func insertAfterHidingHUD(_ text: String) {        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             hud.show(text: "內容為空，已忽略")
             return
@@ -714,7 +951,8 @@ final class AppController {
     /// Removes a leading "潤飾：" / "Output:"-style label the small model may echo
     /// from the prompt examples.
     private func stripLabel(_ text: String) -> String {
-        for label in ["整理：", "整理:", "潤飾：", "潤飾:", "草稿：", "草稿:", "輸出：", "Output:", "Polished:"] {
+        for label in ["整理：", "整理:", "潤飾：", "潤飾:", "草稿：", "草稿:", "輸出：", "Output:", "Polished:",
+                      "翻譯：", "翻譯:", "Translation:", "英文：", "中文："] {
             if text.hasPrefix(label) {
                 return String(text.dropFirst(label.count)).trimmingCharacters(in: .whitespacesAndNewlines)
             }

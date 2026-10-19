@@ -22,6 +22,8 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>Records your voice for on-device speech recognition. Audio never leaves this Mac.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Records what this Mac is playing (the other people on a call) so meeting notes cover both sides. Audio is never muted or sent anywhere.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
