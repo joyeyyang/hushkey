@@ -4,8 +4,12 @@
 //! Refinement goal (Typeless-style):
 //!  - Remove filler words and disfluencies.
 //!  - Resolve self-corrections: keep only the final intended text.
+//!  - Obey spoken editing instructions ("delete that sentence") and leave no
+//!    trace of the instruction in the result.
 //!  - Auto-format lists, steps, and key points into clean structure.
-//!  - Keep the original language; do not translate or paraphrase meaning.
+//!  - Keep the original language; switch only on an explicit translation request.
+//!  - Deliver no trailing full stop: the text is inserted at a cursor, where one
+//!    is noise. Interior punctuation and a question's `？` stay.
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -51,17 +55,29 @@ const UNDERSTAND_SYSTEM: &str = "把下面這段口語改寫成通順、完整�
 /// Stage 2 (and the single-pass) prompt. It says "rewrite this spoken text into
 /// written text", NOT "summarize it" -- "整理成重點" made the model drop whole
 /// requirements and emit a one-line summary of what the speaker wanted. Short on
-/// purpose: the worked example teaches the format better than more rules do.
-/// System line for the refine turn. Rules live here and are kept to ONE
-/// paragraph on purpose -- the shape of the task is taught by the worked
-/// examples below, which a small model imitates far more reliably than a longer
-/// rule list. Traditional Chinese is enforced afterwards in code, not here.
+/// purpose: the worked examples teach the format better than a longer rule list,
+/// and a small model imitates them more reliably than it follows a rule.
+/// Traditional Chinese is enforced afterwards in code, not here.
+///
+/// The three rules that follow from reported failures, each stated once:
+/// * a spoken instruction inside the draft is APPLIED and then removed;
+/// * the language is the speaker's, and only an explicit translation request
+///   changes it -- a Chinese draft that mentions an English product is still
+///   Chinese, and a question is not a reason to switch either (the old wording
+///   only said "explicitly asks for another language", and a question with
+///   English terms in it was read as such a request);
+/// * no full stop at the very end. Only the final character is spoken about, so
+///   interior punctuation is not touched.
 const REFINE_SYSTEM: &str = "把使用者的口語改寫成通順的書面文字，只輸出改寫後的內容。\
-不要摘要、不要漏掉任何一件事；重複講的同一件事只留一次；刪掉口頭禪和多餘的字；\
+不要摘要、不要漏掉任何一件事；重複的只留一次；刪掉口頭禪和多餘的字；\
 只有一個重點就寫一句，多個重點就一行一個、行首加「• 」；\
 數字、時間、名字照原樣保留；問句保持問句。\
-預設用繁體中文輸出；如果這段話裡明確要求換成別的語言（例如「整理成英文」「翻成日文」「用英文寫」），\
-就照那個語言輸出，並且那句要求本身不要出現在結果裡。";
+話裡夾的指令要照著做（「把前面那句刪掉」「時間改成四點」這種刪掉、換掉、調順序的要求），\
+指令本身不要出現在結果裡。\
+語言跟使用者講的一樣，講中文就整段中文，中間的英文產品名照留；\
+不要因為句子裡有英文、或因為是問句，就換成別的語言。\
+只有明確要求翻譯時才換語言（例如「翻成英文」「用日文寫」），而且要整段都換，不要只換一半。\
+最後不要加句號（。或 .），問句結尾的？要保留，句子中間的標點照常。";
 
 /// Worked pairs for translation. Same reasoning as the refine examples: two
 /// short rules plus the shape, because a 1.5B model copies what it sees far
@@ -103,10 +119,26 @@ const TRANSLATE_EXAMPLES_TO_ZH: [(&str, &str); 2] = [
 /// next to an English answer comes back fully translated into English (observed,
 /// deterministically -- decoding is greedy). Each pair teaches the same shape:
 /// keep every fact, drop the filler, keep the question a question.
-const REFINE_EXAMPLES_ZH: [(&str, &str); 2] = [
+///
+/// Two further conventions are taught by the pairs rather than by the rules,
+/// because a 1.5B model imitates what it sees:
+/// * A spoken editing instruction ("把前面那句刪掉", "時間改成四點") is applied,
+///   and the output is the edited text with no trace of the instruction. One
+///   pair per shape: a deletion and a replacement.
+/// * No pair ends in a full stop, and the pair that is a question keeps its `？`.
+///   `tidy_output` enforces the same shape in code, so the examples only have to
+///   agree with it rather than carry the rule alone. The English deletion pair
+///   keeps an INTERIOR period on purpose, so "no full stop" is not learned as
+///   "no periods at all".
+///
+/// What is NOT here on purpose: a translation pair. An English answer inside the
+/// Chinese set is exactly the pairing that flips a Chinese draft into English;
+/// translation has its own prompt (`TRANSLATE_EXAMPLES_*`, reached only when the
+/// app is asked to translate).
+const REFINE_EXAMPLES_ZH: [(&str, &str); 5] = [
     (
         "嗯那個下週三下午三點半你有空嗎，我要跟你討論那個八十萬的案子，然後記得帶合約，喔對你有空嗎",
-        "下週三下午三點半你有空嗎？我要跟你討論八十萬的案子，記得帶合約。",
+        "下週三下午三點半你有空嗎？我要跟你討論八十萬的案子，記得帶合約",
     ),
     // A repeated clause followed by a DIFFERENT short clause: the repeat goes,
     // the new clause stays. Without this pair the model treated the whole
@@ -114,14 +146,31 @@ const REFINE_EXAMPLES_ZH: [(&str, &str); 2] = [
     // one repeat and dropped it ("不要遲到" was silently lost in testing).
     (
         "嗯我明天下午要去拜訪客戶然後記得帶名片喔對我明天下午要去拜訪客戶不要忘記",
-        "我明天下午要去拜訪客戶，記得帶名片，不要忘記。",
+        "我明天下午要去拜訪客戶，記得帶名片，不要忘記",
+    ),
+    // The instruction names the clause to drop ("把地點那句刪掉") and the rest
+    // is kept, including the reason that follows it. The instruction itself is
+    // gone from the answer.
+    (
+        "下週三下午三點半開會，地點在二樓會議室，把地點那句刪掉，我還沒確定",
+        "下週三下午三點半開會，地點還沒確定",
+    ),
+    // Replacement: the old value does not survive anywhere, and the English term
+    // the speaker used stays English inside an otherwise Chinese answer.
+    ("明天下午兩點跟客戶 sync，時間改成四點", "明天下午四點跟客戶 sync"),
+    // A Chinese sentence carrying English product names is still Chinese. This
+    // pair exists because the model answered such a draft in English; the rule
+    // alone did not stop it.
+    (
+        "那個 Slack 的通知先關掉，還有 Figma 的連結記得更新",
+        "Slack 的通知先關掉，Figma 的連結記得更新",
     ),
 ];
 
-const REFINE_EXAMPLES_EN: [(&str, &str); 2] = [
+const REFINE_EXAMPLES_EN: [(&str, &str); 4] = [
     (
         "um so I think uh we should probably ship this you know next week because the client is waiting",
-        "We should ship this next week because the client is waiting.",
+        "We should ship this next week because the client is waiting",
     ),
     // Teaches that a question comes back as a question. Without it the model
     // turned "can you send the report before then?" into "Please send the
@@ -129,6 +178,17 @@ const REFINE_EXAMPLES_EN: [(&str, &str); 2] = [
     (
         "um can you uh send me the report before the meeting? the report before the meeting",
         "Can you send me the report before the meeting?",
+    ),
+    // Deletion, with an interior period kept: the room clause goes, the fact the
+    // speaker added afterwards stays, and only the END of the answer is bare.
+    (
+        "um the kickoff is Wednesday at 3:30 in the second-floor room, actually delete the room bit, I haven't confirmed it, so the room is still open",
+        "The kickoff is Wednesday at 3:30. The room is still open",
+    ),
+    // Replacement.
+    (
+        "uh the client meeting is at 2 tomorrow, make that 4",
+        "The client meeting is at 4 tomorrow",
     ),
 ];
 
@@ -538,6 +598,182 @@ fn generate_in(model: &LlamaModel, prompt: &str, max_new_tokens: usize) -> Resul
     Ok(strip_reasoning(&String::from_utf8_lossy(&out)))
 }
 
+/// Characters a model may wrap its whole answer in. Both halves of each pair are
+/// listed so a mismatched pair (a `"` opened and a `」` closed) is cleaned too.
+fn is_wrapping_quote(c: char) -> bool {
+    matches!(c, '"' | '\'' | '“' | '”' | '「' | '」' | '『' | '』')
+}
+
+/// Drop wrapping quotation marks, and the whitespace around them. Looped, so a
+/// doubly-wrapped answer is unwrapped as far as it goes; a lone quote character
+/// is left alone instead of being eaten.
+fn strip_wrapping_quotes(text: &str) -> &str {
+    let mut rest = text.trim();
+    loop {
+        let trimmed = rest.trim();
+        let (first, last) = match (trimmed.chars().next(), trimmed.chars().next_back()) {
+            (Some(first), Some(last)) => (first, last),
+            _ => return trimmed,
+        };
+        // `trimmed.len() <= first.len_utf8()` covers a single-character answer
+        // that happens to be a quote.
+        if !is_wrapping_quote(first) || !is_wrapping_quote(last) || trimmed.len() <= first.len_utf8() {
+            return trimmed;
+        }
+        rest = &trimmed[first.len_utf8()..trimmed.len() - last.len_utf8()];
+    }
+}
+
+/// Strip ONE trailing full stop: `。`, `.` or `．`.
+///
+/// Deliberately literal -- only the last character is judged, so an interior
+/// period stays, and an ellipsis (`…`), a question mark, a bang, a colon or a
+/// semicolon is left as the speaker's punctuation. No abbreviation lookup and no
+/// `...` detection: the model emits `…` for an ellipsis, and the product rule is
+/// about the final character, not about guessing words.
+fn strip_trailing_full_stop(text: &str) -> &str {
+    match text.chars().next_back() {
+        Some(c @ ('。' | '.' | '．')) => text[..text.len() - c.len_utf8()].trim_end(),
+        _ => text,
+    }
+}
+
+/// At most one blank line between blocks: a run of three or more newlines
+/// becomes two. Single newlines (the line-per-point form) are untouched.
+fn collapse_blank_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = 0usize;
+    for c in text.chars() {
+        if c == '\n' {
+            run += 1;
+            if run <= 2 {
+                out.push(c);
+            }
+        } else {
+            run = 0;
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Drop a bullet marker from an answer that is a single line.
+///
+/// The model likes to answer a plain dictated sentence with "• 下週三開會". One
+/// line is not a list, so the marker is noise; a real list (two or more lines)
+/// keeps its bullets.
+fn strip_lone_bullet(text: &str) -> &str {
+    let trimmed = text.trim();
+    if trimmed.contains('\n') {
+        return trimmed;
+    }
+    for marker in ["• ", "- ", "* ", "・"] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            return rest.trim_start();
+        }
+    }
+    trimmed
+}
+
+/// Formatting pass over a refinement result: belt and braces beside the prompt
+/// rule, because a 1.5B model does not reliably obey a formatting instruction.
+///
+/// Refine output only. A summary is a document whose bullets may legitimately end
+/// in a period, and it is not inserted at a cursor, so it is NOT tidied.
+fn tidy_output(text: &str) -> String {
+    let unquoted = strip_wrapping_quotes(text);
+    let single = strip_lone_bullet(unquoted);
+    collapse_blank_lines(strip_trailing_full_stop(single))
+}
+
+/// Ways a speaker asks for another language, and the target `translate_prompt`
+/// can actually deliver. `weak` marks phrases that are ordinary words as often
+/// as they are instructions ("我用英文寫"), so those also need a cue next to them.
+const TRANSLATION_TRIGGERS: &[(&str, &str, bool)] = &[
+    ("翻成英文", "en", true),
+    ("翻譯成英文", "en", true),
+    ("翻成英語", "en", true),
+    ("譯成英文", "en", true),
+    ("轉成英文", "en", true),
+    ("改成英文", "en", true),
+    ("整理成英文", "en", true),
+    ("翻成中文", "zh", true),
+    ("翻譯成中文", "zh", true),
+    ("翻成繁體", "zh", true),
+    ("譯成中文", "zh", true),
+    ("轉成中文", "zh", true),
+    ("改成中文", "zh", true),
+    ("整理成中文", "zh", true),
+    ("translate into english", "en", true),
+    ("translate to english", "en", true),
+    ("translate into chinese", "zh", true),
+    ("用英文", "en", false),
+    ("in english", "en", false),
+    ("用中文", "zh", false),
+    ("in chinese", "zh", false),
+];
+
+/// Words that make a weak trigger read as an instruction rather than content.
+const TRANSLATION_CUES: &[&str] = &[
+    "請", "幫", "把", "這句", "這段", "上面", "下面", "剛剛", "整理", "回答", "翻譯", "改成",
+];
+
+fn clause_bounds(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        if matches!(c, '，' | ',' | '。' | '！' | '!' | '？' | '?' | '；' | ';' | '：' | ':' | '\n') {
+            out.push(&text[start..i]);
+            start = i + c.len_utf8();
+        }
+    }
+    out.push(&text[start..]);
+    out
+}
+
+fn has_translation_cue(clause: &str) -> bool {
+    TRANSLATION_CUES.iter().any(|cue| clause.contains(cue))
+}
+
+/// Split a draft into (what to refine, language to translate into).
+///
+/// A translation request is obeyed by two deterministic steps -- refine in the
+/// speaker's own language, then translate the result -- instead of by asking the
+/// model to switch language mid-answer. The model did exactly that when the rule
+/// was left to it: a Chinese question containing an English product name stayed
+/// English, and the reverse request was ignored. Only `en` and `zh` are handled
+/// here because those are the directions `translate_prompt` has examples for.
+fn detect_translation_request(text: &str) -> Option<(&'static str, String)> {
+    let mut target: Option<&'static str> = None;
+    let mut kept: Vec<&str> = Vec::new();
+    for clause in clause_bounds(text) {
+        let lowered = clause.to_lowercase();
+        let mut is_instruction = false;
+        for (phrase, lang, strong) in TRANSLATION_TRIGGERS {
+            if !lowered.contains(phrase) {
+                continue;
+            }
+            if !strong && (!has_translation_cue(clause) || clause.chars().count() > 16) {
+                continue;
+            }
+            target = Some(*lang);
+            is_instruction = true;
+            break;
+        }
+        if !is_instruction && !clause.trim().is_empty() {
+            kept.push(clause.trim());
+        }
+    }
+    let target = target?;
+    if kept.is_empty() {
+        // Nothing left to translate, so this was not a request about a draft.
+        return None;
+    }
+    let cjk = kept.iter().any(|c| c.chars().any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)));
+    let joiner = if cjk { "，" } else { ", " };
+    Some((target, kept.join(joiner)))
+}
+
 /// Refine one transcript chunk with optional keywords hint.
 pub fn refine(model_path: &Path, text: &str) -> Result<String> {
     refine_with_keywords(model_path, text, "")
@@ -545,36 +781,70 @@ pub fn refine(model_path: &Path, text: &str) -> Result<String> {
 
 /// Refine with a keywords hint, which is added to the system line so the model
 /// can spell names and jargon the way the user does.
+///
+/// The result is passed through `tidy_output`: the delivery formatting rules
+/// (no wrapping quotes, no trailing full stop) hold even when the model ignores
+/// the prompt.
 pub fn refine_with_keywords(model_path: &Path, text: &str, keywords_hint: &str) -> Result<String> {
-    generate(model_path, &refine_prompt_with_hint(text, keywords_hint))
+    let Some((target, source)) = detect_translation_request(text) else {
+        let raw = generate(model_path, &refine_prompt_with_hint(text, keywords_hint))?;
+        return Ok(tidy_output(&raw));
+    };
+    // One load for both passes: refine in the speaker's language, then translate.
+    let be = backend()?;
+    let model = LlamaModel::load_from_file(be, model_path, &LlamaModelParams::default())
+        .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
+    let refined = tidy_output(&generate_in(&model, &refine_prompt_with_hint(&source, keywords_hint), MAX_NEW_TOKENS)?);
+    translate_in(&model, &refined, target)
+}
+
+/// Translate with an already-loaded model, falling back to the refined text when
+/// the translation comes back empty.
+fn translate_in(model: &LlamaModel, text: &str, target: &str) -> Result<String> {
+    let raw = generate_in(model, &translate_prompt(text, target), MAX_NEW_TOKENS)?;
+    let out = tidy_output(&raw);
+    if out.trim().is_empty() {
+        return Ok(text.to_string());
+    }
+    Ok(out)
 }
 
 /// Two-stage refine: first understand the speech, then tidy it.
 ///
 /// Both stages run against ONE loaded model, so the extra quality costs a second
 /// generation rather than a second model load. Stage 1 is skipped as an input if
-/// it comes back empty, and stage 2 falls back to stage 1's output.
+/// it comes back empty, and stage 2 falls back to stage 1's output. Both returns
+/// go through `tidy_output`.
 pub fn refine_two_stage(model_path: &Path, text: &str, keywords_hint: &str) -> Result<String> {
     let be = backend()?;
     let model = LlamaModel::load_from_file(be, model_path, &LlamaModelParams::default())
         .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
 
+    let (target, source) = match detect_translation_request(text) {
+        Some((target, source)) => (Some(target), source),
+        None => (None, text.to_string()),
+    };
+
     // Stage 1 rewrites at roughly the input's own length, so its cap scales;
     // stage 2 only condenses, so the normal cap is plenty.
-    let stage1_max = (text.chars().count() * 2).clamp(MAX_NEW_TOKENS, STAGE1_MAX_TOKENS);
-    let understood = generate_in(&model, &understand_prompt(text), stage1_max)?;
-    let middle = if understood.trim().is_empty() { text.to_string() } else { understood };
+    let stage1_max = (source.chars().count() * 2).clamp(MAX_NEW_TOKENS, STAGE1_MAX_TOKENS);
+    let understood = generate_in(&model, &understand_prompt(&source), stage1_max)?;
+    let middle = if understood.trim().is_empty() { source.clone() } else { understood };
 
     let condensed = generate_in(&model, &refine_prompt_with_hint(&middle, keywords_hint), MAX_NEW_TOKENS)?;
-    if condensed.trim().is_empty() {
-        return Ok(middle);
+    let refined = if condensed.trim().is_empty() { tidy_output(&middle) } else { tidy_output(&condensed) };
+    match target {
+        Some(target) => translate_in(&model, &refined, target),
+        None => Ok(refined),
     }
-    Ok(condensed)
 }
 
 /// One entry point for both refine shapes. `stages` is 1 (single pass), 2
 /// (understand then condense), or 0 for "decide by length" -- see
 /// `state::refine_text_with_keywords_stages`.
+///
+/// It has no generation of its own: both branches are the functions above, which
+/// already end in `tidy_output`, so the result is formatted either way.
 pub fn refine_stages(model_path: &Path, text: &str, keywords_hint: &str, stages: u32) -> Result<String> {
     match stages {
         1 => refine_with_keywords(model_path, text, keywords_hint),
@@ -664,5 +934,81 @@ mod tests {
         // An unclosed block means everything after it was reasoning.
         assert_eq!(strip_reasoning("答案<think>還在推理"), "答案");
         assert_eq!(strip_reasoning("沒有推理"), "沒有推理");
+    }
+
+    #[test]
+    fn tidy_drops_one_trailing_full_stop() {
+        assert_eq!(tidy_output("下週三開會。"), "下週三開會");
+        assert_eq!(tidy_output("開會．"), "開會");
+        assert_eq!(tidy_output("Ship it next week."), "Ship it next week");
+        // Only the last character is judged: an interior period is not a
+        // "trailing full stop" and stays.
+        assert_eq!(tidy_output("下週三開會。記得帶合約"), "下週三開會。記得帶合約");
+        assert_eq!(tidy_output("Line one.\nLine two."), "Line one.\nLine two");
+    }
+
+    #[test]
+    fn tidy_keeps_ellipsis_question_and_other_punctuation() {
+        assert_eq!(tidy_output("我再想想……"), "我再想想……");
+        assert_eq!(tidy_output("你有空嗎？"), "你有空嗎？");
+        assert_eq!(tidy_output("Can you send it?"), "Can you send it?");
+        assert_eq!(tidy_output("太好了！"), "太好了！");
+        assert_eq!(tidy_output("備註："), "備註：");
+    }
+
+    #[test]
+    fn tidy_strips_wrapping_quotes() {
+        assert_eq!(tidy_output("「下週三開會」"), "下週三開會");
+        assert_eq!(tidy_output("『備註』"), "備註");
+        assert_eq!(tidy_output("\"Ship it next week.\""), "Ship it next week");
+        assert_eq!(tidy_output("'ok'"), "ok");
+        // Whitespace outside the quotes goes too, and the quote unwrap runs
+        // before the full stop is looked at.
+        assert_eq!(tidy_output("  “下週三開會。”  "), "下週三開會");
+    }
+
+    #[test]
+    fn lone_bullet_is_dropped_but_a_list_keeps_its_bullets() {
+        assert_eq!(strip_lone_bullet("• 下週三開會"), "下週三開會");
+        assert_eq!(strip_lone_bullet("- 下週三開會"), "下週三開會");
+        assert_eq!(strip_lone_bullet("• 甲\n• 乙"), "• 甲\n• 乙");
+        assert_eq!(strip_lone_bullet("一般句子"), "一般句子");
+    }
+
+    #[test]
+    fn translation_request_is_split_from_the_draft() {
+        assert_eq!(
+            detect_translation_request("把這句翻成英文：明天下午三點跟客戶開會"),
+            Some(("en", "明天下午三點跟客戶開會".to_string()))
+        );
+        assert_eq!(
+            detect_translation_request("明天下午三點開會，翻成英文"),
+            Some(("en", "明天下午三點開會".to_string()))
+        );
+        assert_eq!(
+            detect_translation_request("請用英文回答，合約週五前寄出"),
+            Some(("en", "合約週五前寄出".to_string()))
+        );
+    }
+
+    #[test]
+    fn ordinary_mentions_of_a_language_are_not_requests() {
+        // "我用英文寫了一封信" is content, not an instruction.
+        assert_eq!(detect_translation_request("我用英文寫了一封信給客戶"), None);
+        // A question about the API must not be read as a request to translate.
+        assert_eq!(detect_translation_request("這個 API 的 rate limit 是多少？"), None);
+        // Nothing left once the instruction is removed.
+        assert_eq!(detect_translation_request("翻成英文"), None);
+    }
+
+    #[test]
+    fn tidy_keeps_multi_line_layout() {
+        assert_eq!(
+            tidy_output("• 第一點\n• 第二點。第三點"),
+            "• 第一點\n• 第二點。第三點"
+        );
+        // 3+ blank lines collapse to one; single newlines are the bullet layout.
+        assert_eq!(tidy_output("第一行\n\n\n\n第二行"), "第一行\n\n第二行");
+        assert_eq!(tidy_output("  我用 Slack 跟 PM 確認  "), "我用 Slack 跟 PM 確認");
     }
 }
