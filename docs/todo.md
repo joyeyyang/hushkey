@@ -7,7 +7,7 @@
 **症狀**：系統設定裡 `OfflineVoiceAssistant` 的開關看起來是開的，
 App 仍然顯示「尚未取得輔助使用權限」、貼不出去。
 
-**實際原因（已查證，不是猜的）**：使用者的 TCC 資料庫裡**根本沒有**
+**實際原因（已查證）**：使用者的 TCC 資料庫裡**沒有**
 這支 App 的 `kTCCServiceAccessibility` 紀錄，只有麥克風、行事曆、
 文件夾。也就是那條「開著的列」不是這支程式。
 
@@ -23,6 +23,11 @@ kTCCServiceCalendar|com.example.offlinevoiceassistant|2
 對不上執行中的二進位檔，而系統設定不會把那一列自動收掉——就成了
 「開關開著、API 說沒有」的死結，而且那個開關按不掉也重開不了。
 
+補充（01:00 查到的時序）：00:28 時資料庫確實沒有輔助使用列，App 也回報未授權；
+00:59:33 從 `dist/` 啟動時卻回報 `trusted=true`，代表那時已經有一筆對得上的授權。
+也就是「時好時壞」不是偵測程式有問題，是授權紀錄與當下執行的那份 bundle
+對得上或對不上。這批修正把「對不上」的情況變成使用者按一下就能清掉。
+
 **已做**：
 
 - `TextInjector.resetAccessibility()`：跑 `tccutil reset Accessibility <bundle id>`，
@@ -36,7 +41,11 @@ kTCCServiceCalendar|com.example.offlinevoiceassistant|2
 - 實測 `tccutil reset` 回了 3 次 `Successfully reset`（代表先前真的有 3 筆
   對不上的紀錄），清完後資料庫已無輔助使用列。
 
-**還要你做一次**：App 開著 → 按橫幅上的「重設權限（清掉舊紀錄）」→
+**目前狀態**：舊紀錄已清空（`tccutil reset` 回了 3 次成功），資料庫現在沒有
+輔助使用列，App 顯示未授權——這是預期中的乾淨起點。
+
+**還要你做一次**：App 開著 → 按橫幅上的「重設權限（清掉舊紀錄）」（或直接用
+啟動時跳出的系統對話框）→
 系統跳出的對話框按「打開系統設定」→ 在輔助使用清單用「＋」加入
 `/Applications/OfflineVoiceAssistant.app` 並打開開關 → 回 App，橫幅應該
 在 2 秒內自己消失。
