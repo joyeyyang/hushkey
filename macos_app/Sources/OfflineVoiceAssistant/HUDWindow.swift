@@ -58,6 +58,13 @@ final class HUDWindow: NSObject {
     private var noticeWork: DispatchWorkItem?
     private var onSubmit: (() -> Void)?
 
+    /// Escape hides the capsule. While this is set, a later status update must
+    /// not put it back in the user's face -- the point of pressing Escape is
+    /// that the window stays gone, not that it blinks. Cleared when a new
+    /// recording starts.
+    private(set) var dismissedByUser = false
+    private var escMonitor: Any?
+
     /// Called when the capsule's stop button is clicked.
     var onStop: (() -> Void)?
 
@@ -137,6 +144,46 @@ final class HUDWindow: NSObject {
         card.layoutHandler = { [weak self] in self?.layoutContents() }
         applyMode(.display)
         panel.orderOut(nil)
+        installEscapeMonitor()
+    }
+
+    /// Escape closes the capsule and nothing else.
+    ///
+    /// The capsule is a non-activating panel, so it is never the key window and
+    /// a local key monitor would never see the keystroke. A global monitor does,
+    /// and that is allowed here because the app already requires Accessibility
+    /// permission to paste. A global monitor cannot consume the event, so the
+    /// Escape still reaches whatever app the user was typing in -- we only hide
+    /// our own window.
+    ///
+    /// Deliberately NOT wired to `onStop`: Escape is "get this out of my sight",
+    /// not "stop recording". Recording, the audio buffer, the recognition and the
+    /// finished result are all untouched, and a pause is a separate control.
+    private func installEscapeMonitor() {
+        escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 53, let self, self.panel.isVisible else { return }
+            self.dismissCapsule()
+        }
+    }
+
+    /// Hides the capsule until the next recording starts.
+    func dismissCapsule() {
+        dismissedByUser = true
+        hide()
+    }
+
+    /// Re-arms the capsule for a session that is about to start, so an error or
+    /// permission prompt in that session is allowed to appear even if the
+    /// previous one was dismissed with Escape.
+    func allowShowingAgain() {
+        dismissedByUser = false
+    }
+
+    deinit {
+        // The monitor outlives nothing: it holds no reference to us, but leaving
+        // it installed after the window is gone would be a callback into freed
+        // state.
+        if let escMonitor { NSEvent.removeMonitor(escMonitor) }
     }
 
     // MARK: Sizing
@@ -215,6 +262,9 @@ final class HUDWindow: NSObject {
     // MARK: Showing
 
     func show(text: String, mode: Mode = .display, onSubmit: (() -> Void)? = nil, autoHide: TimeInterval? = nil) {
+        // Once the user has dismissed the capsule, status updates stop reopening
+        // it. `startRecording` clears the flag, so this only lasts one session.
+        guard !dismissedByUser else { return }
         self.onSubmit = onSubmit
         hideWork?.cancel()
         hideWork = nil
@@ -290,6 +340,9 @@ final class HUDWindow: NSObject {
 
     /// The recording capsule: 朱紅 mic, live level, live character count.
     func startRecording() {
+        // A new recording always gets its capsule back, however the last one was
+        // dismissed.
+        dismissedByUser = false
         show(text: "", mode: .recording)
     }
 
@@ -489,7 +542,7 @@ extension HUDWindow: NSTextFieldDelegate {
             onSubmit?()
             return true
         case #selector(NSResponder.cancelOperation(_:)):
-            hide()
+            dismissCapsule()
             return true
         default:
             return false

@@ -24,6 +24,10 @@
     <string>Records your voice for on-device speech recognition. Audio never leaves this Mac.</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>Records what this Mac is playing (the other people on a call) so meeting notes cover both sides. Audio is never muted or sent anywhere.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Reads the title of the meeting happening right now, so a recording is named after it. Only the title is used; event contents are not read.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Reads the title of the meeting happening right now, so a recording is named after it. Only the title is used; event contents are not read.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

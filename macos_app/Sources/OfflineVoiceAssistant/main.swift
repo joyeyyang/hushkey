@@ -7,6 +7,9 @@ final class AppController {
     private let keywords = Keywords()
     private let history = HistoryStore()
     private let hud = HUDWindow()
+    /// The live, verbatim transcript. Shown for both dictation and meeting mode;
+    /// closing it never stops the recording.
+    private let transcriptWindow = TranscriptWindow()
     /// The raw transcript behind the result currently being delivered, kept so
     /// history can store both the original wording and the cleaned-up line.
     private var lastRawTranscript = ""
@@ -310,9 +313,14 @@ final class AppController {
                         self.hud.show(text: msg)
                     }
                 }
+                // The core spawns ovc-llm-worker with Command::new, so the worker
+                // inherits this process's environment. Setting OVC_LLM_MODEL here --
+                // before the first refine -- is what makes the user's model choice
+                // reach the engine; passing it to a spawn call would reach nothing.
+                LLMSelection.applyToProcessEnvironment()
                 try Core.initialize(modelsDir: dir.path)
                 try Core.loadASR()
-                ModelInstaller.log("core ready: \(dir.path)")
+                ModelInstaller.log("core ready: \(dir.path) llm=\(LLMSelection.currentFileName)")
                 DispatchQueue.main.async {
                     self.loading = false
                     self.ready = true
@@ -350,6 +358,9 @@ final class AppController {
     // MARK: - Dictation
 
     private func startDictation() {
+        // A session the user asked for may show the capsule again, even if the
+        // previous one was dismissed with Escape.
+        hud.allowShowingAgain()
         guard AudioCapture.microphoneAuthorized() else {
             AudioCapture.requestMicrophone { granted in
                 DispatchQueue.main.async {
@@ -373,6 +384,7 @@ final class AppController {
                 self.dictating = true
                 self.setRecordingState()
                 self.hud.startRecording()
+                self.transcriptWindow.begin(title: "聽寫", status: "辨識中…")
                 self.startLiveCount()
                 let cap = AudioCapture(
                     onSamples: { [weak self] samples in
@@ -404,6 +416,7 @@ final class AppController {
         stopLiveCount()
         setRecordingState()
         hud.show(text: "轉錄中…")
+        finishTranscriptWindow(status: "辨識完成", labelled: false)
         coreQueue.async {
             do {
                 let text = try Core.stopASR()
@@ -417,6 +430,7 @@ final class AppController {
     // MARK: - Meeting (long recording -> saved transcript + best-effort summary)
 
     private func startMeeting() {
+        hud.allowShowingAgain()
         guard AudioCapture.microphoneAuthorized() else {
             AudioCapture.requestMicrophone { granted in
                 DispatchQueue.main.async {
@@ -444,6 +458,7 @@ final class AppController {
                 self.meetingWarnings = []
                 self.setRecordingState()
                 self.hud.startRecording()
+                self.transcriptWindow.begin(title: "會議逐字稿", status: "錄音中…")
                 self.startLiveCount()
                 let cap = AudioCapture(
                     onSamples: { [weak self] samples in
@@ -483,7 +498,7 @@ final class AppController {
             return
         }
         let tap = SystemAudioTap(onSamples: { [weak self] samples in
-            self?.coreQueue.async { try? Core.submit(samples) }
+            self?.coreQueue.async { try? Core.submit(samples, speaker: .other) }
         })
         do {
             try tap.start()
@@ -530,6 +545,7 @@ final class AppController {
         stopLiveCount()
         setRecordingState()
         hud.show(text: "整理會議中…長會議需要幾分鐘")
+        finishTranscriptWindow(status: "錄音結束", labelled: true)
         coreQueue.async {
             do {
                 let transcript = try Core.stopASR()
@@ -561,28 +577,50 @@ final class AppController {
 
     // MARK: - Live capsule readout
 
-    /// Polls a live transcript preview so the capsule can show a real character
-    /// count while the user is still speaking. The preview re-decodes whatever
-    /// audio is buffered, so it is polled slowly, never overlapped, and switched
-    /// off once a recording gets long enough for that to cost real time.
+    /// Polls the engine for freshly decoded utterances.
+    ///
+    /// Two jobs in one thread hop, for one reason: `takeSegments` is what makes
+    /// the engine segment and decode the audio it has queued, and `peek` is then
+    /// just a join over the utterances that already exist. Polling only `peek`
+    /// (as this used to) shows an empty transcript, because nothing ever asked
+    /// the engine to decode.
     private func startLiveCount() {
         stopLiveCount()
         recordingStart = Date()
-        let timer = Timer(timeInterval: 1.2, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            if Date().timeIntervalSince(self.recordingStart) > 60 { self.stopLiveCount(); return }
+            // Stops itself when the session ends; a long meeting must keep
+            // polling, so this is not a duration limit.
+            guard self.dictating || self.meeting else { self.stopLiveCount(); return }
             if self.peeking { return }
             self.peeking = true
             self.coreQueue.async {
+                let segments = (try? Core.takeSegments()) ?? []
                 let text = (try? Core.peekASR()) ?? ""
                 DispatchQueue.main.async {
                     self.peeking = false
                     self.hud.setCount(text.count)
+                    self.transcriptWindow.append(segments, showSpeaker: self.meeting)
                 }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         liveCountTimer = timer
+    }
+
+    /// `ASR_Stop` decodes the last utterance itself, after the final poll, so one
+    /// more drain is what puts the closing sentence in the window.
+    ///
+    /// `labelled` is passed in rather than read from `meeting`, because the caller
+    /// clears that flag before the session ends.
+    private func finishTranscriptWindow(status: String, labelled: Bool) {
+        self.coreQueue.async {
+            let tail = (try? Core.takeSegments()) ?? []
+            DispatchQueue.main.async {
+                self.transcriptWindow.append(tail, showSpeaker: labelled)
+                self.transcriptWindow.finish(status: status)
+            }
+        }
     }
 
     private func stopLiveCount() {

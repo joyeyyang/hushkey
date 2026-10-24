@@ -85,7 +85,18 @@ final class SystemAudioTap {
 
         // A tap cannot be read directly: it has to be published inside an
         // aggregate device, which then behaves like any other input device.
-        let outputUID = try Self.defaultOutputUID()
+        //
+        // Everything between creating the tap and starting the IOProc can
+        // still fail, and a tap that is created but never destroyed keeps the
+        // system recording with the orange microphone light on. So every exit
+        // from here tears the tap down again.
+        let outputUID: String
+        do {
+            outputUID = try Self.defaultOutputUID()
+        } catch {
+            destroyTap()
+            throw error
+        }
         let aggregate: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Offline Voice Assistant Tap",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
@@ -143,14 +154,26 @@ final class SystemAudioTap {
             aggregateID = AudioObjectID(kAudioObjectUnknown)
         }
         ioProcID = nil
-        if tapID != AudioObjectID(kAudioObjectUnknown) {
-            if #available(macOS 14.2, *) {
-                _ = AudioHardwareDestroyProcessTap(tapID)
-            }
-            tapID = AudioObjectID(kAudioObjectUnknown)
-        }
+        destroyTap()
         converter = nil
         inputFormat = nil
+    }
+
+    /// Destroy just the process tap. Split out of `stop()` so the failure paths
+    /// inside `start()` can release the tap without touching the aggregate
+    /// device, which does not exist yet at that point.
+    private func destroyTap() {
+        guard tapID != AudioObjectID(kAudioObjectUnknown) else { return }
+        if #available(macOS 14.2, *) {
+            _ = AudioHardwareDestroyProcessTap(tapID)
+        }
+        tapID = AudioObjectID(kAudioObjectUnknown)
+    }
+
+    deinit {
+        // Safety net: an owner that drops the tap without calling `stop()`
+        // must not leave the system recording.
+        stop()
     }
 
     // MARK: - Audio

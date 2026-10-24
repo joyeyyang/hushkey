@@ -9,6 +9,7 @@ pub mod chunking;
 mod error;
 pub mod llm;
 mod memory;
+pub mod segmentation;
 mod state;
 mod vad;
 
@@ -201,6 +202,94 @@ pub unsafe extern "C" fn ASR_Stop(out: *mut *mut c_char) -> c_int {
     })())
 }
 
+/// Append audio tagged with the route it came from.
+///
+/// `speaker` is 0 for the microphone and 1 for the system-audio tap. The tag is
+/// what makes a two-route meeting transcript possible: speech from the two
+/// routes is segmented separately, so the transcript can say who was talking
+/// without guessing.
+///
+/// # Safety
+/// `pcm` must point to `n` valid f32 samples (mono, 16 kHz).
+#[no_mangle]
+pub unsafe extern "C" fn ASR_SubmitTagged(
+    pcm: *const f32,
+    n: usize,
+    sample_rate: u32,
+    speaker: u32,
+) -> c_int {
+    if n == 0 {
+        return status(Ok(()));
+    }
+    if pcm.is_null() {
+        return status(Err(EngineError::new(ErrorCode::InvalidArg, "pcm is null")));
+    }
+    if speaker > 1 {
+        return status(Err(EngineError::new(
+            ErrorCode::InvalidArg,
+            "speaker must be 0 (microphone) or 1 (system audio)",
+        )));
+    }
+    let samples = std::slice::from_raw_parts(pcm, n);
+    status(state::asr_submit_tagged(samples, sample_rate, speaker as u8))
+}
+
+/// Decode the utterances that closed since the last call.
+///
+/// Returns a JSON array, `[]` when nothing is ready:
+/// `[{"index":1,"speaker":0,"start":1.234,"end":2.987,"text":"..."}]`
+/// `index` is 1-based and stable for the session; `start`/`end` are seconds from
+/// the start of the session. Only segments the caller has not been given yet are
+/// returned, so the caller appends and never has to diff. That includes the last
+/// utterance of a session: `ASR_Stop` decodes it itself, and one more call here
+/// after the stop yields it, which is how the live transcript window gets the
+/// closing sentence.
+///
+/// # Safety
+/// `out_json` must be a valid pointer to writable storage for one `char*`.
+#[no_mangle]
+pub unsafe extern "C" fn ASR_TakeSegments(out_json: *mut *mut c_char) -> c_int {
+    status((|| {
+        let segments = state::asr_take_segments()?;
+        write_out(out_json, &segments_json(&segments))
+    })())
+}
+
+fn segments_json(segments: &[state::StoredSegment]) -> String {
+    let mut out = String::from("[");
+    for (i, s) in segments.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"index\":{},\"speaker\":{},\"start\":{:.3},\"end\":{:.3},\"text\":\"{}\"}}",
+            s.index,
+            s.speaker,
+            s.start,
+            s.end,
+            json_escape(&s.text)
+        ));
+    }
+    out.push(']');
+    out
+}
+
+fn json_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 // ---- LLM (out-of-process worker) --------------------------------------------
 
 /// # Safety
@@ -281,4 +370,33 @@ pub unsafe extern "C" fn RAG_Search(_query: *const c_char, _out: *mut *mut c_cha
 #[no_mangle]
 pub unsafe extern "C" fn RAG_AddEntry(_entry: *const c_char) -> c_int {
     status(not_implemented("RAG_AddEntry"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_json_escapes_and_formats() {
+        let segments = vec![state::StoredSegment {
+            index: 3,
+            speaker: 1,
+            start: 1.2345,
+            end: 2.9876,
+            text: "他說「好」\n然後\t走了 \\ 回家".to_string(),
+        }];
+        let json = segments_json(&segments);
+        assert!(json.starts_with('[') && json.ends_with(']'), "{json}");
+        assert!(json.contains("\"index\":3"));
+        assert!(json.contains("\"speaker\":1"));
+        assert!(json.contains("\"start\":1.234"), "{json}");
+        assert!(json.contains("\\n"), "newline escaped: {json}");
+        assert!(json.contains("\\t"), "tab escaped: {json}");
+        assert!(json.contains("\\\\"), "backslash escaped: {json}");
+    }
+
+    #[test]
+    fn empty_segment_list_is_an_empty_array() {
+        assert_eq!(segments_json(&[]), "[]");
+    }
 }

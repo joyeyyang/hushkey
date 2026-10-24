@@ -55,13 +55,25 @@ int32_t Memory_GetUsage(OvcMemoryUsage *out);
 /* ---- ASR (SenseVoice, 16 kHz mono float32) ---- */
 int32_t ASR_Start(void);
 int32_t ASR_SubmitAudio(const float *pcm, size_t n, uint32_t sample_rate);
-/* Committed transcript so far; excludes buffered audio. */
+/* Same, but tags the route the audio came from: 0 = microphone, 1 = system
+ * audio. Speech from the two routes is segmented separately, which is what lets
+ * a meeting transcript attribute each sentence to 我 or 對方 without guessing. */
+int32_t ASR_SubmitTagged(const float *pcm, size_t n, uint32_t sample_rate, uint32_t speaker);
+/* Committed transcript so far; excludes audio that has not been segmented yet. */
 int32_t ASR_GetResult(char **out_text);
-/* Live preview of the transcript, decoding what is still buffered. Consumes
- * nothing, so it is safe to poll while recording. */
+/* Live preview of the transcript so far. Consumes nothing and no longer
+ * re-decodes anything, so it is cheap enough to poll while recording. */
 int32_t ASR_Peek(char **out_text);
 /* Decodes remaining audio, ends the session, returns the full transcript. */
 int32_t ASR_Stop(char **out_text);
+/* Decodes the utterances that closed since the previous call. Writes a JSON
+ * array of only the new segments, `[]` when nothing is ready:
+ *   [{"index":1,"speaker":0,"start":1.234,"end":2.987,"text":"..."}]
+ * `index` is 1-based and stable for the session; times are seconds from the
+ * start of the session. Call it from a timer, not from the audio callback:
+ * it decodes synchronously, which takes a few hundred milliseconds per
+ * utterance. */
+int32_t ASR_TakeSegments(char **out_json);
 
 /* ---- LLM (Qwen2.5 via worker process) ---- */
 /* Translates text into `target` ("en" or "zh") and writes it to *out_text. */

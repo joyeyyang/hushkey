@@ -151,13 +151,22 @@ const SUMMARY_SYSTEM_ZH: &str = "用繁體中文回答。只能使用逐字稿�
 pub const SECTION_SUMMARY: &str = "Write a short summary of this meeting in up to 3 sentences.";
 pub const SECTION_DECISIONS: &str = "Write the main decision this meeting made, in one or two \
 sentences. Write the decision itself only: no names and no assignments of work. Use only what \
-the transcript says. If there are none, reply with exactly: 无";
+the transcript says. If there are none, reply with exactly: none";
 /// The Chinese form of the 決議 instruction. Kept separate for a measured reason,
 /// not for its own sake: with the English instruction, a Chinese transcript that
 /// is mostly imperatives leaked the assignments into the decision
 /// (`珮婷整理使用者訪談紀錄`, `問設計公司報價`) with the very examples that are
 /// clean under the Chinese wording. The system line still decides the OUTPUT
 /// language; this decides what the model thinks it is being asked for.
+///
+/// The English instruction's "nothing here" marker is `none` while this one is
+/// `无`, and that is not cosmetic: with `无` there Qwen3.5-2B answered an English
+/// transcript's 決議 in Simplified Chinese (`会议决定将新首页…`), because that one
+/// Chinese character was the only non-English text in the whole prompt. `none`
+/// puts the answer back in English. (An English example pair was tried instead
+/// and reverted: it made the same model list the meeting's assignments under
+/// 決議.) `parse_no_decision` accepts both markers, so either wording is read
+/// correctly downstream.
 ///
 /// The English instruction's "nothing here" marker stays `无` on purpose. Making
 /// it `none` so an English chat could answer the marker was tried and reverted:
@@ -227,8 +236,12 @@ const DECISION_EXAMPLES_ZH: [(&str, &str); 2] = [
     // the section in state::tests and the known limitation in the summary docs.
 ];
 
-/// Empty on purpose -- see the note above the Chinese set. Adding an English
-/// example re-introduces assignment leakage that was measured three times.
+/// Empty on purpose -- an English example pair was measured twice and both
+/// times it made the model enumerate the meeting's assignments under 決議. The
+/// output-language problem that the empty set used to cause is fixed in the
+/// instruction's marker instead (see SECTION_DECISIONS): the prompt for an
+/// English transcript now contains no Chinese characters at all, so the 決議
+/// comes back in English without an example teaching it to list tasks.
 const DECISION_EXAMPLES_EN: [(&str, &str); 0] = [];
 
 const ACTION_EXAMPLES_ZH: [(&str, &str); 4] = [
@@ -404,11 +417,17 @@ pub fn generate_with(model_path: &Path, prompt: &str, max_new_tokens: usize) -> 
 /// The assistant turn we end every prompt with.
 const ASSISTANT_TURN: &str = "<|im_start|>assistant\n";
 /// An empty reasoning block, already closed. Generation continues after it.
-const EMPTY_THINK_BLOCK: &str = " thinking\n\n</thinking>\n\n";
+///
+/// This is byte-for-byte what the Qwen3.5 chat template emits when thinking is
+/// off, so the model treats it as the prefill it was trained on and answers
+/// straight away. The markers are `<think>`/`</think>` -- an earlier version
+/// used a bare " thinking" that the template never contained, so the block was
+/// never inserted and the model emitted its own reasoning into the answer.
+const EMPTY_THINK_BLOCK: &str = "<think>\n\n</think>\n\n";
 
 /// Qwen3/Qwen3.5 chat templates open a reasoning block. We build prompts by
 /// hand rather than applying the template, so nothing closes that block for us:
-/// the model opens ` thinking` itself and streams its reasoning into the answer.
+/// the model opens `<think>` itself and streams its reasoning into the answer.
 /// Pre-filling a closed, empty block keeps generation inside the answer.
 fn insert_think_block(prompt: &str) -> std::borrow::Cow<'_, str> {
     match prompt.rfind(ASSISTANT_TURN) {
@@ -424,14 +443,38 @@ fn insert_think_block(prompt: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Whether this model's own chat template has a reasoning block. Read from the
-/// GGUF metadata instead of a filename so Qwen2.5 -- which has none, and would
-/// echo the tags back as text -- is left alone.
+/// Whether this model's own chat template has a reasoning block.
+///
+/// Read from the GGUF metadata instead of a filename, so Qwen2.5 -- which has
+/// none, and would echo the tags back as text -- is left alone. The test looks
+/// for the two things the template actually contains: the `enable_thinking`
+/// switch and the `<think>` marker.
 fn template_uses_thinking(model: &LlamaModel) -> bool {
     model
         .meta_val_str("tokenizer.chat_template")
-        .map(|t| t.contains(" thinking"))
+        .map(|t| t.contains("enable_thinking") || t.contains("<think>"))
         .unwrap_or(false)
+}
+
+/// Remove a reasoning block the model emitted anyway, and the blank lines it
+/// leaves behind.
+///
+/// The prefill normally prevents this, but the model can still open a block
+/// when the prefill did not apply, and a stray `<think>` in a meeting summary
+/// is worse than a useless paragraph.
+pub fn strip_reasoning(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("<think>") {
+        out.push_str(&rest[..open]);
+        rest = match rest[open..].find("</think>") {
+            Some(close) => &rest[open + close + "</think>".len()..],
+            // Unclosed block: everything after it was reasoning.
+            None => return out.trim().to_string(),
+        };
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 fn with_thinking_disabled<'a>(model: &LlamaModel, prompt: &'a str) -> std::borrow::Cow<'a, str> {
@@ -490,7 +533,7 @@ fn generate_in(model: &LlamaModel, prompt: &str, max_new_tokens: usize) -> Resul
             .map_err(|e| EngineError::new(ErrorCode::Inference, format!("decode: {e}")))?;
         pos += 1;
     }
-    Ok(String::from_utf8_lossy(&out).trim().to_string())
+    Ok(strip_reasoning(&String::from_utf8_lossy(&out)))
 }
 
 /// Refine one transcript chunk with optional keywords hint.
@@ -587,5 +630,37 @@ mod tests {
     fn think_block_is_a_no_op_without_an_assistant_turn() {
         let prompt = "not a chat prompt";
         assert_eq!(insert_think_block(prompt), prompt);
+    }
+
+    #[test]
+    fn prefill_matches_the_real_qwen35_template() {
+        // Excerpt of the chat template of unsloth/Qwen3.5-2B-GGUF, copied
+        // verbatim out of the GGUF metadata.
+        //
+        // The block in the template is a Jinja string literal, so the newlines
+        // are written as the two characters \ and n and only become real
+        // newlines when the template is rendered. Rendering it here is what
+        // makes the comparison meaningful: the prefill has to be byte-identical
+        // to what the model would have been given by its own template.
+        let template = "{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n    {%- if enable_thinking is defined and enable_thinking is true %}\n        {{- '<think>\\n' }}\n    {%- else %}\n        {{- '<think>\\n\\n</think>\\n\\n' }}\n    {%- endif %}\n{%- endif %}";
+        assert!(
+            template.contains("enable_thinking") || template.contains("<think>"),
+            "the detection must match this template"
+        );
+        let rendered = template.replace("\\n", "\n");
+        assert!(
+            rendered.contains(EMPTY_THINK_BLOCK),
+            "the prefill must be byte-identical to the template's own block: {EMPTY_THINK_BLOCK:?}"
+        );
+        assert!(rendered.contains(ASSISTANT_TURN), "the turn marker must match too");
+    }
+
+    #[test]
+    fn reasoning_is_stripped_from_the_answer() {
+        assert_eq!(strip_reasoning("<think>\n\n</think>\n\n答案"), "答案");
+        assert_eq!(strip_reasoning("<think>推理過程</think>答案"), "答案");
+        // An unclosed block means everything after it was reasoning.
+        assert_eq!(strip_reasoning("答案<think>還在推理"), "答案");
+        assert_eq!(strip_reasoning("沒有推理"), "沒有推理");
     }
 }

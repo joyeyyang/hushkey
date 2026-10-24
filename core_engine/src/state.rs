@@ -1,25 +1,75 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::asr::Recognizer;
 use crate::error::{EngineError, ErrorCode};
 use crate::memory::{peak_rss_bytes, OvcMemoryUsage};
-use crate::vad;
+use crate::segmentation::{join_speech, Segmenter, Utterance};
 
 type Result<T, E = EngineError> = std::result::Result<T, E>;
 
 pub const SAMPLE_RATE: u32 = 16_000;
-/// Target segment length: 5 minutes.
-const SEGMENT_SAMPLES: usize = 300 * SAMPLE_RATE as usize;
-/// Search window on each side of the target for a silent cut: 20 seconds.
-const SEARCH_SAMPLES: usize = 20 * SAMPLE_RATE as usize;
-/// VAD analysis frame: 100 ms.
-const FRAME_SAMPLES: usize = SAMPLE_RATE as usize / 10;
+
+/// One decoded utterance, kept for the transcript window, the SRT export and the
+/// speaker-split transcript.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredSegment {
+    /// 1-based and never reused within a session: edit instructions address
+    /// sentences by this number.
+    pub index: u32,
+    /// 0 = microphone ("me"), 1 = system audio ("other").
+    pub speaker: u8,
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
 
 struct Session {
-    buffer: Vec<f32>,
-    transcript: String,
+    segments: Vec<StoredSegment>,
+    next_index: u32,
     finished: bool,
+    segmenter: Segmenter,
+    /// Speaker of the audio currently sitting inside `segmenter`.
+    speaker: u8,
+    /// How many segments the caller has already been handed.
+    ///
+    /// `ASR_Stop` decodes the last utterance itself, so it lands in `segments`
+    /// without ever passing through `asr_take_segments`. Counting what was
+    /// delivered lets the live transcript pick that tail up after the session
+    /// ends instead of losing the final sentence.
+    delivered: usize,
+}
+
+/// Audio captured but not yet segmented.
+///
+/// The microphone callback hands samples over on a realtime thread, and decoding
+/// an utterance costs hundreds of milliseconds. If that decode ran under the same
+/// lock the audio thread takes, the tap would drop frames, so captured audio
+/// waits here and is drained from the polling thread instead.
+struct AudioQueue {
+    chunks: VecDeque<(u8, Vec<f32>)>,
+    samples: usize,
+}
+
+impl AudioQueue {
+    const fn new() -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            samples: 0,
+        }
+    }
+}
+
+static AUDIO: Mutex<AudioQueue> = Mutex::new(AudioQueue::new());
+
+/// Twenty minutes of audio. The app drains this four times a second, so the cap
+/// only binds when segmentation has stalled; losing the oldest audio is better
+/// than growing until an 8 GB machine swaps.
+const AUDIO_CAP_SAMPLES: usize = 20 * 60 * SAMPLE_RATE as usize;
+
+fn audio_lock() -> MutexGuard<'static, AudioQueue> {
+    AUDIO.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 struct State {
@@ -52,11 +102,16 @@ pub fn set_models_dir(dir: PathBuf) -> Result<()> {
 }
 
 pub fn shutdown() {
-    let mut s = lock();
-    s.session = None;
-    s.asr = None;
-    s.asr_model_bytes = 0;
-    s.models_dir = None;
+    {
+        let mut s = lock();
+        s.session = None;
+        s.asr = None;
+        s.asr_model_bytes = 0;
+        s.models_dir = None;
+    }
+    let mut q = audio_lock();
+    q.chunks.clear();
+    q.samples = 0;
 }
 
 pub fn load_asr() -> Result<()> {
@@ -106,50 +161,101 @@ pub fn usage() -> OvcMemoryUsage {
 }
 
 pub fn asr_start() -> Result<()> {
-    let mut s = lock();
-    if s.asr.is_none() {
-        return Err(EngineError::new(
-            ErrorCode::NotLoaded,
-            "ASR model not loaded; call Agent_Load(\"asr\") first",
-        ));
+    {
+        let mut s = lock();
+        if s.asr.is_none() {
+            return Err(EngineError::new(
+                ErrorCode::NotLoaded,
+                "ASR model not loaded; call Agent_Load(\"asr\") first",
+            ));
+        }
+        if s.session.as_ref().is_some_and(|x| !x.finished) {
+            return Err(EngineError::new(ErrorCode::InvalidState, "ASR session already active"));
+        }
+        s.session = Some(Session {
+            segments: Vec::new(),
+            next_index: 1,
+            finished: false,
+            segmenter: Segmenter::new(),
+            speaker: 0,
+            delivered: 0,
+        });
     }
-    if s.session.as_ref().is_some_and(|x| !x.finished) {
-        return Err(EngineError::new(ErrorCode::InvalidState, "ASR session already active"));
-    }
-    s.session = Some(Session {
-        buffer: Vec::new(),
-        transcript: String::new(),
-        finished: false,
-    });
+    // The previous session's tail must not be decoded into this one. The state
+    // lock is released first: the order is always STATE then AUDIO, never both,
+    // so a capture thread waiting on AUDIO can never deadlock against a poller
+    // holding STATE.
+    let mut q = audio_lock();
+    q.chunks.clear();
+    q.samples = 0;
     Ok(())
 }
 
-/// Append mono float32 PCM at 16 kHz. Whenever the buffer holds a full segment
-/// plus the search window, decode the segment cut at the quietest nearby frame.
-pub fn asr_submit(samples: &[f32], sample_rate: u32) -> Result<()> {
+/// Append mono float32 PCM at 16 kHz, tagged with the route it came from
+/// (0 = microphone, 1 = system audio).
+///
+/// This runs on the realtime audio thread, so it only copies samples into the
+/// queue. Segmentation and decoding happen in `asr_take_segments`.
+pub fn asr_submit_tagged(samples: &[f32], sample_rate: u32, speaker: u8) -> Result<()> {
     if sample_rate != SAMPLE_RATE {
         return Err(EngineError::new(
             ErrorCode::InvalidArg,
             format!("sample_rate must be {SAMPLE_RATE}, got {sample_rate} (resampling not implemented)"),
         ));
     }
-    let mut guard = lock();
-    let State { asr, session, .. } = &mut *guard;
-    let rec = asr
-        .as_mut()
-        .ok_or_else(|| EngineError::new(ErrorCode::NotLoaded, "ASR model not loaded"))?;
-    let sess = active_session(session)?;
-    sess.buffer.extend_from_slice(samples);
-    while sess.buffer.len() >= SEGMENT_SAMPLES + SEARCH_SAMPLES {
-        let cut = vad::choose_cut(&sess.buffer, SEGMENT_SAMPLES, SEARCH_SAMPLES, FRAME_SAMPLES);
-        let text = rec.decode(&sess.buffer[..cut], SAMPLE_RATE)?;
-        sess.transcript.push_str(&text);
-        sess.buffer.drain(..cut);
+    if samples.is_empty() {
+        return Ok(());
+    }
+    let mut q = audio_lock();
+    let same_route = matches!(q.chunks.back(), Some((last, _)) if *last == speaker);
+    if same_route {
+        if let Some((_, buffer)) = q.chunks.back_mut() {
+            buffer.extend_from_slice(samples);
+        }
+    } else {
+        q.chunks.push_back((speaker, samples.to_vec()));
+    }
+    q.samples += samples.len();
+    while q.samples > AUDIO_CAP_SAMPLES {
+        match q.chunks.pop_front() {
+            Some((_, dropped)) => q.samples -= dropped.len(),
+            None => break,
+        }
     }
     Ok(())
 }
 
-/// Committed transcript so far. Excludes audio still buffered (< 5 min + 20 s).
+pub fn asr_submit(samples: &[f32], sample_rate: u32) -> Result<()> {
+    asr_submit_tagged(samples, sample_rate, 0)
+}
+
+/// Segment whatever has been captured since the last call and decode the
+/// utterances that closed. Returns only the new segments, so the caller can
+/// append them to a table without diffing.
+///
+/// New here means "not handed out yet", not "not decoded yet": after `ASR_Stop`
+/// has decoded the final utterance, one last call still yields it, which is how
+/// the live transcript window gets the last sentence of a session.
+pub fn asr_take_segments() -> Result<Vec<StoredSegment>> {
+    let chunks = drain_audio();
+    let mut guard = lock();
+    let State { asr, session, .. } = &mut *guard;
+    let Some(sess) = session.as_mut() else {
+        return Ok(Vec::new());
+    };
+    if !chunks.is_empty() && !sess.finished {
+        let asr = asr
+            .as_mut()
+            .ok_or_else(|| EngineError::new(ErrorCode::NotLoaded, "ASR model not loaded"))?;
+        let mut fresh = Vec::new();
+        feed_audio(sess, asr, chunks, &mut fresh)?;
+    }
+    let undelivered = sess.segments.get(sess.delivered..).unwrap_or(&[]).to_vec();
+    sess.delivered = sess.segments.len();
+    Ok(undelivered)
+}
+
+/// Committed transcript so far: the decoded utterances, joined.
 pub fn asr_result() -> Result<String> {
     let guard = lock();
     let sess = guard
@@ -157,46 +263,102 @@ pub fn asr_result() -> Result<String> {
         .as_ref()
         .filter(|x| !x.finished)
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "no active ASR session"))?;
-    Ok(sess.transcript.clone())
+    Ok(transcript_text(sess))
 }
 
-/// Live preview: decode whatever is still buffered and return the transcript as
-/// it would read right now, WITHOUT consuming the buffer or ending the session.
+/// Live preview of the transcript so far, without consuming anything.
 ///
-/// `asr_result` only moves once a whole 5-minute segment is committed, which
-/// never happens during a normal dictation -- so the HUD's live character count
-/// needs this instead. Re-decoding the same buffer is safe (the recogniser is
-/// stateless per call), but the cost grows with the audio held, so callers poll
-/// it slowly and stop once a recording gets long.
+/// This used to re-decode the whole buffered audio, which grew more expensive
+/// the longer someone talked. With utterance segmentation the text is already
+/// there, so this is a join and costs nothing; poll it as often as the UI likes.
 pub fn asr_peek() -> Result<String> {
-    let mut guard = lock();
-    let State { asr, session, .. } = &mut *guard;
-    let rec = asr
-        .as_mut()
-        .ok_or_else(|| EngineError::new(ErrorCode::NotLoaded, "ASR model not loaded"))?;
-    let sess = active_session(session)?;
-    let mut full = sess.transcript.clone();
-    if !sess.buffer.is_empty() {
-        full.push_str(&rec.decode(&sess.buffer, SAMPLE_RATE)?);
-    }
-    Ok(full)
+    asr_result()
 }
 
 /// Decode remaining buffered audio, end the session, and return the full transcript.
 pub fn asr_stop() -> Result<String> {
+    let chunks = drain_audio();
     let mut guard = lock();
     let State { asr, session, .. } = &mut *guard;
     let sess = active_session(session)?;
-    if !sess.buffer.is_empty() {
-        let rec = asr
+    let mut fresh = Vec::new();
+    if !chunks.is_empty() {
+        let asr = asr
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::NotLoaded, "ASR model not loaded"))?;
-        let text = rec.decode(&sess.buffer, SAMPLE_RATE)?;
-        sess.transcript.push_str(&text);
-        sess.buffer.clear();
+        feed_audio(sess, asr, chunks, &mut fresh)?;
+    }
+    let mut tail = Vec::new();
+    sess.segmenter.flush(&mut tail);
+    if !tail.is_empty() {
+        let speaker = sess.speaker;
+        let asr = asr
+            .as_mut()
+            .ok_or_else(|| EngineError::new(ErrorCode::NotLoaded, "ASR model not loaded"))?;
+        decode_into(sess, asr, tail, speaker, &mut fresh)?;
     }
     sess.finished = true;
-    Ok(sess.transcript.clone())
+    Ok(transcript_text(sess))
+}
+
+fn drain_audio() -> Vec<(u8, Vec<f32>)> {
+    let mut q = audio_lock();
+    q.samples = 0;
+    q.chunks.drain(..).collect()
+}
+
+fn feed_audio(
+    sess: &mut Session,
+    rec: &mut Recognizer,
+    chunks: Vec<(u8, Vec<f32>)>,
+    out: &mut Vec<StoredSegment>,
+) -> Result<()> {
+    for (speaker, samples) in chunks {
+        if speaker != sess.speaker {
+            // Speech from two different routes must never share an utterance.
+            let mut finished = Vec::new();
+            sess.segmenter.flush(&mut finished);
+            let previous = sess.speaker;
+            decode_into(sess, rec, finished, previous, out)?;
+            sess.speaker = speaker;
+        }
+        let mut finished = Vec::new();
+        sess.segmenter.push(&samples, &mut finished);
+        decode_into(sess, rec, finished, speaker, out)?;
+    }
+    Ok(())
+}
+
+fn decode_into(
+    sess: &mut Session,
+    rec: &mut Recognizer,
+    utterances: Vec<Utterance>,
+    speaker: u8,
+    out: &mut Vec<StoredSegment>,
+) -> Result<()> {
+    for utterance in utterances {
+        let text = rec.decode(&utterance.samples, SAMPLE_RATE)?;
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let segment = StoredSegment {
+            index: sess.next_index,
+            speaker,
+            start: utterance.start,
+            end: utterance.end,
+            text: text.to_string(),
+        };
+        sess.next_index += 1;
+        sess.segments.push(segment.clone());
+        out.push(segment);
+    }
+    Ok(())
+}
+
+fn transcript_text(sess: &Session) -> String {
+    let parts: Vec<&str> = sess.segments.iter().map(|s| s.text.as_str()).collect();
+    join_speech(&parts)
 }
 
 fn active_session(slot: &mut Option<Session>) -> Result<&mut Session> {
@@ -525,13 +687,73 @@ fn strip_owner_clauses(decisions: &str, actions: &str) -> String {
     // decision got dropped. Needs a word-level test, not this one.
     let kept: Vec<(String, String)> = split_clauses(decisions)
         .into_iter()
-        .filter(|(clause, _)| !owners.iter().any(|owner| names_owner(clause, owner)))
+        .filter(|(clause, _)| !names_an_owner(clause, &owners))
         .collect();
     if kept.is_empty() {
         "（無）".to_string()
     } else {
         join_clauses(&kept, crate::llm::has_cjk(decisions))
     }
+}
+
+/// Whether a decision clause is really an assignment that leaked out of the
+/// action list.
+///
+/// Merely mentioning a person is not an assignment. "Sarah 明年三月退休" is a
+/// decision about Sarah, and dropping it because Sarah happens to be on the
+/// action list throws away a real decision -- which is the one thing this
+/// filter cannot put back.
+///
+/// A Chinese assignment carries a task verb or a deadline, and that is what is
+/// looked for. English keeps the older, looser rule (naming an owner is enough)
+/// because a third-person verb marks neither "Marcus calls the vendor" nor
+/// "Sarah retires in March", and the measured English cases are assignments.
+fn names_an_owner(clause: &str, owners: &[String]) -> bool {
+    owners.iter().any(|owner| {
+        names_owner(clause, owner) && (!crate::llm::has_cjk(clause) || looks_like_a_task(clause))
+    })
+}
+
+/// Cues that make a Chinese clause a piece of work rather than a statement
+/// about a person.
+fn looks_like_a_task(clause: &str) -> bool {
+    // 安排 is in the list because a meeting with no decisions at all still
+    // produced one: "美玲下週安排時間校對官網文案" survived as the 決議 of an
+    // assignments-only meeting, because 安排 was not a task cue and 下週 without
+    // 以前/之前 is not a deadline. It only ever applies to a clause that already
+    // names an owner from the action list, so a decision about scheduling that
+    // names nobody ("決定安排員工旅遊") is untouched.
+    const TASK_VERBS: [&str; 11] = [
+        "負責", "完成", "整理", "處理", "送出", "更新", "請", "必須", "交付", "跟進", "安排",
+    ];
+    TASK_VERBS.iter().any(|cue| clause.contains(cue)) || has_deadline(clause)
+}
+
+/// Whether a clause names a deadline.
+///
+/// "下週五以前" and "下週五前" are deadlines; "目前" and "前面" are not, so the
+/// character before 前 is checked instead of the character itself.
+fn has_deadline(clause: &str) -> bool {
+    if clause.contains("以前") || clause.contains("之前") || clause.contains("截止") {
+        return true;
+    }
+    let chars: Vec<char> = clause.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        if *c != '前' || i == 0 {
+            continue;
+        }
+        let previous = chars[i - 1];
+        if previous.is_ascii_digit() || "一二三四五六七八九十日天週禮拜".contains(previous) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a separator ends a sentence, as opposed to merely joining two parts
+/// of one.
+fn ends_a_sentence(separator: &str) -> bool {
+    matches!(separator, "。" | "！" | "？" | "!" | "?" | ".")
 }
 
 /// Splits text into `(clause, trailing separator)` pairs. Both sentence and list
@@ -574,7 +796,11 @@ fn join_clauses(clauses: &[(String, String)], chinese: bool) -> String {
             } else {
                 out.push_str(separator);
             }
-        } else if separator.is_empty() {
+        } else if separator.is_empty() || !ends_a_sentence(separator) {
+            // The last clause cannot end on a weak separator. When a clause was
+            // dropped, the one before it still carries the separator it had in
+            // the middle of the list ("…、") and ending there leaves the section
+            // dangling: "決定上線，預算砍三成、".
             out.push_str(ending);
         } else {
             out.push_str(separator);
@@ -637,7 +863,7 @@ fn split_owner(line: &str) -> Option<(&str, &str)> {
 /// direction: the line restating the clause, or the clause being the line's
 /// content said shorter -- "行銷活動暫緩" against "暫緩行銷活動，等產品穩定再說" is
 /// the same decision twice, and neither direction alone catches both.
-fn restates(line: &[String], clause: &[String]) -> bool {
+fn restates(line: &[String], clause: &[String], line_text: &str, clause_text: &str) -> bool {
     const RESTATED: f32 = 0.60;
     if line.is_empty() || clause.is_empty() {
         return false;
@@ -647,8 +873,22 @@ fn restates(line: &[String], clause: &[String]) -> bool {
         return true;
     }
     // A short clause contained in a longer line is only a duplicate if the clause
-    // is substantial; a two-character grab would match half the list.
-    clause.len() >= 4 && (shared as f32) / (clause.len() as f32) >= RESTATED
+    // is substantial; a two-character grab would match half the list. It also
+    // has to be a duplicate and nothing more: a line that starts with the
+    // decision but names work of its own is not saying the decision twice.
+    clause.len() >= 4
+        && (shared as f32) / (clause.len() as f32) >= RESTATED
+        && !adds_work_of_its_own(line_text, clause_text)
+}
+
+/// Whether an action line carries work that the decision it echoes does not.
+///
+/// "暫緩行銷活動，等產品穩定再說" says the same as "行銷活動暫緩" and is dropped.
+/// "停用舊版後要更新說明文件" starts with the decision but also names a task
+/// nobody mentioned, and dropping it would lose that task.
+fn adds_work_of_its_own(line: &str, clause: &str) -> bool {
+    const WORK_CUES: [&str; 8] = ["要", "需要", "負責", "記得", "請", "必須", "處理", "更新"];
+    WORK_CUES.iter().any(|cue| line.contains(cue) && !clause.contains(cue))
 }
 
 /// Rebuilds the 待辦 answer as one bulleted item per line.
@@ -708,9 +948,9 @@ fn drop_ownerless_restatements(actions: &str, decisions: &str) -> String {
     if actions.trim().is_empty() || actions == "（無）" {
         return actions.to_string();
     }
-    let clauses: Vec<Vec<String>> = split_clauses(decisions)
+    let clauses: Vec<(Vec<String>, String)> = split_clauses(decisions)
         .into_iter()
-        .map(|(clause, _)| gram_set(&clause))
+        .map(|(clause, _)| (gram_set(&clause), clause))
         .collect();
     let kept: Vec<&str> = actions
         .lines()
@@ -723,7 +963,9 @@ fn drop_ownerless_restatements(actions: &str, decisions: &str) -> String {
                 return true;
             }
             let grams = gram_set(trimmed);
-            !clauses.iter().any(|clause| restates(&grams, clause))
+            !clauses.iter().any(|(clause_grams, clause_text)| {
+                restates(&grams, clause_grams, trimmed, clause_text)
+            })
         })
         .collect();
     if kept.is_empty() {
@@ -967,6 +1209,17 @@ mod tests {
         );
     }
 
+    /// A meeting that decided nothing still gets a 決議 from the model, and the
+    /// one it produced was an assignment phrased with 安排 rather than 負責.
+    #[test]
+    fn a_scheduling_assignment_is_not_a_decision() {
+        let decisions = "志豪安排伺服器備份排程，美玲安排下週校對官網文案。";
+        let actions = "- 怡君：整理上週會議紀錄，明天之前寄給大家\n\
+                       - 志豪：這週五以前把伺服器備份排程設好\n\
+                       - 美玲：下週找時間把官網文案校對一次";
+        assert_eq!(strip_owner_clauses(decisions, actions), "（無）");
+    }
+
     /// Decisions only, nobody assigned: every 待辦 line is a decision said twice,
     /// so 待辦 is empty -- which is the truth, and the whole point of the filter.
     #[test]
@@ -1022,5 +1275,76 @@ mod tests {
         let decisions = "決定把客服服務時間延長到晚上九點。";
         assert_eq!(strip_owner_clauses(decisions, "- 買咖啡豆"), decisions);
         assert_eq!(strip_owner_clauses(decisions, "（無）"), decisions);
+    }
+
+    /// A decision ABOUT a person is not an assignment. Sarah can be on the action
+    /// list and the decision "Sarah 明年三月退休" still has to survive: it names
+    /// her, but it is not work being handed to her.
+    #[test]
+    fn a_decision_about_a_person_is_not_an_assignment() {
+        let decisions = "Sarah 明年三月退休。";
+        let actions = "- Sarah: 交接工作";
+        assert_eq!(
+            strip_owner_clauses(decisions, actions),
+            "Sarah 明年三月退休。"
+        );
+    }
+
+    /// The assignment shape still goes, even in Chinese: a task verb and a
+    /// deadline are what tell the two apart.
+    #[test]
+    fn a_chinese_assignment_still_leaves_the_decision() {
+        let decisions = "決定下週三上線，怡君下週五前完成客服 SOP。";
+        let actions = "- 怡君：下週五以前把客服的 SOP 生出來";
+        let cleaned = strip_owner_clauses(decisions, actions);
+        assert!(!cleaned.contains("怡君"), "leaked into: {cleaned}");
+        assert!(cleaned.contains("下週三上線"), "lost a decision: {cleaned}");
+    }
+
+    /// A section must not end on a separator that was in the middle of the list.
+    /// Dropping a clause used to leave "決定上線，預算砍三成、".
+    #[test]
+    fn the_decision_does_not_end_on_a_dangling_separator() {
+        let decisions = "決定下週三上線、廣告預算砍三成、怡君下週五前完成客服 SOP。";
+        let actions = "- 怡君：下週五以前把客服的 SOP 生出來";
+        let cleaned = strip_owner_clauses(decisions, actions);
+        assert!(cleaned.ends_with('。'), "dangling end: {cleaned}");
+        assert!(!cleaned.ends_with('、'), "dangling end: {cleaned}");
+    }
+
+    /// An action line that starts with the decision but names work of its own is
+    /// not the decision said twice, and dropping it loses that work.
+    #[test]
+    fn an_action_that_adds_work_is_not_a_restatement() {
+        let decisions = "決定停用舊版。";
+        let actions = "- 停用舊版後要更新說明文件";
+        assert_eq!(drop_ownerless_restatements(actions, decisions), actions);
+    }
+
+    /// A real Qwen3.5-2B answer to verification transcript t1, which is what the
+    /// filter sees in production. Two assignments have to leave, the two real
+    /// decisions have to stay, and the section must not end on the "、" that used
+    /// to be in the middle of the list.
+    #[test]
+    fn a_real_qwen35_answer_keeps_its_decisions() {
+        let decisions = "決定下週三正式上線、廣告預算砍三成並保留多餘部分、\
+                         怡君下週五前完成客服 SOP、志豪下週四前整理測試報告。";
+        let actions = "- 怡君：下週五以前把客服的 SOP 生出來\n\
+                       - 志豪：這週四以前把測試報告整理好寄給我\n\
+                       - 我：下週一以前把合約草稿送給法務";
+        let cleaned = strip_owner_clauses(decisions, actions);
+        assert!(cleaned.contains("上線"), "lost the decision: {cleaned}");
+        assert!(cleaned.contains("廣告預算"), "lost the decision: {cleaned}");
+        assert!(!cleaned.contains("怡君"), "kept an assignment: {cleaned}");
+        assert!(!cleaned.contains("志豪"), "kept an assignment: {cleaned}");
+        assert!(cleaned.ends_with('。'), "dangling end: {cleaned}");
+    }
+
+    /// The same line without the extra work IS the decision said twice.
+    #[test]
+    fn an_action_that_only_repeats_the_decision_goes() {
+        let decisions = "決定停用舊版。";
+        let actions = "- 停用舊版";
+        assert_eq!(drop_ownerless_restatements(actions, decisions), "（無）");
     }
 }
