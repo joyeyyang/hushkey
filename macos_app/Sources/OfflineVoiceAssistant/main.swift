@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 /// Coordinates setup -> hotkey -> mic -> core ASR -> LLM polish -> text injection.
 /// Core and audio calls run on coreQueue; all UI updates run on the main thread.
@@ -32,6 +33,15 @@ final class AppController {
     /// recorded (e.g. the system-audio tap was refused). Kept so the saved file
     /// and the final message can say what is missing from the recording.
     private var meetingWarnings: [String] = []
+    /// Segments of the current recording, in order. The engine only hands out
+    /// segments it has not delivered yet, so this list is append-only and is the
+    /// single source of truth for the transcript window and every export.
+    private var sessionSegments: [TranscriptSegment] = []
+    private var sessionStartedAt = Date()
+    /// The last finished recording in exporter form, kept so 匯出 still works
+    /// after the recording is over.
+    private var lastSession: SessionExport?
+    private var exportSettings = ExportSettings.load()
     private var ready = false
     private var loading = false
     private var permissionTimer: Timer?
@@ -92,7 +102,24 @@ final class AppController {
         }
         window.onQuit = { NSApp.terminate(nil) }
         window.onRecheckPermission = { [weak self] in self?.refreshPermission(reason: "button") }
+        // Export settings live in one blob (ExportSettings) rather than three
+        // UserDefaults keys, so MainWindow saves the value it already owns.
+        window.onExportSettingsChange = { [weak self] settings in
+            settings.save()
+            self?.exportSettings = settings
+            ModelInstaller.log(
+                "export: \(settings.format.rawValue) auto=\(settings.autoSave) folder=\(settings.folder)"
+            )
+        }
+        window.onExportNow = { [weak self] in self?.exportLastSession() }
         mainWindow = window
+
+        // Asked once, up front: naming a recording after the calendar event it
+        // belongs to only works if the permission is already granted when the
+        // meeting stops, and the prompt must not appear then.
+        CalendarNaming.requestAccessIfNeeded { granted in
+            ModelInstaller.log("calendar access: \(granted)")
+        }
 
         // The capsule's stop button ends the recording without the hotkey.
         hud.onStop = { [weak self] in self?.stopFromCapsule() }
@@ -118,6 +145,7 @@ final class AppController {
         // The menu-bar icon reopens the window and never quits the app.
         statusItem = StatusItem(
             onOpen: { [weak self] in self?.showMainWindow() },
+            onExport: { [weak self] in self?.exportLastSession() },
             onQuit: { NSApp.terminate(nil) }
         )
 
@@ -382,6 +410,8 @@ final class AppController {
             DispatchQueue.main.async {
                 self.sessionStarting = false
                 self.dictating = true
+                self.sessionSegments = []
+                self.sessionStartedAt = Date()
                 self.setRecordingState()
                 self.hud.startRecording()
                 self.transcriptWindow.begin(title: "聽寫", status: "辨識中…")
@@ -456,6 +486,8 @@ final class AppController {
                 self.meeting = true
                 self.dictating = false
                 self.meetingWarnings = []
+                self.sessionSegments = []
+                self.sessionStartedAt = Date()
                 self.setRecordingState()
                 self.hud.startRecording()
                 self.transcriptWindow.begin(title: "會議逐字稿", status: "錄音中…")
@@ -546,6 +578,14 @@ final class AppController {
         setRecordingState()
         hud.show(text: "整理會議中…長會議需要幾分鐘")
         finishTranscriptWindow(status: "錄音結束", labelled: true)
+        // Everything below is read on the main thread and handed to the worker as
+        // values: the summary takes minutes, EventKit and the segment list are
+        // both main-thread state, and reading them from the worker would be a
+        // race that only shows up on a long meeting.
+        let eventTitle = CalendarNaming.recentlyEndedTitle()
+        let caveat = meetingCaveat
+        let document = makeDocument()
+        let warnings = meetingWarnings
         coreQueue.async {
             do {
                 let transcript = try Core.stopASR()
@@ -556,18 +596,28 @@ final class AppController {
                     DispatchQueue.main.async {
                         self.hud.flash("沒有錄到聲音，未儲存會議記錄", seconds: 5)
                         self.mainWindow?.setTranscript("（這次會議沒有錄到聲音，未儲存檔案。）")
+                        self.meetingWarnings = []
                     }
                     return
                 }
-                let saved = try self.saveMeeting(transcript)
+                let saved = try self.saveMeeting(transcript, caveat: caveat, eventTitle: eventTitle)
+                let session = SessionExport(
+                    document: document,
+                    summary: saved.summary,
+                    translation: nil,
+                    caveat: caveat,
+                    eventTitle: eventTitle
+                )
                 DispatchQueue.main.async {
+                    self.lastSession = session
                     self.mainWindow?.setTranscript(transcript)
-                    if self.meetingWarnings.isEmpty {
-                        self.hud.flash("已儲存會議記錄：\(saved.lastPathComponent)", seconds: 4)
+                    if warnings.isEmpty {
+                        self.hud.flash("已儲存會議記錄：\(saved.url.lastPathComponent)", seconds: 4)
                     } else {
                         self.hud.flash("已儲存（部分內容未錄到，詳見紀錄）", seconds: 5)
                     }
                     self.meetingWarnings = []
+                    self.autoExport(session)
                 }
             } catch {
                 DispatchQueue.main.async { self.hud.flash("\(error)", seconds: 5) }
@@ -600,6 +650,7 @@ final class AppController {
                 DispatchQueue.main.async {
                     self.peeking = false
                     self.hud.setCount(text.count)
+                    self.sessionSegments.append(contentsOf: segments)
                     self.transcriptWindow.append(segments, showSpeaker: self.meeting)
                 }
             }
@@ -617,6 +668,7 @@ final class AppController {
         self.coreQueue.async {
             let tail = (try? Core.takeSegments()) ?? []
             DispatchQueue.main.async {
+                self.sessionSegments.append(contentsOf: tail)
                 self.transcriptWindow.append(tail, showSpeaker: labelled)
                 self.transcriptWindow.finish(status: status)
             }
@@ -638,30 +690,49 @@ final class AppController {
     }
 
     /// Writes the transcript to the meetings folder and, best-effort, a summary.
+    ///
+    /// `eventTitle` is the calendar event the recording belongs to, when there is
+    /// one: naming a file after the meeting is the point of asking for calendar
+    /// access, and it also gives the exported note a human title instead of
+    /// "會議紀錄 2026/10/24".
     @discardableResult
-    private func saveMeeting(_ transcript: String) throws -> URL {
+    private func saveMeeting(_ transcript: String, caveat: String, eventTitle: String?) throws
+        -> (url: URL, summary: String) {
         let dir = meetingsDirectory()
         let stamp = Self.stampFormatter.string(from: Date())
         // The recognizer and the model both drift into Simplified; the file is
         // for a Taiwanese reader, so normalize once here rather than in each pass.
         let traditional = toTraditional(transcript)
-        let txt = dir.appendingPathComponent("meeting-\(stamp).txt")
+        let base: String
+        if let eventTitle, !eventTitle.isEmpty {
+            let day = Self.dayFormatter.string(from: sessionStartedAt)
+            base = "\(day) \(Naming.sanitize(eventTitle))"
+        } else {
+            base = "meeting-\(stamp)"
+        }
+        let txt = dir.appendingPathComponent("\(base).txt")
         try traditional.write(to: txt, atomically: true, encoding: .utf8)
         // Summary is optional: a long transcript spawns several worker passes,
-        // each of which reloads the model. Failure just means no .md file.
+        // each of which reloads the model. Failure just means no shell to fill.
+        var summary = ""
         if !traditional.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           let summary = try? Core.summarize(traditional), !summary.isEmpty {
-            let md = dir.appendingPathComponent("meeting-\(stamp).md")
+           let answer = try? Core.summarize(traditional), !answer.isEmpty {
+            summary = toTraditional(answer)
+            let md = dir.appendingPathComponent("\(base).md")
             // A meeting recorded without the system-audio tap is missing the
             // other side of the call. Say so in the file: a reader cannot tell a
             // one-sided transcript from a quiet room.
-            let caveat = meetingWarnings.isEmpty
-                ? ""
-                : "> 錄音提示：\(self.meetingWarnings.joined(separator: "；"))\n\n"
-            try? "\(caveat)\(toTraditional(summary))\n\n---\n\n\(traditional)\n"
+            try? "\(caveat)\(summary)\n\n---\n\n\(traditional)\n"
                 .write(to: md, atomically: true, encoding: .utf8)
         }
-        return txt
+        return (txt, summary)
+    }
+
+    /// The caveat block for a one-sided recording, empty when nothing was wrong.
+    private var meetingCaveat: String {
+        meetingWarnings.isEmpty
+            ? ""
+            : "> 錄音提示：\(meetingWarnings.joined(separator: "；"))\n\n"
     }
 
     private static let stampFormatter: DateFormatter = {
@@ -669,6 +740,123 @@ final class AppController {
         f.dateFormat = "yyyyMMdd-HHmmss"
         return f
     }()
+
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    // MARK: - Export
+
+    /// One finished recording, in the shape the exporter needs.
+    ///
+    /// The summary is markdown from the model, the caveat is ours, and the title
+    /// is decided once at the end so the save panel, the auto-save and the file
+    /// on disk all agree.
+    private struct SessionExport {
+        var document: TranscriptDocument
+        var summary: String
+        var translation: String?
+        var caveat: String
+        var eventTitle: String?
+    }
+
+    /// The document accumulated by the live poll.
+    private func makeDocument(endedAt: Date = Date()) -> TranscriptDocument {
+        TranscriptDocument(startedAt: sessionStartedAt, endedAt: endedAt, segments: sessionSegments)
+    }
+
+    private func bundle(for session: SessionExport) -> ExportBundle {
+        ExportBundle(
+            title: Naming.title(
+                summary: session.summary,
+                eventTitle: session.eventTitle,
+                date: session.document.startedAt
+            ),
+            transcript: session.document,
+            summaryMarkdown: session.caveat + session.summary,
+            translation: session.translation
+        )
+    }
+
+    /// "匯出最近一次逐字稿…" from the app, or the menu-bar item.
+    ///
+    /// A folder is only used without asking when the user turned auto-save on;
+    /// otherwise the save panel decides where the file goes.
+    func exportLastSession() {
+        guard let session = lastSession else {
+            hud.flash("還沒有可匯出的逐字稿", seconds: 3)
+            return
+        }
+        let bundle = self.bundle(for: session)
+
+        if exportSettings.autoSave, exportSettings.folderURL != nil {
+            write(bundle, to: nil)
+            return
+        }
+
+        let format = exportSettings.format
+        let panel = NSSavePanel()
+        panel.title = "匯出逐字稿"
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = Naming.filename(
+            title: bundle.title,
+            date: session.document.startedAt,
+            format: format
+        )
+        if let type = UTType(filenameExtension: format.fileExtension) {
+            panel.allowedContentTypes = [type]
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        write(bundle, to: url)
+    }
+
+    /// Writes one bundle, either to `url` or to the configured folder.
+    private func write(_ bundle: ExportBundle, to url: URL?) {
+        do {
+            let target: URL
+            if let url {
+                try Exporter.data(bundle, as: exportSettings.format).write(to: url, options: .atomic)
+                target = url
+            } else {
+                target = try Exporter.save(
+                    bundle,
+                    as: exportSettings.format,
+                    settings: exportSettings
+                )
+            }
+            hud.flash("已匯出：\(target.lastPathComponent)", seconds: 4)
+            ModelInstaller.log("exported \(target.path)")
+        } catch {
+            hud.flash("匯出失敗：\(error)", seconds: 5)
+        }
+    }
+
+    /// Auto-save after a recording, when the user asked for it.
+    private func autoExport(_ session: SessionExport) {
+        guard exportSettings.autoSave, exportSettings.folderURL != nil else { return }
+        write(bundle(for: session), to: nil)
+    }
+
+    /// Keeps a finished dictation exportable, and auto-exports it if asked.
+    ///
+    /// A dictation has no summary section of its own: the polished line IS the
+    /// content, and the verbatim segments are the transcript underneath it.
+    private func rememberDictation(_ polished: String) {
+        guard !isSelfTest else { return }
+        let document = makeDocument()
+        guard !document.segments.isEmpty || !polished.isEmpty else { return }
+        let session = SessionExport(
+            document: document,
+            summary: polished,
+            translation: nil,
+            caveat: "",
+            eventTitle: nil
+        )
+        lastSession = session
+        autoExport(session)
+    }
 
     // MARK: - Delivery
 
@@ -753,6 +941,7 @@ final class AppController {
     private func finish(_ polished: String) {
         mainWindow?.setTranscript(polished)
         recordHistory(polished)
+        rememberDictation(polished)
         if SelfTest.exitsWhenDone { ModelInstaller.log("selftest polished: \(polished)") }
         // A full-pipeline self-test always pastes directly: the saved "confirm
         // first" preference would otherwise leave it waiting for an Enter key
@@ -1073,6 +1262,14 @@ private extension String {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+
+// A scripted check for the export path: four formats, one synthetic transcript,
+// written to a temporary folder and read back. GUI-free on purpose, so it can run
+// on a headless build without any permission prompts.
+if ProcessInfo.processInfo.environment["OVC_SELFTEST_EXPORT"] != nil {
+    SelfTest.runExportSelfTest()
+}
+
 let controller = AppController()
 controller.start()
 app.run()

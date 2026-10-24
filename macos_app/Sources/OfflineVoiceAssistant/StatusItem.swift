@@ -6,10 +6,12 @@ import AppKit
 final class StatusItem {
     private let item: NSStatusItem
     private let onOpen: () -> Void
+    private let onExport: () -> Void
     private let onQuit: () -> Void
 
-    init(onOpen: @escaping () -> Void, onQuit: @escaping () -> Void) {
+    init(onOpen: @escaping () -> Void, onExport: @escaping () -> Void, onQuit: @escaping () -> Void) {
         self.onOpen = onOpen
+        self.onExport = onExport
         self.onQuit = onQuit
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "OfflineVoiceAssistant")
@@ -37,6 +39,9 @@ final class StatusItem {
         let open = NSMenuItem(title: "開啟主視窗", action: #selector(openAction), keyEquivalent: "")
         open.target = self
         menu.addItem(open)
+        let export = NSMenuItem(title: "匯出最近一次逐字稿…", action: #selector(exportAction), keyEquivalent: "")
+        export.target = self
+        menu.addItem(export)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "結束 Offline Voice Assistant", action: #selector(quitAction), keyEquivalent: "q")
         quit.target = self
@@ -48,6 +53,7 @@ final class StatusItem {
     }
 
     @objc private func openAction() { onOpen() }
+    @objc private func exportAction() { onExport() }
     @objc private func quitAction() { onQuit() }
 
     /// Recording-state indicator: a red record glyph while capturing,

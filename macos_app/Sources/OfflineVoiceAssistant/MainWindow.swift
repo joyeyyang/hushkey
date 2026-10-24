@@ -68,6 +68,20 @@ final class MainWindow: NSWindow {
     private let themeTitles = ["跟隨系統", "淺色", "深色"]
     private let themeCodes = ["system", "light", "dark"]
 
+    // 設定 tab — 匯出
+    private let exportFolderField = NSTextField(labelWithString: "（未選擇）")
+    private let exportChooseButton = NSButton(title: "選擇資料夾…", target: nil, action: nil)
+    private let exportFormatPopUp = NSPopUpButton()
+    private let exportAutoCheckbox = NSButton(
+        checkboxWithTitle: "每次結束時自動匯出一份（可指定 Obsidian 資料夾）",
+        target: nil, action: nil
+    )
+    private let exportNowButton = NSButton(title: "匯出最近一次逐字稿…", target: nil, action: nil)
+    /// Fired on every change to the export controls, with the whole value so the
+    /// app has one place to persist instead of three keys to keep in sync.
+    var onExportSettingsChange: ((ExportSettings) -> Void)?
+    var onExportNow: (() -> Void)?
+
     init(keywords: Keywords, history: HistoryStore) {
         self.keywords = keywords
         self.history = history
@@ -427,16 +441,45 @@ final class MainWindow: NSWindow {
         quitButton.target = self
         quitButton.action = #selector(didTapQuit)
 
+        // 匯出
+        let exportLabel = NSTextField(labelWithString: "匯出")
+        exportLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        exportLabel.textColor = .secondaryLabelColor
+
+        exportFormatPopUp.addItems(withTitles: ExportFormat.allCases.map(\.displayName))
+        exportFormatPopUp.target = self
+        exportFormatPopUp.action = #selector(didChangeExport)
+
+        exportChooseButton.bezelStyle = .rounded
+        exportChooseButton.target = self
+        exportChooseButton.action = #selector(didTapExportFolder)
+        exportFolderField.lineBreakMode = .byTruncatingMiddle
+        exportFolderField.textColor = .secondaryLabelColor
+        exportFolderField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+
+        exportAutoCheckbox.target = self
+        exportAutoCheckbox.action = #selector(didChangeExport)
+
+        exportNowButton.bezelStyle = .rounded
+        exportNowButton.target = self
+        exportNowButton.action = #selector(didTapExportNow)
+
+        let exportRow = NSStackView(views: [exportFormatPopUp, exportChooseButton])
+        exportRow.orientation = .horizontal
+        exportRow.spacing = 8
+
         let stack = NSStackView(views: [themeLabel, themePopUp, hotkeyLabel, hotkeyField, help,
                                         translateLabel, translatePopUp,
                                         polishCheckbox, confirmCheckbox, systemAudioCheckbox,
+                                        exportLabel, exportRow, exportFolderField,
+                                        exportAutoCheckbox, exportNowButton,
                                         resetButton, quitButton])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
         pin(stack, in: view, pinBottom: false)
-        for full in [themePopUp, hotkeyField, translatePopUp, help] {
+        for full in [themePopUp, hotkeyField, translatePopUp, help, exportFolderField] {
             full.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
         }
         return view
@@ -468,6 +511,13 @@ final class MainWindow: NSWindow {
         polishCheckbox.state = (defaults.object(forKey: "settings.polish") as? Bool ?? true) ? .on : .off
         confirmCheckbox.state = (defaults.object(forKey: "settings.confirmInsert") as? Bool ?? false) ? .on : .off
         systemAudioCheckbox.state = (defaults.object(forKey: "settings.meetingSystemAudio") as? Bool ?? true) ? .on : .off
+        let export = ExportSettings.load()
+        exportFolderField.stringValue = export.folder.isEmpty ? "（未選擇）" : export.folder
+        exportFolderField.toolTip = export.folder.isEmpty ? nil : export.folder
+        if let index = ExportFormat.allCases.firstIndex(of: export.format) {
+            exportFormatPopUp.selectItem(at: index)
+        }
+        exportAutoCheckbox.state = export.autoSave ? .on : .off
         keywordTable.reloadData()
     }
 
@@ -557,6 +607,43 @@ final class MainWindow: NSWindow {
 
     @objc private func didTapQuit() {
         onQuit?()
+    }
+
+    // MARK: Export actions
+
+    /// Reads the three controls as one value.
+    ///
+    /// The folder is taken from the field, not from the panel's last answer, so
+    /// the checkboxes cannot save a stale path.
+    private var currentExportSettings: ExportSettings {
+        let index = exportFormatPopUp.indexOfSelectedItem
+        let format = (index >= 0 && index < ExportFormat.allCases.count)
+            ? ExportFormat.allCases[index]
+            : .markdown
+        let folder = exportFolderField.stringValue == "（未選擇）" ? "" : exportFolderField.stringValue
+        return ExportSettings(folder: folder, format: format, autoSave: exportAutoCheckbox.state == .on)
+    }
+
+    @objc private func didTapExportFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "選擇"
+        panel.message = "選擇匯出資料夾（例如 Obsidian vault 裡的某個資料夾）"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportFolderField.stringValue = url.path
+        exportFolderField.toolTip = url.path
+        onExportSettingsChange?(currentExportSettings)
+    }
+
+    @objc private func didChangeExport() {
+        onExportSettingsChange?(currentExportSettings)
+    }
+
+    @objc private func didTapExportNow() {
+        onExportNow?()
     }
 
     @objc private func didChangeTheme() {
