@@ -123,16 +123,31 @@ pub fn load_asr() -> Result<()> {
         .models_dir
         .clone()
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
-    // Prefer the int8 build. On identical test audio its transcript matched the
-    // full-precision model exactly, and it saves ~666 MB of resident memory --
-    // which matters on an 8 GB machine that also runs the LLM worker. The fp32
-    // file stays as a fallback for installs that predate this choice.
-    let int8 = dir.join("asr/model.int8.onnx");
-    let model = if int8.exists() { int8 } else { dir.join("asr/model.onnx") };
-    let tokens = dir.join("asr/tokens.txt");
+    // Dolphin first: 104 MB (99 MB of weights), 40 languages and 22 Chinese
+    // dialects including Minnan, which SenseVoice cannot do at all. On identical
+    // audio it decoded a 5.6 s clip in 0.141 s (RTF 0.025) with a 299 MB peak RSS,
+    // against SenseVoice's 0.190 s and 452 MB -- smaller, faster, and broader.
+    //
+    // SenseVoice stays as the fallback: an install that predates this choice has
+    // asr/model.int8.onnx but no asr/dolphin/, and picking a model the user does
+    // not have would break dictation on upgrade.
+    let dolphin_model = dir.join("asr/dolphin/model.int8.onnx");
+    let dolphin_tokens = dir.join("asr/dolphin/tokens.txt");
+    let sense_int8 = dir.join("asr/model.int8.onnx");
+    let sense_fp32 = dir.join("asr/model.onnx");
+    let sense_tokens = dir.join("asr/tokens.txt");
+
+    let (model, tokens, kind) = if dolphin_model.exists() && dolphin_tokens.exists() {
+        (dolphin_model, dolphin_tokens, crate::asr::AsrKind::Dolphin)
+    } else if sense_int8.exists() {
+        (sense_int8, sense_tokens, crate::asr::AsrKind::SenseVoice)
+    } else {
+        (sense_fp32, sense_tokens, crate::asr::AsrKind::SenseVoice)
+    };
+
     let bytes = file_len(&model)? + file_len(&tokens)?;
     let threads = std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(2) as i32;
-    let rec = Recognizer::new(&model, &tokens, threads)?;
+    let rec = Recognizer::new(&model, &tokens, threads, kind)?;
     s.asr = Some(rec);
     s.asr_model_bytes = bytes;
     Ok(())

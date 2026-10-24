@@ -4,13 +4,38 @@ use std::path::Path;
 use crate::error::{EngineError, ErrorCode};
 
 extern "C" {
-    fn ovc_asr_create(model: *const c_char, tokens: *const c_char, num_threads: c_int) -> *mut c_void;
+    fn ovc_asr_create(
+        model: *const c_char,
+        tokens: *const c_char,
+        num_threads: c_int,
+        kind: c_int,
+    ) -> *mut c_void;
     fn ovc_asr_decode(rec: *mut c_void, samples: *const f32, n: c_int, sample_rate: c_int) -> *mut c_char;
     fn ovc_asr_destroy(rec: *mut c_void);
     fn free(ptr: *mut c_void);
 }
 
-/// Owns a sherpa-onnx SenseVoice recognizer. Not thread-safe; callers must serialize access.
+/// Which model family the recognizer was built from.
+///
+/// The two need different sherpa-onnx configs (Dolphin resolves its own
+/// language from vocabulary tokens; SenseVoice takes a hint and an ITN flag), so
+/// the family has to travel to the C shim with the file paths.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AsrKind {
+    SenseVoice,
+    Dolphin,
+}
+
+impl AsrKind {
+    fn code(self) -> c_int {
+        match self {
+            Self::SenseVoice => 0,
+            Self::Dolphin => 1,
+        }
+    }
+}
+
+/// Owns a sherpa-onnx recognizer. Not thread-safe; callers must serialize access.
 pub struct Recognizer {
     raw: *mut c_void,
 }
@@ -19,11 +44,16 @@ pub struct Recognizer {
 unsafe impl Send for Recognizer {}
 
 impl Recognizer {
-    pub fn new(model: &Path, tokens: &Path, num_threads: i32) -> Result<Self, EngineError> {
+    pub fn new(
+        model: &Path,
+        tokens: &Path,
+        num_threads: i32,
+        kind: AsrKind,
+    ) -> Result<Self, EngineError> {
         let m = path_cstring(model)?;
         let t = path_cstring(tokens)?;
         // SAFETY: both pointers are valid NUL-terminated strings for the call.
-        let raw = unsafe { ovc_asr_create(m.as_ptr(), t.as_ptr(), num_threads) };
+        let raw = unsafe { ovc_asr_create(m.as_ptr(), t.as_ptr(), num_threads, kind.code()) };
         if raw.is_null() {
             return Err(EngineError::new(
                 ErrorCode::ModelLoad,

@@ -1,9 +1,54 @@
 {
   "schema_version": 1,
   "budget_note": "Models are downloaded on first launch, not bundled. App bundle target <= 700 MB.",
-  "language_note": "Taiwanese Hokkien (台語) is NOT supported by the chosen ASR model (SenseVoice official languages: zh, en, ja, ko, yue). Accepted by the project owner as unsupported.",
+  "language_note": "Default ASR is Dolphin base int8: 40 Eastern languages and 22 Chinese dialects, including Minnan (zh-MINNAN) and zh-TW, so 台語 is now attempted rather than declared unsupported. SenseVoice Small remains as the fallback and does NOT support Hokkien.",
   "selection_note": "Entries with download:true are fetched on first launch. The rest are offered by the model manager, which writes the chosen LLM filename to UserDefaults and exports it as OVC_LLM_MODEL for the engine.",
   "models": [
+    {
+      "id": "asr-dolphin-base-int8",
+      "role": "ASR",
+      "source_repo": "DataoceanAI/dolphin-base (converted by k2-fsa/sherpa-onnx)",
+      "source_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02.tar.bz2",
+      "file": "asr/dolphin/model.int8.onnx",
+      "bytes": 103729802,
+      "sha256": "a3aa46c97f3f60f135ff949793cb05fabe7a0b3c484dc2e3cc699d354ee11b76",
+      "note": "Default ASR since 2026-10-25. Measured on the same 5.6 s clip: 0.141 s decode (RTF 0.025), 299 MB peak RSS, 99 MB on disk -- against SenseVoice int8's 0.190 s, 452 MB and 228 MB. CTC decoder, so it stays non-autoregressive and paste latency does not change.",
+      "license": "Apache 2.0 (DataoceanAI Dolphin)",
+      "languages_official": [
+        "zh",
+        "en",
+        "ja",
+        "ko",
+        "yue",
+        "and 35 more Eastern languages"
+      ],
+      "dialects_chinese": [
+        "Minnan (zh-MINNAN)",
+        "Taiwan (zh-TW)",
+        "Cantonese",
+        "Sichuan",
+        "Wu",
+        "Hakka and 16 more"
+      ],
+      "taiwanese_hokkien_supported": true,
+      "features": [
+        "punctuation",
+        "word timestamps",
+        "hotwords"
+      ],
+      "download": true
+    },
+    {
+      "id": "asr-dolphin-base-tokens",
+      "role": "ASR",
+      "source_repo": "DataoceanAI/dolphin-base (converted by k2-fsa/sherpa-onnx)",
+      "source_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-dolphin-base-ctc-multi-lang-int8-2025-04-02.tar.bz2",
+      "file": "asr/dolphin/tokens.txt",
+      "bytes": 504662,
+      "sha256": "c3788261a51df1899ea4b210b552cd42139204de72c0ad60f6cebb199078872e",
+      "license": "Apache 2.0 (DataoceanAI Dolphin)",
+      "download": true
+    },
     {
       "id": "asr-sensevoice-small-int8",
       "role": "ASR",
@@ -12,7 +57,7 @@
       "file": "asr/model.int8.onnx",
       "bytes": 239233841,
       "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
-      "note": "Default ASR. On identical test audio the transcript matched the full-precision model, and it is 698 MB smaller, which matters on an 8 GB machine.",
+      "note": "Default ASR. On identical test audio the transcript matched the full-precision model, and it is 698 MB smaller, which matters on an 8 GB machine. Now the fallback for installs that predate Dolphin; not downloaded on a fresh install.",
       "license": "MIT (FunASR; upstream references https://github.com/modelscope/FunASR)",
       "languages_official": [
         "zh",
@@ -22,7 +67,7 @@
         "yue"
       ],
       "taiwanese_hokkien_supported": false,
-      "download": true
+      "download": false
     },
     {
       "id": "asr-sensevoice-tokens",
@@ -33,7 +78,8 @@
       "bytes": 315894,
       "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
       "license": "MIT (FunASR)",
-      "download": true
+      "download": false,
+      "note": "Now the fallback for installs that predate Dolphin; not downloaded on a fresh install."
     },
     {
       "id": "asr-sensevoice-small-fp32",

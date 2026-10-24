@@ -26,6 +26,14 @@ pub use llm::{
     SECTION_ACTIONS, SECTION_DECISIONS, SECTION_SUMMARY,
 };
 
+/// Rust-level access to the same loader the C ABI uses.
+///
+/// The C entry points are the app's contract, but a probe or a test inside this
+/// crate cannot call them (an example links the rlib, not the `#[no_mangle]`
+/// objects), and "which file did it open" is exactly the question a probe has to
+/// answer from the engine's own bookkeeping rather than from a manifest.
+pub use state::{load_asr, set_models_dir, usage as memory_usage};
+
 type Result<T, E = EngineError> = std::result::Result<T, E>;
 
 fn status(r: Result<()>) -> c_int {

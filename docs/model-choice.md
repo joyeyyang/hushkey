@@ -127,3 +127,61 @@ cd .. && SECTION=actions bash scripts/section_ab.sh
 `ab_models.sh` writes `core_engine/target/ab/<tag>_<case>.out` and `.time`;
 `section_ab.sh` writes `core_engine/target/section_ab/`. A prompt change that
 touches one section only needs that section's run.
+
+---
+
+# ASR: why Dolphin base int8 replaced SenseVoice Small
+
+Same clip, same machine, same 4 threads, greedy decoding. The probe is a
+throwaway C program that links the vendored sherpa-onnx the app ships with, so
+these numbers come from the same runtime the app uses.
+
+Test audio: `test_wavs/0.wav` from the Dolphin release (5.61 s, 16 kHz mono).
+
+| | SenseVoice Small int8 | Dolphin base int8 |
+|---|---|---|
+| Weights on disk | 228 MB (`model.int8.onnx`) | **99 MB** (`model.int8.onnx`) |
+| Load time | 2.230 s | **0.330 s** |
+| Decode (5.61 s audio) | 0.190 s | **0.141 s** |
+| RTF | 0.034 | **0.025** |
+| Peak RSS | 452 MB | **299 MB** |
+| Languages | zh, en, ja, ko, yue | **40 Eastern languages + 22 Chinese dialects** |
+| 台語 (Minnan) | no | **yes (`zh-MINNAN`)** |
+| Punctuation | commas throughout | sentence-final only |
+
+Transcripts on that clip:
+
+```
+sense  : 对我做了介绍啊，那么我想说的是呢，大家如果对我的研究感兴趣呢嗯。
+dolphin: 对我做了介绍哈那么我想说的是呢大家如果对我的研究感兴趣呢。
+```
+
+Both are correct. Dolphin differs in two ways worth knowing:
+
+1. **Sparser punctuation.** It emits a final `。` but not the mid-sentence
+   commas SenseVoice inserts. The LLM polish step restores readable punctuation
+   for dictation; the live transcript window shows the raw text and will look
+   flatter.
+2. **Filler handling.** It kept `哈` where SenseVoice wrote `啊`, and dropped a
+   trailing `嗯`. Fillers are removed by the polish step either way.
+
+What decided it: 41% of the memory, 25% faster decode, 7× faster load, and a
+language list that includes the one thing SenseVoice could not do. The cost is a
+smaller model (0.1 B vs 0.23 B), so Mandarin accuracy was the risk -- on this
+clip it matched. **This is one clip, not a corpus.** The A/B scripts in
+`scripts/` cover the summary pipeline, not ASR; a wider ASR comparison still has
+to be done on real user recordings.
+
+Rechecking which file actually loaded (the manifest and the log can both be
+stale, the model_bytes cannot):
+
+```
+cd core_engine
+SHERPA_ONNX_DIR=$PWD/vendor/sherpa-onnx-v1.13.8-osx-arm64-shared \
+  cargo run --release --example asr_probe
+# loaded: model_bytes=104234464 peak_rss=264978432 -> dolphin
+```
+
+SenseVoice is still installed and still selected automatically when
+`asr/dolphin/` is missing, so upgrading an existing install never leaves the app
+without an ASR model.
