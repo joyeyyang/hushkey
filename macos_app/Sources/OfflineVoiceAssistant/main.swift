@@ -33,6 +33,16 @@ final class AppController {
     /// recorded (e.g. the system-audio tap was refused). Kept so the saved file
     /// and the final message can say what is missing from the recording.
     private var meetingWarnings: [String] = []
+    /// Pause is its own state, not a stop: the ASR session, the buffer and the
+    /// finished result all survive, and only the audio feed is cut. The hotkey
+    /// deliberately does nothing while paused, so a stray Option+Space during a
+    /// meeting cannot end the recording.
+    private var paused = false
+    /// Last moment the microphone actually carried something, for the silence
+    /// warning. Set whenever a level sample clears the floor.
+    private var lastSoundAt = Date()
+    private var silenceWarned = false
+    private var silenceTimer: Timer?
     /// Segments of the current recording, in order. The engine only hands out
     /// segments it has not delivered yet, so this list is append-only and is the
     /// single source of truth for the transcript window and every export.
@@ -90,7 +100,7 @@ final class AppController {
         window.onToggleDictation = { [weak self] in self?.toggleDictation() }
         window.onToggleMeeting = { [weak self] in self?.toggleMeeting() }
         window.onOpenMeetingsFolder = { [weak self] in self?.openMeetingsFolder() }
-        window.onThemeChange = { [weak self] appearance in self?.applyTheme(appearance) }
+        window.onThemeChange = { [weak self] in self?.reloadTheme() }
         window.onHotkeyChange = { [weak self] spec in self?.applyHotkey(spec) }
         window.onPolishChange = { enabled in
             UserDefaults.standard.set(enabled, forKey: Self.polishKey)
@@ -123,6 +133,7 @@ final class AppController {
 
         // The capsule's stop button ends the recording without the hotkey.
         hud.onStop = { [weak self] in self?.stopFromCapsule() }
+        hud.onPause = { [weak self] in self?.togglePause() }
 
         // Picking an older line out of the history pastes it where the cursor is.
         window.onPasteHistory = { [weak self] text in self?.pasteFromHistory(text) }
@@ -245,12 +256,7 @@ final class AppController {
     }
 
     private func applySavedTheme() {
-        guard let code = UserDefaults.standard.string(forKey: Self.themeKey) else { return }
-        switch code {
-        case "light": applyTheme(NSAppearance(named: .aqua))
-        case "dark": applyTheme(NSAppearance(named: .darkAqua))
-        default: applyTheme(nil)
-        }
+        applyTheme()
     }
 
     var isDictating: Bool { dictating }
@@ -268,6 +274,10 @@ final class AppController {
             if meeting { hud.notice("會議錄音中，請先結束會議") }
             return
         }
+        // Paused means "leave me alone": the hotkey neither resumes nor stops.
+        // Resuming is the capsule's ▶, which cannot be pressed by accident with
+        // the same hand that is writing notes.
+        if paused && dictating { return }
         if !ready { pendingAction = .dictation; ensureModelsLoaded(); return }
         if dictating { stopDictation() } else { startDictation() }
     }
@@ -277,6 +287,7 @@ final class AppController {
             if dictating { hud.notice("聽寫中，請先結束聽寫") }
             return
         }
+        if paused && meeting { return }
         if !ready { pendingAction = .meeting; ensureModelsLoaded(); return }
         if meeting { stopMeeting() } else { startMeeting() }
     }
@@ -307,22 +318,19 @@ final class AppController {
 
     // MARK: - 主題套用
 
-    /// Applies the appearance to the main window only. The HUD panel is left
-    /// untouched so its translucent, rounded background keeps working.
-    private func applyTheme(_ appearance: NSAppearance?) {
-        guard let window = mainWindow else { return }
-        window.appearance = appearance
-        if appearance == nil {
-            window.backgroundColor = .windowBackgroundColor
-            window.contentView?.layer?.backgroundColor = nil
-        } else {
-            let isDark = window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            let bgColor: NSColor = isDark
-                ? NSColor.black
-                : NSColor(calibratedRed: 245/255, green: 240/255, blue: 230/255, alpha: 1)
-            window.backgroundColor = bgColor
-            window.contentView?.layer?.backgroundColor = bgColor.cgColor
-        }
+    /// One theme drives every surface: the main window's paper, the capsule and
+    /// the transcript card. `ThemeCatalog.current` has already resolved "system"
+    /// into a concrete palette, so nothing here is conditional.
+    private func applyTheme() {
+        let theme = ThemeCatalog.current
+        NSApp.appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
+        mainWindow?.applyTheme(theme)
+        hud.applyTheme(theme)
+        transcriptWindow.applyTheme(theme)
+    }
+
+    private func reloadTheme() {
+        applyTheme()
     }
 
     // MARK: - Model loading (lazy)
@@ -383,6 +391,94 @@ final class AppController {
         statusItem?.updateState(dictating: dictating, meeting: meeting)
     }
 
+    // MARK: - Pause, and the silence warning
+
+    /// Below this the microphone is carrying room noise, not a voice. The meter
+    /// maps -55…0 dBFS onto 0…1, so 0.15 is about -47 dBFS.
+    private static let silenceFloor: Float = 0.15
+    /// Long enough that a pause in speech is not a warning, short enough that an
+    /// entirely muted mic is caught while the user is still in the meeting.
+    private static let silenceWarnSeconds: TimeInterval = 12
+
+    /// The one place microphone audio enters the engine.
+    ///
+    /// Pause has to gate this and nothing else: cutting the feed here keeps the
+    /// ASR session open, so the transcript continues where it stopped instead of
+    /// starting a second one.
+    private func feed(_ samples: [Float]) {
+        guard !paused else { return }
+        coreQueue.async { try? Core.submit(samples) }
+    }
+
+    /// The one place the level is read: it drives the meter, and it is how the
+    /// app knows the microphone has gone quiet.
+    private func noteLevel(_ level: Float) {
+        DispatchQueue.main.async {
+            if level >= Self.silenceFloor {
+                self.lastSoundAt = Date()
+                self.silenceWarned = false
+            }
+            guard !self.paused else { return }
+            self.hud.setLevel(level)
+        }
+    }
+
+    /// Pause / resume. Called from the capsule's ‖ button.
+    private func togglePause() {
+        guard dictating || meeting else { return }
+        paused.toggle()
+        hud.setPaused(paused)
+        transcriptWindow.setStatus(paused ? "已暫停" : (meeting ? "錄音中…" : "辨識中…"))
+        if paused {
+            // A paused recording is not a silent one: the warning must not fire
+            // at the user for the state they asked for.
+            lastSoundAt = Date()
+        }
+        ModelInstaller.log(paused ? "paused" : "resumed")
+    }
+
+    /// Warns when the microphone has carried nothing for a while.
+    ///
+    /// The failure that actually happens is not a denied permission -- that one
+    /// shows a red label in the window -- but a muted input: the wrong device, a
+    /// hardware mute key, or a headset that switched away. Recording keeps
+    /// "working", so without this the first sign is an empty transcript.
+    private func startSilenceWatch() {
+        stopSilenceWatch()
+        lastSoundAt = Date()
+        silenceWarned = false
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard self.dictating || self.meeting else {
+                self.stopSilenceWatch()
+                return
+            }
+            // Paused is not silence, and a warning while paused would replace the
+            // 已暫停 caption with a message about a mic the user already knows is
+            // not being used.
+            guard !self.paused else {
+                self.lastSoundAt = Date()
+                return
+            }
+            guard !self.silenceWarned,
+                  Date().timeIntervalSince(self.lastSoundAt) >= Self.silenceWarnSeconds else {
+                return
+            }
+            self.silenceWarned = true
+            self.hud.notice("沒有收到聲音 · 檢查麥克風或靜音鍵", seconds: 6)
+            self.transcriptWindow.setStatus("沒有收到聲音")
+            ModelInstaller.log("silence warning fired")
+        }
+        timer.tolerance = 0.3
+        RunLoop.main.add(timer, forMode: .common)
+        silenceTimer = timer
+    }
+
+    private func stopSilenceWatch() {
+        silenceTimer?.invalidate()
+        silenceTimer = nil
+    }
+
     // MARK: - Dictation
 
     private func startDictation() {
@@ -412,17 +508,15 @@ final class AppController {
                 self.dictating = true
                 self.sessionSegments = []
                 self.sessionStartedAt = Date()
+                self.paused = false
                 self.setRecordingState()
                 self.hud.startRecording()
                 self.transcriptWindow.begin(title: "聽寫", status: "辨識中…")
                 self.startLiveCount()
+                self.startSilenceWatch()
                 let cap = AudioCapture(
-                    onSamples: { [weak self] samples in
-                        self?.coreQueue.async { try? Core.submit(samples) }
-                    },
-                    onLevel: { [weak self] level in
-                        DispatchQueue.main.async { self?.hud.setLevel(level) }
-                    }
+                    onSamples: { [weak self] samples in self?.feed(samples) },
+                    onLevel: { [weak self] level in self?.noteLevel(level) }
                 )
                 self.capture = cap
                 do { try cap.start() } catch {
@@ -444,6 +538,7 @@ final class AppController {
         capture = nil
         dictating = false
         stopLiveCount()
+        stopSilenceWatch()
         setRecordingState()
         hud.show(text: "轉錄中…")
         finishTranscriptWindow(status: "辨識完成", labelled: false)
@@ -488,17 +583,15 @@ final class AppController {
                 self.meetingWarnings = []
                 self.sessionSegments = []
                 self.sessionStartedAt = Date()
+                self.paused = false
                 self.setRecordingState()
                 self.hud.startRecording()
                 self.transcriptWindow.begin(title: "會議逐字稿", status: "錄音中…")
                 self.startLiveCount()
+                self.startSilenceWatch()
                 let cap = AudioCapture(
-                    onSamples: { [weak self] samples in
-                        self?.coreQueue.async { try? Core.submit(samples) }
-                    },
-                    onLevel: { [weak self] level in
-                        DispatchQueue.main.async { self?.hud.setLevel(level) }
-                    }
+                    onSamples: { [weak self] samples in self?.feed(samples) },
+                    onLevel: { [weak self] level in self?.noteLevel(level) }
                 )
                 self.capture = cap
                 do { try cap.start() } catch {
@@ -575,6 +668,8 @@ final class AppController {
         systemTap = nil
         meeting = false
         stopLiveCount()
+        stopSilenceWatch()
+        paused = false
         setRecordingState()
         hud.show(text: "整理會議中…長會議需要幾分鐘")
         finishTranscriptWindow(status: "錄音結束", labelled: true)
@@ -1268,6 +1363,12 @@ app.setActivationPolicy(.accessory)
 // on a headless build without any permission prompts.
 if ProcessInfo.processInfo.environment["OVC_SELFTEST_EXPORT"] != nil {
     SelfTest.runExportSelfTest()
+}
+
+// Same idea for the palettes: five offscreen capsule renders plus the contrast
+// maths a picture cannot show.
+if ProcessInfo.processInfo.environment["OVC_SELFTEST_THEMES"] != nil {
+    SelfTest.runThemeSelfTest()
 }
 
 let controller = AppController()

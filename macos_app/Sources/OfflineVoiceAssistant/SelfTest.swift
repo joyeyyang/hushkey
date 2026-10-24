@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Test-only input source. When OVC_SELFTEST_WAV is set, the app feeds a WAV file through the
@@ -152,4 +153,101 @@ enum SelfTest {
         for failure in failures { print("FAIL \(failure)") }
         exit(1)
     }
+
+    // MARK: - Theme self-test
+
+    /// Renders every palette's capsule and checks the one property a picture
+    /// cannot prove: contrast of the ink against its own paper.
+    ///
+    /// Each PNG is written where `OVC_SELFTEST_THEMES` says (a temp folder by
+    /// default) so the themes can be looked at rather than argued about.
+    static func runThemeSelfTest() -> Never {
+        let dir = URL(
+            fileURLWithPath: ProcessInfo.processInfo.environment["OVC_SELFTEST_THEMES"]
+                ?? FileManager.default.temporaryDirectory
+                    .appendingPathComponent("ovc-themes", isDirectory: true).path,
+            isDirectory: true
+        )
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        var failures: [String] = []
+        // One capsule, re-skinned: a fresh HUDWindow per palette would install
+        // five global Escape monitors and five panels for no reason.
+        let hud = HUDWindow()
+
+        for theme in ThemeCatalog.all {
+            let body = contrast(theme.textPrimary, on: theme.background)
+            let quiet = contrast(theme.textSecondary, on: theme.background)
+            let accent = contrast(theme.accent, on: theme.surface)
+            // 4.5:1 is the WCAG AA floor for body text; the accent is used at
+            // label weight and as the mic glyph, where 3:1 is the floor.
+            if body < 4.5 { failures.append("\(theme.id): body \(fmt(body)):1 < 4.5") }
+            if quiet < 4.5 { failures.append("\(theme.id): secondary \(fmt(quiet)):1 < 4.5") }
+            if accent < 3.0 { failures.append("\(theme.id): accent \(fmt(accent)):1 < 3.0") }
+
+            hud.applyTheme(theme)
+            let url = dir.appendingPathComponent("\(theme.id).png")
+            hud.snapshotPreview(text: "會議逐字稿已開始 · \(theme.name)", to: url)
+            guard let data = try? Data(contentsOf: url), data.count > 2_000 else {
+                failures.append("\(theme.id): no image written")
+                continue
+            }
+            print(
+                "ok \(theme.id) \(theme.name) body \(fmt(body)):1 quiet \(fmt(quiet)):1 "
+                    + "accent \(fmt(accent)):1 \(data.count)B"
+            )
+        }
+
+        // The recording capsule in the three states this batch added: live (with
+        // the new pause button), paused, and folded to a dot. Rendered offscreen
+        // on one palette so the controls can be looked at without recording.
+        hud.applyTheme(ThemeCatalog.theme(id: "paper") ?? ThemeCatalog.all[0])
+        for (name, paused, folded) in [
+            ("rec-live", false, false),
+            ("rec-paused", true, false),
+            ("rec-folded", false, true),
+        ] {
+            let url = dir.appendingPathComponent("\(name).png")
+            hud.snapshotRecording(to: url, paused: paused, folded: folded)
+            guard let data = try? Data(contentsOf: url), data.count > 2_000 else {
+                failures.append("\(name): no image written")
+                continue
+            }
+            print("ok \(name) \(data.count)B")
+        }
+
+        // The palettes must actually differ, or the picker is a placebo.
+        let unique = Set(ThemeCatalog.all.map { "\($0.background)" })
+        if unique.count != ThemeCatalog.all.count {
+            failures.append("two themes share a background")
+        }
+
+        if failures.isEmpty {
+            print("THEME SELFTEST PASS \(dir.path)")
+            exit(0)
+        }
+        for failure in failures { print("FAIL \(failure)") }
+        exit(1)
+    }
+
+    /// WCAG relative luminance, sRGB. `NSColor` has to be resolved first:
+    /// a calibrated or catalog colour has no components until it is.
+    private static func luminance(_ color: NSColor) -> Double {
+        guard let c = color.usingColorSpace(.sRGB) else { return 0 }
+        func channel(_ value: CGFloat) -> Double {
+            let s = Double(value)
+            return s <= 0.03928 ? s / 12.92 : pow((s + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * channel(c.redComponent)
+            + 0.7152 * channel(c.greenComponent)
+            + 0.0722 * channel(c.blueComponent)
+    }
+
+    private static func contrast(_ foreground: NSColor, on background: NSColor) -> Double {
+        let a = luminance(foreground)
+        let b = luminance(background)
+        return a > b ? (a + 0.05) / (b + 0.05) : (b + 0.05) / (a + 0.05)
+    }
+
+    private static func fmt(_ value: Double) -> String { String(format: "%.2f", value) }
 }

@@ -18,15 +18,23 @@ final class HUDWindow: NSObject {
         override var canBecomeMain: Bool { false }
     }
 
-    // MARK: Palette (米白紙 + 朱紅)
+    // MARK: Palette
 
-    static let paperTop = NSColor(calibratedRed: 249 / 255, green: 246 / 255, blue: 239 / 255, alpha: 1)
-    static let paperBottom = NSColor(calibratedRed: 240 / 255, green: 234 / 255, blue: 223 / 255, alpha: 1)
-    static let ink = NSColor(calibratedRed: 40 / 255, green: 37 / 255, blue: 32 / 255, alpha: 1)
-    static let inkSoft = NSColor(calibratedRed: 140 / 255, green: 132 / 255, blue: 116 / 255, alpha: 1)
-    static let seal = NSColor(calibratedRed: 168 / 255, green: 62 / 255, blue: 42 / 255, alpha: 1)
-    static let hairline = NSColor(calibratedRed: 60 / 255, green: 50 / 255, blue: 35 / 255, alpha: 0.16)
-    static let handleDot = NSColor(calibratedRed: 196 / 255, green: 188 / 255, blue: 172 / 255, alpha: 1)
+    /// The palette the capsule draws with.
+    ///
+    /// Static because the small nested views (`CapsuleView`, `WaveformView`,
+    /// `HandleView`, `CircleButton`) read it directly while drawing. Every one of
+    /// them draws on the main thread, and this only changes from `applyTheme` on
+    /// that same thread.
+    private(set) static var theme: Theme = ThemeCatalog.current
+
+    static var paperTop: NSColor { theme.surface }
+    static var paperBottom: NSColor { theme.background }
+    static var ink: NSColor { theme.textPrimary }
+    static var inkSoft: NSColor { theme.textSecondary }
+    static var seal: NSColor { theme.accent }
+    static var hairline: NSColor { theme.border.withAlphaComponent(0.75) }
+    static var handleDot: NSColor { theme.border }
 
     /// Margin left around the capsule inside the window so its shadow has room.
     private static let margin: CGFloat = 10
@@ -48,6 +56,7 @@ final class HUDWindow: NSObject {
     private var waveView: WaveformView!
     private var countLabel: NSTextField!
     private var stopButton: CircleButton!
+    private var pauseButton: CircleButton!
     private var handleView: HandleView!
     private var statusLabel: NSTextField!
     private var textField: NSTextField!
@@ -67,6 +76,17 @@ final class HUDWindow: NSObject {
 
     /// Called when the capsule's stop button is clicked.
     var onStop: (() -> Void)?
+
+    /// Called when the pause / resume button is clicked during a recording.
+    var onPause: (() -> Void)?
+
+    /// Whether audio is currently being dropped. The capsule shows it in the
+    /// waveform's slot, so the stop button never disappears mid-recording.
+    private(set) var isPaused = false
+
+    /// The capsule can be folded down to a dot during a recording, so it stops
+    /// covering whatever the user is reading. Recording continues.
+    private var collapsed = false
 
     override init() {
         self.panel = HUDPanel(
@@ -115,6 +135,19 @@ final class HUDWindow: NSObject {
         stopButton.onClick = { [weak self] in self?.onStop?() }
         card.addSubview(stopButton)
 
+        // Unfilled, so it reads as secondary to the stop button: the one filled
+        // ink circle in the capsule is always "end this".
+        pauseButton = CircleButton()
+        pauseButton.filled = false
+        pauseButton.fill = Self.ink
+        pauseButton.glyph = Self.ink
+        pauseButton.glyphKind = .pause
+        pauseButton.onClick = { [weak self] in self?.onPause?() }
+        card.addSubview(pauseButton)
+
+        card.onDoubleClick = { [weak self] in self?.toggleCollapsed() }
+        collapsed = UserDefaults.standard.bool(forKey: "hud.collapsed")
+
         handleView = HandleView()
         card.addSubview(handleView)
 
@@ -145,6 +178,65 @@ final class HUDWindow: NSObject {
         applyMode(.display)
         panel.orderOut(nil)
         installEscapeMonitor()
+    }
+
+    /// Re-skins the capsule in place.
+    ///
+    /// The views were built with fixed colours, so every one that carries a
+    /// colour has to be told again; the panel's own appearance is set as well so
+    /// the editable field's caret and selection follow the theme instead of
+    /// staying dark-on-dark.
+    func applyTheme(_ theme: Theme) {
+        HUDWindow.theme = theme
+        panel.appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
+        micView.contentTintColor = mode == .recording ? Self.seal : Self.ink
+        divider.layer?.backgroundColor = Self.hairline.cgColor
+        countLabel.textColor = Self.inkSoft
+        stopButton.fill = Self.ink
+        stopButton.glyph = Self.paperTop
+        // Unfilled: only the glyph is drawn, so both colours must be re-set.
+        pauseButton.fill = Self.ink
+        pauseButton.glyph = Self.ink
+        statusLabel.textColor = Self.ink
+        textField.textColor = Self.ink
+        hintLabel.textColor = Self.inkSoft
+        card.needsDisplay = true
+        waveView.needsDisplay = true
+        handleView.needsDisplay = true
+    }
+
+    /// Draws the capsule offscreen in its display shape, for a scripted visual
+    /// check. Nothing is ordered front, so it never flashes on the user's screen.
+    func snapshotPreview(text: String, to url: URL) {
+        applyMode(.display)
+        statusLabel.stringValue = text
+        statusLabel.isHidden = false
+        layoutContents()
+        render(to: url)
+    }
+
+    /// Offscreen render of the recording capsule in each of its states, so the
+    /// pause button and the folded dot can be looked at without recording
+    /// anything.
+    func snapshotRecording(to url: URL, paused: Bool = false, folded: Bool = false) {
+        collapsed = folded
+        applyMode(.recording)
+        waveView.reset()
+        for level in [0.35, 0.62, 0.44, 0.78, 0.51, 0.33, 0.6, 0.41, 0.72] {
+            waveView.push(CGFloat(level))
+        }
+        countLabel.stringValue = "42 字"
+        if paused { setPaused(true) }
+        layoutContents()
+        render(to: url)
+    }
+
+    private func render(to url: URL) {
+        card.layoutSubtreeIfNeeded()
+        guard let rep = card.bitmapImageRepForCachingDisplay(in: card.bounds) else { return }
+        card.cacheDisplay(in: card.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: url)
     }
 
     /// Escape closes the capsule and nothing else.
@@ -190,6 +282,9 @@ final class HUDWindow: NSObject {
 
     private static let capsuleShape = NSSize(width: 440, height: 56)
     private static let cardShape = NSSize(width: 520, height: 150)
+    /// Folded down: a 30 pt ink-red dot. Large enough to hit with a trackpad,
+    /// small enough to stop covering a paragraph.
+    private static let dotShape = NSSize(width: 30, height: 30)
 
     private func resize(to shape: NSSize) {
         let size = NSSize(width: shape.width + Self.margin * 2, height: shape.height + Self.margin * 2)
@@ -199,7 +294,8 @@ final class HUDWindow: NSObject {
         frame.origin.y += frame.height - size.height
         frame.size = size
         panel.setFrame(frame, display: true)
-        card.cornerRadius = shape.height == Self.capsuleShape.height ? shape.height / 2 : 20
+        // The edit card is a rounded rectangle; every other shape is a pill.
+        card.cornerRadius = shape.width == Self.cardShape.width ? 20 : shape.height / 2
     }
 
     private func applyMode(_ mode: Mode) {
@@ -207,7 +303,10 @@ final class HUDWindow: NSObject {
         let recording = mode == .recording
         let editing = mode == .edit
         let showingGlyph = recording || mode == .result
-        resize(to: editing ? Self.cardShape : Self.capsuleShape)
+        // Folded is a recording-only shape: a dot cannot carry a status line, so
+        // a finished result always expands back to the capsule.
+        let folded = collapsed && recording
+        resize(to: folded ? Self.dotShape : (editing ? Self.cardShape : Self.capsuleShape))
         // The left slot is the 朱紅 mic while recording, a check for a result.
         micView.isHidden = !showingGlyph
         micView.image = NSImage(systemSymbolName: recording ? "mic.fill" : "checkmark", accessibilityDescription: nil)
@@ -215,17 +314,33 @@ final class HUDWindow: NSObject {
         divider.isHidden = !recording
         waveView.isHidden = !recording
         countLabel.isHidden = !recording
-        stopButton.isHidden = !recording
-        handleView.isHidden = editing
+        stopButton.isHidden = !recording || folded
+        pauseButton.isHidden = !recording || folded
+        handleView.isHidden = editing || folded
         statusLabel.isHidden = !(mode == .display || mode == .result)
         textField.isHidden = !editing
         hintLabel.isHidden = !editing
+        if folded {
+            // Only the mic survives: a red dot on the paper is the whole state.
+            micView.isHidden = false
+            divider.isHidden = true
+            waveView.isHidden = true
+            countLabel.isHidden = true
+            hintLabel.isHidden = true
+            textField.isHidden = true
+        }
         layoutContents()
     }
 
     private func layoutContents() {
         let m = Self.margin
         let midY = panel.contentView!.bounds.midY
+
+        if collapsed, mode == .recording {
+            let b = panel.contentView!.bounds
+            micView.frame = NSRect(x: b.midX - 10, y: b.midY - 10, width: 20, height: 20)
+            return
+        }
 
         let shapeH = panel.contentView!.bounds.height - m * 2
         let shapeW = panel.contentView!.bounds.width - m * 2
@@ -234,12 +349,15 @@ final class HUDWindow: NSObject {
         divider.frame = NSRect(x: m + 58, y: midY - 12, width: 1, height: 24)
         waveView.frame = NSRect(x: m + 74, y: midY - 15, width: 170, height: 30)
         countLabel.sizeToFit()
-        countLabel.frame.origin = NSPoint(x: m + 300 - countLabel.frame.width, y: midY - countLabel.frame.height / 2)
+        countLabel.frame.origin = NSPoint(x: m + 286 - countLabel.frame.width, y: midY - countLabel.frame.height / 2)
+        // 26 pt, unfilled, 12 pt clear of the stop button: close enough to read as
+        // one cluster, far enough that a mis-click does not end the recording.
+        pauseButton.frame = NSRect(x: m + 304, y: midY - 13, width: 26, height: 26)
         stopButton.frame = NSRect(x: m + 344, y: midY - 17, width: 34, height: 34)
         handleView.frame = NSRect(x: m + 404, y: midY - 11, width: 14, height: 22)
 
         statusLabel.sizeToFit()
-        if mode == .recording, noticeWork != nil {
+        if mode == .recording, noticeWork != nil || isPaused {
             // In the waveform's slot: after the hairline divider, and stopping
             // short of the right-aligned character count (which needs ~30 pt) so
             // a notice never runs under it.
@@ -330,8 +448,15 @@ final class HUDWindow: NSObject {
         let work = DispatchWorkItem { [weak self] in
             guard let self = self, self.mode == .recording else { return }
             self.noticeWork = nil
-            self.statusLabel.isHidden = true
-            self.waveView.isHidden = false
+            if self.isPaused {
+                // The pause caption owns the waveform's slot until the user
+                // resumes; a warning must not leave it looking live again.
+                self.statusLabel.stringValue = "已暫停"
+                self.statusLabel.isHidden = false
+            } else {
+                self.statusLabel.isHidden = true
+                self.waveView.isHidden = false
+            }
             self.layoutContents()
         }
         noticeWork = work
@@ -341,9 +466,42 @@ final class HUDWindow: NSObject {
     /// The recording capsule: 朱紅 mic, live level, live character count.
     func startRecording() {
         // A new recording always gets its capsule back, however the last one was
-        // dismissed.
+        // dismissed, and never starts out paused.
         dismissedByUser = false
+        isPaused = false
+        pauseButton.glyphKind = .pause
         show(text: "", mode: .recording)
+    }
+
+    /// Pause / resume as the capsule shows it. The audio itself is dropped by the
+    /// controller; this only tells the truth about it, in the waveform's slot, so
+    /// the stop button stays exactly where it was.
+    func setPaused(_ paused: Bool) {
+        guard mode == .recording else { return }
+        isPaused = paused
+        pauseButton.glyphKind = paused ? .play : .pause
+        noticeWork?.cancel()
+        noticeWork = nil
+        if paused {
+            statusLabel.stringValue = "已暫停"
+            statusLabel.isHidden = false
+            waveView.isHidden = true
+        } else {
+            statusLabel.isHidden = true
+            waveView.isHidden = false
+            waveView.reset()
+        }
+        layoutContents()
+    }
+
+    /// Folds the capsule down to a dot, or back.
+    ///
+    /// Persisted: someone who folded it to stop covering their notes wants it
+    /// folded for the next meeting too, not re-taught every time.
+    func toggleCollapsed() {
+        collapsed.toggle()
+        UserDefaults.standard.set(collapsed, forKey: "hud.collapsed")
+        applyMode(mode)
     }
 
     /// Shows the finished line with a check, then fades out on its own. Used
@@ -408,6 +566,8 @@ final class HUDWindow: NSObject {
 /// stop button moves the window.
 final class CapsuleView: NSView {
     var margin: CGFloat = 10
+    /// Double-click folds / unfolds the capsule; a single click drags it.
+    var onDoubleClick: (() -> Void)?
     var cornerRadius: CGFloat = 28
     var layoutHandler: (() -> Void)?
 
@@ -448,6 +608,10 @@ final class CapsuleView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            onDoubleClick?()
+            return
+        }
         window?.performDrag(with: event)
         if let f = window?.frame {
             UserDefaults.standard.set(Double(f.origin.x), forKey: "hud.originX")
@@ -493,19 +657,51 @@ final class WaveformView: NSView {
     }
 }
 
-/// Ink circle with a paper square: stop and paste.
+/// One round button, three glyphs: an ink circle with a paper square is stop,
+/// bare ink bars are pause, a bare ink triangle is resume.
+///
+/// `filled` is false for pause so the capsule keeps exactly one filled ink
+/// circle -- the one that ends the recording.
 final class CircleButton: NSView {
-    var fill: NSColor = .black
-    var glyph: NSColor = .white
+    enum Glyph { case stop, pause, play }
+
+    var fill: NSColor = .black { didSet { needsDisplay = true } }
+    var glyph: NSColor = .white { didSet { needsDisplay = true } }
+    var glyphKind: Glyph = .stop { didSet { needsDisplay = true } }
+    /// Whether the circle itself is drawn. The glyph always is.
+    var filled = true { didSet { needsDisplay = true } }
     var onClick: (() -> Void)?
 
     override func draw(_ dirtyRect: NSRect) {
-        fill.setFill()
-        NSBezierPath(ovalIn: bounds).fill()
-        let s = bounds.width * 0.34
-        let square = NSRect(x: bounds.midX - s / 2, y: bounds.midY - s / 2, width: s, height: s)
-        glyph.setFill()
-        NSBezierPath(roundedRect: square, xRadius: 1.5, yRadius: 1.5).fill()
+        let c = bounds
+        if filled {
+            fill.setFill()
+            NSBezierPath(ovalIn: c).fill()
+        }
+        let ink = filled ? glyph : fill
+        ink.setFill()
+
+        switch glyphKind {
+        case .stop:
+            let s = c.width * 0.34
+            let square = NSRect(x: c.midX - s / 2, y: c.midY - s / 2, width: s, height: s)
+            NSBezierPath(roundedRect: square, xRadius: 1.5, yRadius: 1.5).fill()
+        case .pause:
+            let w = c.width * 0.14
+            let h = c.height * 0.36
+            for dx in [-w, w] {
+                let bar = NSRect(x: c.midX + dx - w / 2, y: c.midY - h / 2, width: w, height: h)
+                NSBezierPath(roundedRect: bar, xRadius: 1, yRadius: 1).fill()
+            }
+        case .play:
+            let h = c.height * 0.4
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: c.midX - h * 0.28, y: c.midY - h / 2))
+            path.line(to: NSPoint(x: c.midX - h * 0.28, y: c.midY + h / 2))
+            path.line(to: NSPoint(x: c.midX + h * 0.5, y: c.midY))
+            path.close()
+            path.fill()
+        }
     }
 
     override func mouseDown(with event: NSEvent) {

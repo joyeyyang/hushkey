@@ -11,7 +11,7 @@ final class MainWindow: NSWindow {
     var onToggleDictation: (() -> Void)?
     var onToggleMeeting: (() -> Void)?
     var onOpenMeetingsFolder: (() -> Void)?
-    var onThemeChange: ((NSAppearance?) -> Void)?
+    var onThemeChange: (() -> Void)?
     var onHotkeyChange: ((String) -> Void)?
     var onPolishChange: ((Bool) -> Void)?
     var onConfirmChange: ((Bool) -> Void)?
@@ -65,8 +65,10 @@ final class MainWindow: NSWindow {
     private let systemAudioCheckbox = NSButton(checkboxWithTitle: "會議模式同時錄製電腦播放的聲音（對方說話）", target: nil, action: nil)
     private let resetButton = NSButton(title: "重設為預設", target: nil, action: nil)
     private let quitButton = NSButton(title: "結束 Offline Voice Assistant", target: nil, action: nil)
-    private let themeTitles = ["跟隨系統", "淺色", "深色"]
-    private let themeCodes = ["system", "light", "dark"]
+    /// The picker lists "follow the system" first, then every palette by its
+    /// own name, so the menu reads like a choice of paper rather than a mode.
+    private var themeTitles: [String] { ["跟隨系統"] + ThemeCatalog.all.map(\.name) }
+    private var themeCodes: [String] { ["system"] + ThemeCatalog.all.map(\.id) }
 
     // 設定 tab — 匯出
     private let exportFolderField = NSTextField(labelWithString: "（未選擇）")
@@ -528,6 +530,18 @@ final class MainWindow: NSWindow {
         defaults.set(hotkeyField.stringValue, forKey: "settings.hotkey")
     }
 
+    /// Follows the chosen palette.
+    ///
+    /// Everything inside is a system control, so setting the window's appearance
+    /// is what recolours the text, the fields and the tab chrome; the only colour
+    /// of our own is the paper behind them.
+    func applyTheme(_ theme: Theme) {
+        appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
+        backgroundColor = theme.background
+        contentView?.wantsLayer = true
+        contentView?.layer?.backgroundColor = theme.background.cgColor
+    }
+
     // MARK: - Actions
 
     @objc private func didTapDictation() { onToggleDictation?() }
@@ -648,11 +662,8 @@ final class MainWindow: NSWindow {
 
     @objc private func didChangeTheme() {
         saveSettings()
-        switch selectedTheme {
-        case "light": onThemeChange?(NSAppearance(named: .aqua))
-        case "dark": onThemeChange?(NSAppearance(named: .darkAqua))
-        default: onThemeChange?(nil)  // follow the system appearance
-        }
+        ThemeCatalog.setCurrent(id: selectedTheme)
+        onThemeChange?()
     }
 
     @objc private func didTapReset() {

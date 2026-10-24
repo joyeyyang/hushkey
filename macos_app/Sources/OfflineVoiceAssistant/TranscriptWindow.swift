@@ -28,18 +28,31 @@ final class TranscriptWindow: NSObject {
         }
     }
 
-    private static let paper = NSColor(calibratedRed: 249 / 255, green: 246 / 255, blue: 239 / 255, alpha: 1)
-    private static let ink = NSColor(calibratedRed: 40 / 255, green: 37 / 255, blue: 32 / 255, alpha: 1)
-    private static let inkSoft = NSColor(calibratedRed: 140 / 255, green: 132 / 255, blue: 116 / 255, alpha: 1)
-    private static let seal = NSColor(calibratedRed: 168 / 255, green: 62 / 255, blue: 42 / 255, alpha: 1)
-    private static let hairline = NSColor(calibratedRed: 60 / 255, green: 50 / 255, blue: 35 / 255, alpha: 0.16)
+    // MARK: Palette
+
+    /// The window's palette, read the same way as the capsule's: one static
+    /// theme, because the attributed runs are built at append time and the
+    /// theme only changes from `applyTheme` on the main thread.
+    private(set) static var theme: Theme = ThemeCatalog.current
+
+    private static var paper: NSColor { theme.background }
+    private static var ink: NSColor { theme.textPrimary }
+    private static var inkSoft: NSColor { theme.textSecondary }
+    private static var seal: NSColor { theme.accent }
+    private static var hairline: NSColor { theme.border.withAlphaComponent(0.75) }
 
     private var panel: Panel!
     private var titleLabel: NSTextField!
     private var statusLabel: NSTextField!
     private var textView: NSTextView!
     private var scrollView: NSScrollView!
+    private var hairlineView: NSView!
     private var escapeMonitor: Any?
+
+    /// Everything written so far, kept so a theme change can re-colour the body:
+    /// the colours live in the attributed runs, not in the text view.
+    private var rendered: [TranscriptSegment] = []
+    private var renderedSpeaker = false
 
     /// Set when the user closes the window themselves, so a later status update
     /// does not pop it back up in their face. Cleared when a session starts.
@@ -98,11 +111,11 @@ final class TranscriptWindow: NSObject {
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(statusLabel)
 
-        let hairline = NSView()
-        hairline.wantsLayer = true
-        hairline.layer?.backgroundColor = Self.hairline.cgColor
-        hairline.translatesAutoresizingMaskIntoConstraints = false
-        header.addSubview(hairline)
+        hairlineView = NSView()
+        hairlineView.wantsLayer = true
+        hairlineView.layer?.backgroundColor = Self.hairline.cgColor
+        hairlineView.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(hairlineView)
 
         panel.contentView = header
 
@@ -114,12 +127,12 @@ final class TranscriptWindow: NSObject {
             statusLabel.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor),
             statusLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12),
 
-            hairline.leadingAnchor.constraint(equalTo: header.leadingAnchor),
-            hairline.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            hairlineView.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            hairlineView.trailingAnchor.constraint(equalTo: header.trailingAnchor),
             // 44pt from the top of the content: the header is the content view,
             // so anchoring to its bottom would put the rule at the window's foot.
-            hairline.topAnchor.constraint(equalTo: header.topAnchor, constant: 44),
-            hairline.heightAnchor.constraint(equalToConstant: 1),
+            hairlineView.topAnchor.constraint(equalTo: header.topAnchor, constant: 44),
+            hairlineView.heightAnchor.constraint(equalToConstant: 1),
         ])
     }
 
@@ -181,6 +194,8 @@ final class TranscriptWindow: NSObject {
         dismissedByUser = false
         lastIndex = 0
         followsTail = true
+        rendered = []
+        renderedSpeaker = false
         titleLabel.stringValue = title
         statusLabel.stringValue = status
         textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
@@ -210,6 +225,9 @@ final class TranscriptWindow: NSObject {
         var fresh = segments.filter { $0.index > lastIndex }
         guard !fresh.isEmpty else { return }
         fresh.sort { $0.index < $1.index }
+
+        rendered.append(contentsOf: fresh)
+        renderedSpeaker = showSpeaker
 
         for segment in fresh {
             lastIndex = max(lastIndex, segment.index)
@@ -245,6 +263,28 @@ final class TranscriptWindow: NSObject {
     func finish(status: String) {
         statusLabel.stringValue = status
         panel.title = titleLabel.stringValue
+    }
+
+    /// Re-skins the window. The body is rebuilt from `rendered` because the
+    /// colours are baked into its attributed runs.
+    func applyTheme(_ theme: Theme) {
+        TranscriptWindow.theme = theme
+        panel.appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
+        panel.backgroundColor = Self.paper
+        titleLabel.textColor = Self.ink
+        statusLabel.textColor = Self.inkSoft
+        textView.textColor = Self.ink
+        hairlineView.layer?.backgroundColor = Self.hairline.cgColor
+        redrawBody()
+    }
+
+    private func redrawBody() {
+        let all = rendered
+        let speaker = renderedSpeaker
+        textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
+        rendered = []
+        lastIndex = 0
+        append(all, showSpeaker: speaker)
     }
 
     /// Escape / the close button: hide the window, leave the recording alone.
