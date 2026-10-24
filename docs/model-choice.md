@@ -185,3 +185,32 @@ SHERPA_ONNX_DIR=$PWD/vendor/sherpa-onnx-v1.13.8-osx-arm64-shared \
 SenseVoice is still installed and still selected automatically when
 `asr/dolphin/` is missing, so upgrading an existing install never leaves the app
 without an ASR model.
+
+## End-to-end check (engine, not just the model file)
+
+`asr_probe` proves which file the engine opened; it does not prove dictation
+works. `scripts/probe_transcribe.c` drives the shipped dylib through the same C
+ABI the app uses — `Core_Initialize` → `Agent_Load("asr")` → `ASR_Start` →
+`ASR_SubmitAudio` → `ASR_Stop` — so the text below came out of the product code
+path, after its own cleanup:
+
+```
+clang -O2 scripts/probe_transcribe.c -o /tmp/probe_transcribe \
+  -L core_engine/target/release -loffline_voice_core \
+  -Wl,-rpath,$PWD/core_engine/target/release
+DYLD_LIBRARY_PATH=core_engine/target/release /tmp/probe_transcribe \
+  <clip>.wav "$HOME/Library/Application Support/OfflineVoiceAssistant/models"
+```
+
+```
+wav: 0.wav (5.612s, 16000 Hz)
+load=0.001s asr=0.145s rtf=0.026
+model_bytes=104234464 peak_rss=298 MB
+text: 对我做了介绍哈那么我想说的是呢大家如果对我的研究感兴趣呢
+```
+
+`model_bytes=104234464` is the Dolphin pair (103,729,802 + 504,662) — the loader
+picked it, not SenseVoice. Note the result has no trailing `。`: the engine's
+cleanup drops sentence-final punctuation and the polish step puts punctuation
+back where it belongs, which is why the raw transcript window looks flatter than
+the pasted text.
