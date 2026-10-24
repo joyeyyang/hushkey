@@ -92,8 +92,32 @@ OVC_SELFTEST_IMPORT=<clip>.wav dist/OfflineVoiceAssistant.app/Contents/MacOS/Off
 兩個名字。現在共用 `Naming.stem(title:date:)`，而且日曆事件優先於摘要第一行
 ——會讀行事曆就是為了讓檔案叫「週五產品會議」。
 
-## 6. 還沒做
+## 6. 介面重做（2026-10-25，進行中）
+
+原本的視窗只是「同一個系統預設介面換底色」：米色視窗 + 系統 bezel 按鈕 + 系統
+分頁列。主題只改了底色和外觀，所以看起來跟改版前一樣。這次改成一套自己的
+視覺語言（`DesignKit.swift`）：
+
+- **標題列**：透明 titlebar，視窗自己畫名字、一行意圖說明、右邊狀態膠囊
+  （顏色代表 就緒／載入中／失敗，不用讀字）。
+- **分頁**：不用 `NSTabView` 的分頁列，改成自己畫的 pill 列；選中的那顆用
+  `accentQuiet` 底色 + accent 字。
+- **卡片**：所有內容放在 `ThemeCard`（surface 底、1px hairline 邊、圓角 10），
+  不再用 bezel scroll view。
+- **按鈕**：primary（accent 實心、字色由亮度算出）／secondary（描邊）／
+  ghost（文字）／danger，有 hover 態。錄音那一列是唯一的大按鈕。
+- **逐字稿**：卡片內 13 pt、行高 1.32，內距 14/12。
+- **權限橫幅**：warning 淡底卡片，三顆按鈕（開啟設定／我已經開好了／重設權限）。
+
+分頁內容另外拆成獨立檔：`HistoryTabView.swift`、`SettingsTabView.swift`
+（由 subagent 產出，主代理負責接線與編譯修正）。
+
+驗證：`OVC_SELFTEST_UI=/tmp/ovc-ui OVC_SELFTEST_UI_THEME=paper,night` 會把
+五個分頁與整個視窗離屏畫成 PNG（沒有視窗伺服器也能看）。
+
+## 7. 還沒做
 
 - 語音編輯指令（「把第二段改成…」）：要新的 LLM ABI 與提示詞，最後做。
+  這輪沒動，維持未完成。
 - 長會議（>5 分鐘）的切段與去重尚未在真實錄音上跑過。
 - 台語（Minnan）只驗過模型支援，沒有用真人錄音聽過。

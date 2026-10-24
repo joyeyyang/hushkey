@@ -1,9 +1,14 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// The app's main window: a single persistent control panel with five tabs
+/// The app's main window: a persistent control panel with five tabs
 /// (轉錄 / 歷史 / 關鍵字 / 模型 / 設定). It stays open until the user closes it;
 /// closing it does not quit the app (the menu-bar icon reopens it).
+///
+/// The window is built from the pieces in `DesignKit`: a header that carries the
+/// app's name and the live model state, a row of tab pills, and cards on the
+/// window's paper. It deliberately has no `NSTabView` chrome and no bezel
+/// borders — those are what made the old build look like a prototype.
 final class MainWindow: NSWindow {
     private let keywords: Keywords
     private let history: HistoryStore
@@ -16,7 +21,7 @@ final class MainWindow: NSWindow {
     var onHotkeyChange: ((String) -> Void)?
     var onPolishChange: ((Bool) -> Void)?
     var onConfirmChange: ((Bool) -> Void)?
-    /// Announces the chosen translation direction ("off" / "en" / "zh").
+    /// Announces the chosen translation direction ("auto" / "off" / "en" / "zh").
     var onTranslateChange: ((String) -> Void)?
     /// Whether meeting mode also records what the Mac is playing.
     var onSystemAudioChange: ((Bool) -> Void)?
@@ -27,94 +32,78 @@ final class MainWindow: NSWindow {
     /// Transcribe an audio file the user picked or dropped.
     var onImportAudio: ((URL) -> Void)?
     var onQuit: (() -> Void)?
+    var onExportSettingsChange: ((ExportSettings) -> Void)?
+    var onExportNow: (() -> Void)?
+    var onRecheckPermission: (() -> Void)?
 
-    // 模型 tab. Lazy because it reads the manifest off disk, and building the
-    // window must not wait for a stat of every installed model.
-    private lazy var modelManager = ModelManagerView(theme: ThemeCatalog.current)
+    // MARK: - Chrome
+
+    private var theme = ThemeCatalog.current
+    private let tabView = NSTabView()
+    private var tabStrip: TabStrip!
+    private var statusPill: StatusPill!
+    private var titleLabel: NSTextField!
+    private var subtitleLabel: NSTextField!
+
+    /// Every button drawn by `DesignKit`, re-coloured on a theme change.
+    private var themedButtons: [ThemedButton] = []
+    /// Cards, so the permission banner can swap its tint back.
+    private var cards: [ThemeCard] = []
+    /// Closures that re-apply a colour when the palette changes. A label's role
+    /// (primary / secondary / danger) is decided where it is created, so the
+    /// refresh is registered next to it instead of in one giant switch.
+    private var refreshers: [() -> Void] = []
+
+    // MARK: - Tabs
+
+    private lazy var modelManager = ModelManagerView(theme: theme)
+    private lazy var historyView = HistoryTabView(theme: theme, history: history)
+    private lazy var settingsView = SettingsTabView(theme: theme)
 
     // 轉錄 tab
-    private let statusLabel = NSTextField(labelWithString: "模型：尚未載入")
-    private let permissionLabel = NSTextField(wrappingLabelWithString: "")
-    private let permissionButton = NSButton(title: "開啟「輔助使用」設定", target: nil, action: nil)
-    private let importButton = NSButton(title: "匯入音檔…", target: nil, action: nil)
-    private let recheckButton = NSButton(title: "我已經開好了，重新檢查", target: nil, action: nil)
-    /// Only shown next to the banner: the phantom-row escape hatch.
-    private let resetPermissionButton = NSButton(title: "重設權限（清掉舊紀錄）", target: nil, action: nil)
+    private let dictationButton = ThemedButton("開始聽寫", kind: .primary, theme: ThemeCatalog.current)
+    private let meetingButton = ThemedButton("開始會議", kind: .secondary, theme: ThemeCatalog.current)
+    private let importButton = ThemedButton("匯入音檔…", kind: .secondary, theme: ThemeCatalog.current)
+    private let folderButton = ThemedButton("開啟會議資料夾", kind: .ghost, theme: ThemeCatalog.current)
 
-    /// Called when the user asks the app to re-read the Accessibility state
-    /// (typically right after enabling it in System Settings).
-    var onRecheckPermission: (() -> Void)?
-    private let dictationButton = NSButton(title: "開始聽寫", target: nil, action: nil)
-    private let meetingButton = NSButton(title: "開始會議", target: nil, action: nil)
-    private let folderButton = NSButton(title: "開啟會議資料夾", target: nil, action: nil)
-    private let hintLabel = NSTextField(wrappingLabelWithString:
-        "按 Option+Space 開始／停止聽寫。停止後結果會出現在下方；按 Enter 貼到目前輸入框，按 Esc 取消。")
+    private let permissionCard = ThemeCard(theme: ThemeCatalog.current)
+    private let permissionLabel = NSTextField(wrappingLabelWithString: "")
+    private let permissionButton = ThemedButton("開啟「輔助使用」設定", kind: .primary, theme: ThemeCatalog.current)
+    private let recheckButton = ThemedButton("我已經開好了", kind: .secondary, theme: ThemeCatalog.current)
+    private let resetPermissionButton = ThemedButton("重設權限（清掉舊紀錄）", kind: .ghost, theme: ThemeCatalog.current)
+
     private let transcriptView = NSTextView()
+    private let transcriptScroll = NSScrollView()
+    private let copyTranscriptButton = ThemedButton("複製", kind: .secondary, theme: ThemeCatalog.current)
+    /// What is actually in the transcript card. Kept separately from the text
+    /// view's string because the empty state draws a placeholder into it.
+    private var transcriptText = ""
+    private var recordCaption: NSTextField!
 
     // 關鍵字 tab
     private let keywordField = NSTextField()
-    private let addKeywordButton = NSButton(title: "新增", target: nil, action: nil)
+    private let addKeywordButton = ThemedButton("新增", kind: .secondary, theme: ThemeCatalog.current)
     private let keywordTable = NSTableView()
-
-    // 歷史 tab
-    private let historySearch = NSSearchField()
-    private let historyTable = NSTableView()
-    private let historyPasteButton = NSButton(title: "貼到游標處", target: nil, action: nil)
-    private let historyCopyButton = NSButton(title: "複製", target: nil, action: nil)
-    private let historyDeleteButton = NSButton(title: "刪除", target: nil, action: nil)
-    private let historyClearButton = NSButton(title: "全部清空", target: nil, action: nil)
-    private let historyInfo = NSTextField(labelWithString: "")
-    private var historyFiltered: [HistoryEntry] = []
-
-    // 設定 tab
-    private let themePopUp = NSPopUpButton()
-    private let translatePopUp = NSPopUpButton()
-    private let translateTitles = [
-        "自動（預設繁體中文，依你的指令改變）",
-        "關閉（只整理，不指定語言）",
-        "一律翻成英文",
-        "一律翻成繁體中文",
-    ]
-    private let translateCodes = ["auto", "off", "en", "zh"]
-    private let hotkeyField = NSTextField()
-    private let polishCheckbox = NSButton(checkboxWithTitle: "用 AI 整理逐字稿（潤飾、去除口頭禪）", target: nil, action: nil)
-    private let confirmCheckbox = NSButton(checkboxWithTitle: "貼上前先顯示文字讓我確認（按 Enter 才貼）", target: nil, action: nil)
-    private let systemAudioCheckbox = NSButton(checkboxWithTitle: "會議模式同時錄製電腦播放的聲音（對方說話）", target: nil, action: nil)
-    private let resetButton = NSButton(title: "重設為預設", target: nil, action: nil)
-    private let quitButton = NSButton(title: "結束 Offline Voice Assistant", target: nil, action: nil)
-    /// The picker lists "follow the system" first, then every palette by its
-    /// own name, so the menu reads like a choice of paper rather than a mode.
-    private var themeTitles: [String] { ["跟隨系統"] + ThemeCatalog.all.map(\.name) }
-    private var themeCodes: [String] { ["system"] + ThemeCatalog.all.map(\.id) }
-
-    // 設定 tab — 匯出
-    private let exportFolderField = NSTextField(labelWithString: "（未選擇）")
-    private let exportChooseButton = NSButton(title: "選擇資料夾…", target: nil, action: nil)
-    private let exportFormatPopUp = NSPopUpButton()
-    private let exportAutoCheckbox = NSButton(
-        checkboxWithTitle: "每次結束時自動匯出一份（可指定 Obsidian 資料夾）",
-        target: nil, action: nil
-    )
-    private let exportNowButton = NSButton(title: "匯出最近一次逐字稿…", target: nil, action: nil)
-    /// Fired on every change to the export controls, with the whole value so the
-    /// app has one place to persist instead of three keys to keep in sync.
-    var onExportSettingsChange: ((ExportSettings) -> Void)?
-    var onExportNow: (() -> Void)?
 
     init(keywords: Keywords, history: HistoryStore) {
         self.keywords = keywords
         self.history = history
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 580, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         self.title = "Offline Voice Assistant"
-        self.isReleasedWhenClosed = false
-        self.minSize = NSSize(width: 440, height: 420)
+        // A transparent title bar keeps the traffic lights where macOS expects
+        // them while letting the window's own paper run to the top edge.
+        titlebarAppearsTransparent = true
+        titleVisibility = .hidden
+        isReleasedWhenClosed = false
+        minSize = NSSize(width: 520, height: 560)
         buildUI()
         syncSettings()
+        applyTheme(theme)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -122,55 +111,136 @@ final class MainWindow: NSWindow {
     // MARK: - Public API used by AppController
 
     func updateState(dictating: Bool, meeting: Bool) {
-        dictationButton.title = dictating ? "停止聽寫" : "開始聽寫"
-        meetingButton.title = meeting ? "停止會議" : "開始會議"
+        dictationButton.titleText = dictating ? "停止聽寫" : "開始聽寫"
+        meetingButton.titleText = meeting ? "停止會議" : "開始會議"
+        dictationButton.setKind(meeting ? .secondary : .primary)
+        meetingButton.setSelected(meeting)
     }
 
+    /// The header pill: what the engine is doing, in colour.
+    ///
+    /// The strings come from `AppController` and already read well aloud
+    /// ("模型：載入中…"), so the kind is inferred from the words rather than
+    /// plumbed through as a second argument every call site would have to know.
     func setStatus(_ text: String) {
-        statusLabel.stringValue = text
+        let kind: StatusPill.Kind
+        if text.contains("失敗") || text.contains("錯誤") {
+            kind = .error
+        } else if text.contains("就緒") {
+            kind = .ok
+        } else if text.contains("載入") || text.contains("準備") || text.contains("下載") || text.contains("辨識") {
+            kind = .warn
+        } else {
+            kind = .neutral
+        }
+        statusPill.set(text: text, kind: kind)
     }
 
     /// Shows or hides the Accessibility-permission banner. Without that
     /// permission the app can only copy the text, not paste it.
     func setAccessibilityGranted(_ granted: Bool) {
         permissionLabel.stringValue = granted ? ""
-            : "⚠️ 系統回報尚未取得「輔助使用」權限，無法自動貼上（文字只會複製到剪貼簿）。\n"
-            + "請按「開啟設定」到「隱私權與安全性 → 輔助使用」，用「＋」把 /Applications/OfflineVoiceAssistant.app 加進去並打開開關。\n"
-            + "開關看起來已經是開的、App 卻仍說沒有權限，代表清單裡那一列是舊版本留下來的（授權綁在程式簽章上，換版本就失效）。這種情況請按「重設權限」，把舊紀錄清掉再重新加入。"
-        permissionLabel.isHidden = granted
-        permissionButton.isHidden = granted
-        recheckButton.isHidden = granted
-        resetPermissionButton.isHidden = granted
+            : "系統回報尚未取得「輔助使用」權限，所以只能把文字放進剪貼簿，不能自動貼上。\n"
+            + "到「隱私權與安全性 → 輔助使用」用「＋」加入 /Applications/OfflineVoiceAssistant.app 並打開開關。\n"
+            + "若開關看起來已經是開的、這裡卻仍說沒有，那一列是舊版本留下的（授權綁在程式簽章上）。按「重設權限」清掉舊紀錄再加入即可。"
+        permissionCard.isHidden = granted
+        for button in [permissionButton, recheckButton, resetPermissionButton] {
+            button.isHidden = granted
+        }
     }
 
     func setTranscript(_ text: String) {
+        transcriptText = text
+        copyTranscriptButton.isEnabled = !text.isEmpty
         transcriptView.string = text
+        styleTranscript()
         transcriptView.scrollToBeginningOfDocument(nil)
+    }
+
+    /// Re-reads the store; called after a transcript is saved.
+    func refreshHistory() {
+        historyView.refresh()
     }
 
     // MARK: - UI construction
 
     private func buildUI() {
-        let tabView = NSTabView()
+        let root = NSView()
+        root.wantsLayer = true
+        contentView = root
+
+        let header = buildHeader()
+        tabStrip = TabStrip(titles: ["轉錄", "歷史", "關鍵字", "模型", "設定"], theme: theme)
+        tabStrip.onSelect = { [weak self] index in
+            guard let self, self.tabView.tabViewItems.indices.contains(index) else { return }
+            self.tabView.selectTabViewItem(at: index)
+        }
+
+        tabView.tabViewType = .noTabsNoBorder
         tabView.translatesAutoresizingMaskIntoConstraints = false
-        // Files can be dropped anywhere on the 轉錄 tab's background; the text
-        // view itself keeps its own drop behaviour, so the button next to the
-        // record buttons is the path that always works.
+        tabView.delegate = self
+
         let transcribe = buildTranscribeTab()
         transcribe.acceptAudioFileDrops { [weak self] url in self?.onImportAudio?(url) }
         tabView.addTabViewItem(makeItem("轉錄", transcribe))
-        tabView.addTabViewItem(makeItem("歷史", buildHistoryTab()))
+        tabView.addTabViewItem(makeItem("歷史", historyView))
         tabView.addTabViewItem(makeItem("關鍵字", buildKeywordsTab()))
         tabView.addTabViewItem(makeItem("模型", modelManager))
-        tabView.addTabViewItem(makeItem("設定", buildSettingsTab()))
-        tabView.delegate = self
-        contentView!.addSubview(tabView)
+        tabView.addTabViewItem(makeItem("設定", settingsView))
+
+        root.addSubview(header)
+        root.addSubview(tabStrip)
+        root.addSubview(tabView)
         NSLayoutConstraint.activate([
-            tabView.leadingAnchor.constraint(equalTo: contentView!.leadingAnchor, constant: 8),
-            tabView.trailingAnchor.constraint(equalTo: contentView!.trailingAnchor, constant: -8),
-            tabView.topAnchor.constraint(equalTo: contentView!.topAnchor, constant: 8),
-            tabView.bottomAnchor.constraint(equalTo: contentView!.bottomAnchor, constant: -8),
+            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            header.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
+
+            tabStrip.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Metrics.space5),
+            tabStrip.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -Metrics.space5),
+            tabStrip.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Metrics.space4),
+
+            tabView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Metrics.space5),
+            tabView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Metrics.space5),
+            tabView.topAnchor.constraint(equalTo: tabStrip.bottomAnchor, constant: Metrics.space4),
+            tabView.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -Metrics.space4),
         ])
+    }
+
+    /// Name, one line of intent, and the live state — the three things a person
+    /// wants before touching anything.
+    private func buildHeader() -> NSView {
+        let header = NSView()
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel = Ink.title("Offline Voice Assistant", theme)
+        subtitleLabel = Ink.small("全程離線 · 音訊與逐字稿不會離開這台電腦", theme)
+        let text = NSStackView.column([titleLabel, subtitleLabel], spacing: 2)
+        statusPill = StatusPill(theme: theme)
+        statusPill.set(text: "模型：尚未載入", kind: .neutral)
+
+        let line = Hairline(theme: theme)
+        header.addSubview(text)
+        header.addSubview(statusPill)
+        header.addSubview(line)
+        NSLayoutConstraint.activate([
+            header.heightAnchor.constraint(equalToConstant: 58),
+            text.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: Metrics.space5),
+            text.topAnchor.constraint(equalTo: header.topAnchor, constant: 6),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: statusPill.leadingAnchor, constant: -Metrics.space3),
+            statusPill.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -Metrics.space5),
+            statusPill.centerYAnchor.constraint(equalTo: text.centerYAnchor),
+            line.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: Metrics.space5),
+            line.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -Metrics.space5),
+            line.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+        ])
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            self.titleLabel.textColor = self.theme.textPrimary
+            self.subtitleLabel.textColor = self.theme.textSecondary
+            line.applyTheme(self.theme)
+        }
+        return header
     }
 
     private func makeItem(_ title: String, _ view: NSView) -> NSTabViewItem {
@@ -180,61 +250,124 @@ final class MainWindow: NSWindow {
         return item
     }
 
-    private func pin(_ stack: NSStackView, in view: NSView, pinBottom: Bool = true) {
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
-        var constraints = [
-            stack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: view.topAnchor),
-        ]
-        if pinBottom {
-            constraints.append(stack.bottomAnchor.constraint(equalTo: view.bottomAnchor))
-        }
-        NSLayoutConstraint.activate(constraints)
+    /// Wraps a tab's content in a scroll view.
+    ///
+    /// The permission banner and the settings form both grow taller than a small
+    /// window; clipping the bottom was the old failure mode, so every tab that
+    /// can grow is scrollable and stretches to fill when there is room.
+    private func scrolled(_ content: NSView, inset: CGFloat = 0) -> NSView {
+        let host = NSView()
+        let scroll = TopAnchoredScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.scrollerStyle = .overlay
+
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = document
+        host.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: host.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            document.heightAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.heightAnchor),
+        ])
+        content.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: inset),
+            content.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -inset),
+            // A couple of points of breathing room at the top: a wrapping label
+            // pinned to y = 0 has its ascenders clipped by the scroll edge.
+            content.topAnchor.constraint(equalTo: document.topAnchor, constant: Metrics.space2),
+            content.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -Metrics.space2),
+        ])
+        return host
+    }
+
+    /// A card with padding, sized by its content.
+    private func card(_ body: NSView) -> ThemeCard {
+        let card = ThemeCard(theme: theme)
+        card.embed(body)
+        cards.append(card)
+        return card
+    }
+
+    private func button(_ button: ThemedButton, _ action: Selector) {
+        button.target = self
+        button.action = action
+        themedButtons.append(button)
     }
 
     private func buildTranscribeTab() -> NSView {
-        let view = NSView()
-        statusLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-
-        for (button, action) in [(dictationButton, #selector(didTapDictation)),
-                                 (meetingButton, #selector(didTapMeeting)),
-                                 (importButton, #selector(didTapImport)),
-                                 (folderButton, #selector(didTapFolder))] {
-            button.bezelStyle = .rounded
-            button.target = self
-            button.action = action
+        // 錄音
+        recordCaption = Ink.caption(
+            "按 Option+Space 開始／停止聽寫，結果會出現在浮動視窗：Enter 貼上，Esc 只關閉視窗。",
+            theme
+        )
+        let recordHeading = Ink.heading("錄音", theme)
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            recordHeading.textColor = self.theme.textPrimary
+            self.recordCaption.textColor = self.theme.textSecondary
         }
 
-        hintLabel.font = .systemFont(ofSize: 11)
-        hintLabel.textColor = .secondaryLabelColor
+        dictationButton.makeLarge()
+        meetingButton.makeLarge()
+        button(dictationButton, #selector(didTapDictation))
+        button(meetingButton, #selector(didTapMeeting))
+        button(importButton, #selector(didTapImport))
+        button(folderButton, #selector(didTapFolder))
 
-        permissionLabel.font = .systemFont(ofSize: 11)
-        permissionLabel.textColor = .systemRed
-        permissionLabel.isHidden = true
-        permissionButton.bezelStyle = .rounded
-        permissionButton.target = self
-        permissionButton.action = #selector(didTapPermission)
-        permissionButton.isHidden = true
-        recheckButton.bezelStyle = .rounded
-        recheckButton.target = self
-        recheckButton.action = #selector(didTapRecheckPermission)
-        recheckButton.isHidden = true
-        resetPermissionButton.bezelStyle = .rounded
-        resetPermissionButton.target = self
-        resetPermissionButton.action = #selector(didTapResetPermission)
-        resetPermissionButton.isHidden = true
+        let mainActions = NSStackView.row([dictationButton, meetingButton], spacing: Metrics.space2)
+        let quietActions = NSStackView.row([importButton, folderButton], spacing: Metrics.space2)
+        let recordBody = NSStackView.column([recordHeading, recordCaption, mainActions, quietActions], spacing: Metrics.space3)
+        let recordCard = card(recordBody)
+
+        // 權限
+        permissionLabel.font = NSFont.systemFont(ofSize: 12)
+        permissionLabel.stringValue = ""
+        button(permissionButton, #selector(didTapPermission))
+        button(recheckButton, #selector(didTapRecheckPermission))
+        button(resetPermissionButton, #selector(didTapResetPermission))
         resetPermissionButton.toolTip = "執行 tccutil reset 清掉這個 App 的輔助使用紀錄，再重新跳出系統權限對話框"
+        let permissionNote = Ink.caption("授權綁在程式簽章上，換版本後舊紀錄會失效。", theme)
+        let permissionButtons = NSStackView.row([permissionButton, recheckButton, resetPermissionButton],
+                                                spacing: Metrics.space2)
+        let permissionBody = NSStackView.column([permissionLabel, permissionButtons, permissionNote],
+                                                spacing: Metrics.space2)
+        permissionCard.embed(permissionBody, inset: Metrics.space4)
+        permissionCard.isHidden = true
+        cards.append(permissionCard)
+        for view in [permissionButton, recheckButton, resetPermissionButton] {
+            view.isHidden = true
+        }
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            self.permissionLabel.textColor = self.theme.danger
+            permissionNote.textColor = self.theme.textSecondary
+            self.permissionCard.setFill(self.theme.warning.withAlphaComponent(self.theme.isDark ? 0.16 : 0.10))
+        }
 
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        scroll.translatesAutoresizingMaskIntoConstraints = false
+        // 逐字稿
+        let transcriptHeading = Ink.heading("最近一次結果", theme)
+        let transcriptHint = Ink.small("保留原始文字，可用滑鼠選取複製", theme)
+        transcriptScroll.translatesAutoresizingMaskIntoConstraints = false
+        transcriptScroll.hasVerticalScroller = true
+        transcriptScroll.autohidesScrollers = true
+        transcriptScroll.drawsBackground = false
+        transcriptScroll.scrollerStyle = .overlay
         transcriptView.isEditable = false
         transcriptView.isSelectable = true
-        transcriptView.font = .systemFont(ofSize: 13)
-        transcriptView.textContainerInset = NSSize(width: 6, height: 6)
+        transcriptView.drawsBackground = false
+        transcriptView.textContainerInset = NSSize(width: 14, height: 12)
         transcriptView.minSize = NSSize(width: 0, height: 0)
         transcriptView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         transcriptView.isVerticallyResizable = true
@@ -242,351 +375,241 @@ final class MainWindow: NSWindow {
         transcriptView.autoresizingMask = [.width]
         transcriptView.textContainer?.widthTracksTextView = true
         transcriptView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        transcriptView.frame = NSRect(origin: .zero, size: scroll.contentSize)
-        scroll.documentView = transcriptView
+        transcriptScroll.documentView = transcriptView
 
-        let stack = NSStackView(views: [statusLabel, permissionLabel,
-                                        permissionButton, recheckButton, resetPermissionButton,
-                                        dictationButton, meetingButton, importButton, folderButton,
-                                        hintLabel, scroll])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        button(copyTranscriptButton, #selector(didTapCopyTranscript))
+        copyTranscriptButton.isEnabled = false
+        copyTranscriptButton.toolTip = "把整段結果放進剪貼簿（也可以在文字上選取後按 Cmd+C）"
+        let transcriptHeader = NSStackView.row([transcriptHeading], spacing: Metrics.space2)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        transcriptHeader.addArrangedSubview(spacer)
+        transcriptHeader.addArrangedSubview(transcriptHint)
+        transcriptHeader.addArrangedSubview(copyTranscriptButton)
+        transcriptScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
 
-        // The form can be taller than the window -- the permission banner adds a
-        // label and two buttons. Scroll it rather than letting AppKit clip the
-        // bottom (which is what happened before), and let it stretch to fill the
-        // window when there is room to spare.
-        let formScroll = NSScrollView()
-        formScroll.translatesAutoresizingMaskIntoConstraints = false
-        formScroll.hasVerticalScroller = true
-        formScroll.autohidesScrollers = true
-        formScroll.drawsBackground = false
-        let document = NSView()
-        document.translatesAutoresizingMaskIntoConstraints = false
-        formScroll.documentView = document
-        view.addSubview(formScroll)
+        let transcriptBody = NSStackView.column([transcriptHeader, transcriptScroll], spacing: Metrics.space3)
+        let transcriptCard = card(transcriptBody)
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            transcriptHeading.textColor = self.theme.textPrimary
+            transcriptHint.textColor = self.theme.textSecondary
+            self.styleTranscript()
+        }
+
+        let column = NSStackView.column([recordCard, permissionCard, transcriptCard], spacing: Metrics.space4)
+        let host = scrolled(column)
         NSLayoutConstraint.activate([
-            formScroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            formScroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            formScroll.topAnchor.constraint(equalTo: view.topAnchor),
-            formScroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            document.leadingAnchor.constraint(equalTo: formScroll.contentView.leadingAnchor),
-            document.trailingAnchor.constraint(equalTo: formScroll.contentView.trailingAnchor),
-            document.topAnchor.constraint(equalTo: formScroll.contentView.topAnchor),
-            document.widthAnchor.constraint(equalTo: formScroll.contentView.widthAnchor),
-            document.heightAnchor.constraint(greaterThanOrEqualTo: formScroll.contentView.heightAnchor),
+            column.widthAnchor.constraint(equalTo: host.widthAnchor),
+            recordCard.widthAnchor.constraint(equalTo: column.widthAnchor),
+            permissionCard.widthAnchor.constraint(equalTo: column.widthAnchor),
+            transcriptCard.widthAnchor.constraint(equalTo: column.widthAnchor),
+            transcriptScroll.widthAnchor.constraint(equalTo: transcriptCard.widthAnchor, constant: -2 * Metrics.space4),
         ])
-        pin(stack, in: document)
-
-        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
-        for full in [statusLabel, permissionLabel, hintLabel, scroll] {
-            full.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
-        }
-        return view
+        return host
     }
 
-    private static let historyFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "MM/dd HH:mm"
-        return f
-    }()
-
-    private func buildHistoryTab() -> NSView {
-        let view = NSView()
-        historyInfo.stringValue = "講過的內容會留在這裡，可以搜尋、重新貼上。"
-        historyInfo.font = .systemFont(ofSize: 11)
-        historyInfo.textColor = .secondaryLabelColor
-
-        historySearch.placeholderString = "搜尋內容…"
-        historySearch.sendsWholeSearchString = false
-        historySearch.sendsSearchStringImmediately = true
-        historySearch.target = self
-        historySearch.action = #selector(didSearchHistory)
-
-        for (button, action) in [(historyPasteButton, #selector(didTapPasteHistory)),
-                                 (historyCopyButton, #selector(didTapCopyHistory)),
-                                 (historyDeleteButton, #selector(didTapDeleteHistory)),
-                                 (historyClearButton, #selector(didTapClearHistory))] {
-            button.bezelStyle = .rounded
-            button.target = self
-            button.action = action
+    private func styleTranscript() {
+        // The view is selectable, so a drag + Cmd+C works; the button is for the
+        // common case where the user just wants the whole result on the
+        // pasteboard without hunting for a selection.
+        copyTranscriptButton.isEnabled = !transcriptText.isEmpty
+        transcriptView.string = transcriptText
+        if transcriptText.isEmpty {
+            transcriptView.textStorage?.setAttributedString(NSAttributedString(
+                string: "還沒有一筆結果。按「開始聽寫」，或把音檔拖進這個視窗。",
+                attributes: [
+                    .font: theme.fontBody,
+                    .foregroundColor: theme.textSecondary.withAlphaComponent(0.7),
+                ]
+            ))
         }
-
-        historyTable.headerView = nil
-        historyTable.rowHeight = 30
-        historyTable.usesAlternatingRowBackgroundColors = true
-        historyTable.delegate = self
-        historyTable.dataSource = self
-        historyTable.target = self
-        historyTable.doubleAction = #selector(didTapPasteHistory)
-        historyTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        let timeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("time"))
-        timeColumn.width = 116
-        timeColumn.minWidth = 116
-        let textColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
-        textColumn.width = 320
-        historyTable.addTableColumn(timeColumn)
-        historyTable.addTableColumn(textColumn)
-
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        scroll.documentView = historyTable
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        historyTable.frame = NSRect(origin: .zero, size: scroll.contentSize)
-        historyTable.autoresizingMask = [.width]
-
-        let buttons = NSStackView(views: [historyPasteButton, historyCopyButton,
-                                          historyDeleteButton, historyClearButton])
-        buttons.orientation = .horizontal
-        buttons.spacing = 8
-
-        let stack = NSStackView(views: [historyInfo, historySearch, scroll, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        pin(stack, in: view)
-
-        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        for full in [historyInfo, historySearch, scroll, buttons] {
-            full.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
-        }
-        refreshHistory()
-        return view
-    }
-
-    /// Re-reads the store and reapplies whatever is in the search box.
-    func refreshHistory() {
-        historyFiltered = history.search(historySearch.stringValue)
-        historyTable.reloadData()
-        let total = history.entries.count
-        if historyFiltered.count == total {
-            historyInfo.stringValue = total == 0
-                ? "還沒有紀錄。每次聽寫完成的內容都會自動存在這裡。"
-                : "共 \(total) 筆，最新的在最上面。雙擊可以貼回游標處。"
-        } else {
-            historyInfo.stringValue = "找到 \(historyFiltered.count) 筆（共 \(total) 筆）。"
-        }
-    }
-
-    private var selectedHistoryEntry: HistoryEntry? {
-        let row = historyTable.selectedRow
-        guard row >= 0, historyFiltered.indices.contains(row) else { return nil }
-        return historyFiltered[row]
+        transcriptView.backgroundColor = .clear
+        transcriptView.textColor = theme.textPrimary
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineHeightMultiple = 1.32
+        transcriptView.defaultParagraphStyle = paragraph
+        transcriptView.typingAttributes = [
+            .font: theme.fontBody,
+            .foregroundColor: theme.textPrimary,
+            .paragraphStyle: paragraph,
+        ]
     }
 
     private func buildKeywordsTab() -> NSView {
-        let view = NSView()
-        let info = NSTextField(wrappingLabelWithString:
-            "關鍵字（人名、專案代號等）會提示 AI 別寫錯。輸入後按 Enter 或「新增」；在清單上雙擊可刪除。")
-        info.font = .systemFont(ofSize: 11)
-        info.textColor = .secondaryLabelColor
+        let info = Ink.caption(
+            "關鍵字（人名、專案代號等）會提示 AI 別寫錯。輸入後按 Enter 或「新增」；在清單上雙擊可刪除。",
+            theme
+        )
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            info.attributedStringValue = NSAttributedString(
+                string: info.stringValue,
+                attributes: [
+                    .font: self.theme.fontSmall,
+                    .foregroundColor: self.theme.textSecondary,
+                ]
+            )
+        }
 
         keywordField.placeholderString = "例如：李明宏、OVC 專案"
+        keywordField.font = theme.fontBody
+        keywordField.isBezeled = false
+        keywordField.drawsBackground = false
+        keywordField.focusRingType = .none
         keywordField.delegate = self
-        addKeywordButton.bezelStyle = .rounded
-        addKeywordButton.target = self
-        addKeywordButton.action = #selector(didTapAddKeyword)
-        let row = NSStackView(views: [keywordField, addKeywordButton])
-        row.orientation = .horizontal
-        row.spacing = 8
-        row.translatesAutoresizingMaskIntoConstraints = false
-        keywordField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+        keywordField.translatesAutoresizingMaskIntoConstraints = false
+
+        let fieldCard = ThemeCard(theme: theme, fill: theme.surfaceAlt)
+        fieldCard.embed(keywordField, inset: Metrics.space2)
+        fieldCard.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        cards.append(fieldCard)
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            fieldCard.setFill(self.theme.surfaceAlt)
+            fieldCard.applyTheme(self.theme)
+            self.keywordField.textColor = self.theme.textPrimary
+        }
+
+        button(addKeywordButton, #selector(didTapAddKeyword))
+        let entryRow = NSStackView.row([fieldCard, addKeywordButton], spacing: Metrics.space2)
+        fieldCard.setContentHuggingPriority(.init(1), for: .horizontal)
+        fieldCard.setContentCompressionResistancePriority(.init(1), for: .horizontal)
 
         keywordTable.headerView = nil
-        keywordTable.rowHeight = 24
+        keywordTable.rowHeight = 32
+        keywordTable.backgroundColor = .clear
+        keywordTable.usesAlternatingRowBackgroundColors = false
+        keywordTable.selectionHighlightStyle = .regular
         keywordTable.delegate = self
         keywordTable.dataSource = self
         keywordTable.target = self
         keywordTable.doubleAction = #selector(didTapDeleteKeyword)
         keywordTable.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("keyword"))
-        keywordTable.addTableColumn(column)
-        let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        scroll.documentView = keywordTable
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        keywordTable.frame = NSRect(origin: .zero, size: scroll.contentSize)
+        keywordTable.style = .plain
+        keywordTable.gridStyleMask = .solidHorizontalGridLineMask
+        keywordTable.gridColor = theme.border
+        keywordTable.intercellSpacing = NSSize(width: 0, height: 0)
+        keywordTable.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("keyword")))
+
+        let tableScroll = NSScrollView()
+        tableScroll.translatesAutoresizingMaskIntoConstraints = false
+        tableScroll.hasVerticalScroller = true
+        tableScroll.autohidesScrollers = true
+        tableScroll.drawsBackground = false
+        tableScroll.scrollerStyle = .overlay
+        tableScroll.documentView = keywordTable
         keywordTable.autoresizingMask = [.width]
         keywordTable.sizeLastColumnToFit()
+        tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
 
-        let stack = NSStackView(views: [info, row, scroll])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        pin(stack, in: view)
-
-        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
-        for full in [info, row, scroll] {
-            full.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
+        let listCard = card(tableScroll)
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            self.keywordTable.backgroundColor = .clear
+            self.keywordTable.gridColor = self.theme.border
+            self.keywordTable.reloadData()
         }
-        return view
+
+        let column = NSStackView.column([info, entryRow, listCard], spacing: Metrics.space3)
+        let host = NSView()
+        host.addSubview(column)
+        NSLayoutConstraint.activate([
+            column.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            column.topAnchor.constraint(equalTo: host.topAnchor, constant: Metrics.space2),
+            column.bottomAnchor.constraint(lessThanOrEqualTo: host.bottomAnchor),
+            entryRow.widthAnchor.constraint(equalTo: column.widthAnchor),
+            listCard.widthAnchor.constraint(equalTo: column.widthAnchor),
+        ])
+        return host
     }
 
-    private func buildSettingsTab() -> NSView {
-        let view = NSView()
-        let themeLabel = NSTextField(labelWithString: "外觀主題")
-        themeLabel.font = .systemFont(ofSize: 13)
-        themeLabel.textColor = .secondaryLabelColor
-        themePopUp.addItems(withTitles: themeTitles)
-        themePopUp.selectItem(at: 0)
-        themePopUp.target = self
-        themePopUp.action = #selector(didChangeTheme)
+    // MARK: - Settings
 
-        let hotkeyLabel = NSTextField(labelWithString: "啟用熱鍵")
-        hotkeyLabel.font = .systemFont(ofSize: 13)
-        hotkeyLabel.textColor = .secondaryLabelColor
-        hotkeyField.placeholderString = "例如：Option+Space"
-        hotkeyField.delegate = self
-        hotkeyField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
-
-        let translateLabel = NSTextField(labelWithString: "翻譯")
-        translateLabel.font = .systemFont(ofSize: 13)
-        translateLabel.textColor = .secondaryLabelColor
-        translatePopUp.addItems(withTitles: translateTitles)
-        translatePopUp.target = self
-        translatePopUp.action = #selector(didChangeTranslate)
-
-        let help = NSTextField(wrappingLabelWithString:
-            "熱鍵格式：修飾鍵 + 按鍵，例如 Option+Space、Control+Shift+R。\n"
-            + "淺色模式為米色底 (#F5F0E6)，深色模式為黑底，跟隨系統則依 macOS 設定。\n"
-            + "若 AI 整理結果不理想，可關閉「用 AI 整理逐字稿」，直接使用語音辨識原始結果。\n"
-            + "會議模式錄系統音訊需要「系統設定 → 隱私權與安全性 → 螢幕與系統音訊錄製」權限；用喇叭時麥克風可能重複收到對方聲音，戴耳機可避免。")
-        help.font = .systemFont(ofSize: 11)
-        help.textColor = .tertiaryLabelColor
-
-        polishCheckbox.target = self
-        polishCheckbox.action = #selector(didTogglePolish)
-
-        confirmCheckbox.target = self
-        confirmCheckbox.action = #selector(didToggleConfirm)
-
-        systemAudioCheckbox.target = self
-        systemAudioCheckbox.action = #selector(didToggleSystemAudio)
-
-        resetButton.bezelStyle = .rounded
-        resetButton.target = self
-        resetButton.action = #selector(didTapReset)
-
-        quitButton.bezelStyle = .rounded
-        quitButton.target = self
-        quitButton.action = #selector(didTapQuit)
-
-        // 匯出
-        let exportLabel = NSTextField(labelWithString: "匯出")
-        exportLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        exportLabel.textColor = .secondaryLabelColor
-
-        exportFormatPopUp.addItems(withTitles: ExportFormat.allCases.map(\.displayName))
-        exportFormatPopUp.target = self
-        exportFormatPopUp.action = #selector(didChangeExport)
-
-        exportChooseButton.bezelStyle = .rounded
-        exportChooseButton.target = self
-        exportChooseButton.action = #selector(didTapExportFolder)
-        exportFolderField.lineBreakMode = .byTruncatingMiddle
-        exportFolderField.textColor = .secondaryLabelColor
-        exportFolderField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
-
-        exportAutoCheckbox.target = self
-        exportAutoCheckbox.action = #selector(didChangeExport)
-
-        exportNowButton.bezelStyle = .rounded
-        exportNowButton.target = self
-        exportNowButton.action = #selector(didTapExportNow)
-
-        let exportRow = NSStackView(views: [exportFormatPopUp, exportChooseButton])
-        exportRow.orientation = .horizontal
-        exportRow.spacing = 8
-
-        let stack = NSStackView(views: [themeLabel, themePopUp, hotkeyLabel, hotkeyField, help,
-                                        translateLabel, translatePopUp,
-                                        polishCheckbox, confirmCheckbox, systemAudioCheckbox,
-                                        exportLabel, exportRow, exportFolderField,
-                                        exportAutoCheckbox, exportNowButton,
-                                        resetButton, quitButton])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        pin(stack, in: view, pinBottom: false)
-        for full in [themePopUp, hotkeyField, translatePopUp, help, exportFolderField] {
-            full.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
+    /// Every settings change is forwarded from the settings tab, which owns the
+    /// controls but not the persistence: a value is only real once this window
+    /// has written it.
+    private func wireSettings() {
+        settingsView.onThemeChange = { [weak self] code in
+            UserDefaults.standard.set(code, forKey: "settings.theme")
+            ThemeCatalog.setCurrent(id: code)
+            self?.onThemeChange?()
         }
-        return view
-    }
-
-    // MARK: - Settings state
-
-    private var selectedTheme: String {
-        get {
-            let i = themePopUp.indexOfSelectedItem
-            return (i >= 0 && i < themeCodes.count) ? themeCodes[i] : "system"
+        settingsView.onHotkeyChange = { [weak self] spec in
+            UserDefaults.standard.set(spec, forKey: "settings.hotkey")
+            self?.onHotkeyChange?(spec)
         }
-        set { if let i = themeCodes.firstIndex(of: newValue) { themePopUp.selectItem(at: i) } }
-    }
-
-    private var selectedTranslate: String {
-        get {
-            let i = translatePopUp.indexOfSelectedItem
-            return (i >= 0 && i < translateCodes.count) ? translateCodes[i] : "auto"
+        settingsView.onTranslateChange = { [weak self] code in
+            UserDefaults.standard.set(code, forKey: "settings.translate")
+            self?.onTranslateChange?(code)
         }
-        set { if let i = translateCodes.firstIndex(of: newValue) { translatePopUp.selectItem(at: i) } }
+        settingsView.onPolishChange = { [weak self] enabled in self?.onPolishChange?(enabled) }
+        settingsView.onConfirmChange = { [weak self] confirm in self?.onConfirmChange?(confirm) }
+        settingsView.onSystemAudioChange = { [weak self] enabled in self?.onSystemAudioChange?(enabled) }
+        settingsView.onExportSettingsChange = { [weak self] settings in self?.onExportSettingsChange?(settings) }
+        settingsView.onExportNow = { [weak self] in self?.onExportNow?() }
+        settingsView.onQuit = { [weak self] in self?.onQuit?() }
+
+        historyView.onPaste = { [weak self] entry in self?.onPasteHistory?(entry.polished) }
+        historyView.onCopy = { [weak self] entry in
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(entry.polished, forType: .string)
+            self?.setStatus("已複製到剪貼簿")
+        }
     }
 
     private func syncSettings() {
-        let defaults = UserDefaults.standard
-        selectedTheme = defaults.string(forKey: "settings.theme") ?? "system"
-        selectedTranslate = defaults.string(forKey: "settings.translate") ?? "auto"
-        hotkeyField.stringValue = defaults.string(forKey: "settings.hotkey") ?? "Option+Space"
-        polishCheckbox.state = (defaults.object(forKey: "settings.polish") as? Bool ?? true) ? .on : .off
-        confirmCheckbox.state = (defaults.object(forKey: "settings.confirmInsert") as? Bool ?? false) ? .on : .off
-        systemAudioCheckbox.state = (defaults.object(forKey: "settings.meetingSystemAudio") as? Bool ?? true) ? .on : .off
-        let export = ExportSettings.load()
-        exportFolderField.stringValue = export.folder.isEmpty ? "（未選擇）" : export.folder
-        exportFolderField.toolTip = export.folder.isEmpty ? nil : export.folder
-        if let index = ExportFormat.allCases.firstIndex(of: export.format) {
-            exportFormatPopUp.selectItem(at: index)
-        }
-        exportAutoCheckbox.state = export.autoSave ? .on : .off
+        wireSettings()
+        settingsView.syncFromDefaults()
         keywordTable.reloadData()
     }
 
-    private func saveSettings() {
-        let defaults = UserDefaults.standard
-        defaults.set(selectedTheme, forKey: "settings.theme")
-        defaults.set(selectedTranslate, forKey: "settings.translate")
-        defaults.set(hotkeyField.stringValue, forKey: "settings.hotkey")
-    }
+    // MARK: - Theme
 
-    /// Follows the chosen palette.
-    ///
-    /// Everything inside is a system control, so setting the window's appearance
-    /// is what recolours the text, the fields and the tab chrome; the only colour
-    /// of our own is the paper behind them.
+    /// Follows the chosen palette. Every designed part is re-coloured in place so
+    /// the window does not lose its scroll position or selection.
     func applyTheme(_ theme: Theme) {
+        self.theme = theme
         appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
         backgroundColor = theme.background
         contentView?.wantsLayer = true
         contentView?.layer?.backgroundColor = theme.background.cgColor
+
+        statusPill.applyTheme(theme)
+        tabStrip.applyTheme(theme)
+        themedButtons.forEach { $0.applyTheme(theme) }
+        cards.forEach { $0.applyTheme(theme) }
+        refreshers.forEach { $0() }
+        historyView.applyTheme(theme)
+        settingsView.applyTheme(theme)
         modelManager.applyTheme(theme)
+        styleTranscript()
+    }
+
+    /// Renders the whole window content (header, tab strip and the open tab).
+    func snapshotWindow(to url: URL) -> Bool {
+        guard let view = contentView, view.bounds.width > 1 else { return false }
+        view.layoutSubtreeIfNeeded()
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return false }
+        return (try? data.write(to: url)) != nil
     }
 
     /// Renders one tab offscreen and writes it as a PNG.
     ///
     /// Offscreen on purpose: the visual self-tests run headless, so a tab that
     /// only looks right while the window is on screen would never be checked.
-    /// Returns false when the tab or the drawing context is missing.
     func snapshotTab(_ label: String, to url: URL) -> Bool {
         guard let tab = contentView?.subviews.compactMap({ $0 as? NSTabView }).first,
               let item = tab.tabViewItems.first(where: { $0.label == label }),
               let view = item.view else { return false }
         tab.selectTabViewItem(item)
+        if let index = tab.tabViewItems.firstIndex(of: item) {
+            tabStrip.setSelectedIndex(index, notify: false)
+        }
         view.layoutSubtreeIfNeeded()
         guard view.bounds.width > 1, view.bounds.height > 1,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
@@ -614,45 +637,23 @@ final class MainWindow: NSWindow {
         onImportAudio?(url)
     }
 
-    // MARK: History actions
-
-    @objc private func didSearchHistory() { refreshHistory() }
-
-    @objc private func didTapPasteHistory() {
-        guard let entry = selectedHistoryEntry else { NSSound.beep(); return }
-        onPasteHistory?(entry.polished)
-    }
-
-    @objc private func didTapCopyHistory() {
-        guard let entry = selectedHistoryEntry else { NSSound.beep(); return }
+    /// Copies the last result. Pasting it into another app is then the user's
+    /// own Cmd+V, which needs no Accessibility permission at all.
+    @objc private func didTapCopyTranscript() {
+        guard !transcriptText.isEmpty else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(entry.polished, forType: .string)
-        historyInfo.stringValue = "已複製到剪貼簿。"
-    }
-
-    @objc private func didTapDeleteHistory() {
-        guard let entry = selectedHistoryEntry else { NSSound.beep(); return }
-        history.remove(id: entry.id)
-        refreshHistory()
-    }
-
-    @objc private func didTapClearHistory() {
-        guard !history.entries.isEmpty else { return }
-        let alert = NSAlert()
-        alert.messageText = "要清空全部 \(history.entries.count) 筆歷史紀錄嗎？"
-        alert.informativeText = "這個動作無法復原。"
-        alert.addButton(withTitle: "清空")
-        alert.addButton(withTitle: "取消")
-        if alert.runModal() == .alertFirstButtonReturn {
-            history.removeAll()
-            refreshHistory()
+        pasteboard.setString(transcriptText, forType: .string)
+        let original = copyTranscriptButton.titleText
+        copyTranscriptButton.titleText = "已複製"
+        setStatus("已複製逐字稿")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            self?.copyTranscriptButton.titleText = original
         }
     }
 
     @objc private func didTapPermission() { TextInjector.requestAccessibility() }
     @objc private func didTapRecheckPermission() { onRecheckPermission?() }
-
     @objc private func didTapResetPermission() { onResetPermission?() }
 
     @objc private func didTapAddKeyword() {
@@ -669,112 +670,34 @@ final class MainWindow: NSWindow {
         keywords.remove(keywords.all[row])
         keywordTable.reloadData()
     }
-
-    @objc private func didTogglePolish() {
-        onPolishChange?(polishCheckbox.state == .on)
-    }
-
-    @objc private func didToggleConfirm() {
-        onConfirmChange?(confirmCheckbox.state == .on)
-    }
-
-    @objc private func didToggleSystemAudio() {
-        onSystemAudioChange?(systemAudioCheckbox.state == .on)
-    }
-
-    @objc private func didChangeTranslate() {
-        saveSettings()
-        onTranslateChange?(selectedTranslate)
-    }
-
-    @objc private func didTapQuit() {
-        onQuit?()
-    }
-
-    // MARK: Export actions
-
-    /// Reads the three controls as one value.
-    ///
-    /// The folder is taken from the field, not from the panel's last answer, so
-    /// the checkboxes cannot save a stale path.
-    private var currentExportSettings: ExportSettings {
-        let index = exportFormatPopUp.indexOfSelectedItem
-        let format = (index >= 0 && index < ExportFormat.allCases.count)
-            ? ExportFormat.allCases[index]
-            : .markdown
-        let folder = exportFolderField.stringValue == "（未選擇）" ? "" : exportFolderField.stringValue
-        return ExportSettings(folder: folder, format: format, autoSave: exportAutoCheckbox.state == .on)
-    }
-
-    @objc private func didTapExportFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-        panel.prompt = "選擇"
-        panel.message = "選擇匯出資料夾（例如 Obsidian vault 裡的某個資料夾）"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        exportFolderField.stringValue = url.path
-        exportFolderField.toolTip = url.path
-        onExportSettingsChange?(currentExportSettings)
-    }
-
-    @objc private func didChangeExport() {
-        onExportSettingsChange?(currentExportSettings)
-    }
-
-    @objc private func didTapExportNow() {
-        onExportNow?()
-    }
-
-    @objc private func didChangeTheme() {
-        saveSettings()
-        ThemeCatalog.setCurrent(id: selectedTheme)
-        onThemeChange?()
-    }
-
-    @objc private func didTapReset() {
-        selectedTheme = "system"
-        selectedTranslate = "auto"
-        hotkeyField.stringValue = "Option+Space"
-        polishCheckbox.state = .on
-        confirmCheckbox.state = .off
-        systemAudioCheckbox.state = .on
-        saveSettings()
-        didChangeTheme()
-        onHotkeyChange?(hotkeyField.stringValue)
-        didTogglePolish()
-        didToggleConfirm()
-        didToggleSystemAudio()
-        onTranslateChange?(selectedTranslate)
-    }
 }
 
-// MARK: - NSTextFieldDelegate
+// MARK: - Tab selection
 
 extension MainWindow: NSTabViewDelegate {
     /// Disk state is re-read when the tab is opened, not on a timer: models are
     /// downloaded by this window and deleted outside it, so "what is installed"
     /// is only worth trusting as of the moment the user looked.
     func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
-        guard item?.identifier as? String == "模型" else { return }
-        modelManager.reload()
+        guard let item, let index = tabView.tabViewItems.firstIndex(of: item) else { return }
+        tabStrip.setSelectedIndex(index, notify: false)
+        switch item.identifier as? String {
+        case "模型":
+            modelManager.reload()
+        case "歷史":
+            historyView.refresh()
+        default:
+            break
+        }
     }
 }
 
+// MARK: - Keyword field
+
 extension MainWindow: NSTextFieldDelegate {
     func controlTextDidEndEditing(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField else { return }
-        if field === keywordField {
-            didTapAddKeyword()
-        } else if field === hotkeyField {
-            let value = hotkeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !value.isEmpty else { return }
-            hotkeyField.stringValue = value
-            saveSettings()
-            onHotkeyChange?(value)
-        }
+        guard let field = obj.object as? NSTextField, field === keywordField else { return }
+        didTapAddKeyword()
     }
 }
 
@@ -782,35 +705,18 @@ extension MainWindow: NSTextFieldDelegate {
 
 extension MainWindow: NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        if tableView === historyTable { return historyFiltered.count }
-        return keywords.all.count
+        keywords.all.count
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        if tableView === historyTable {
-            guard historyFiltered.indices.contains(row) else { return nil }
-            let entry = historyFiltered[row]
-            let isTime = tableColumn?.identifier.rawValue == "time"
-            let cell = NSTextField(labelWithString: isTime
-                ? Self.historyFormatter.string(from: entry.date)
-                : entry.preview)
-            cell.isBezeled = false
-            cell.drawsBackground = false
-            cell.isEditable = false
-            cell.lineBreakMode = .byTruncatingTail
-            cell.font = isTime
-                ? .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-                : .systemFont(ofSize: 12.5)
-            cell.textColor = isTime ? .secondaryLabelColor : .labelColor
-            return cell
-        }
+        guard keywords.all.indices.contains(row) else { return nil }
         let cell = NSTextField(labelWithString: keywords.all[row])
         cell.isBezeled = false
         cell.drawsBackground = false
         cell.isEditable = false
-        cell.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        cell.font = theme.fontBody
         cell.alignment = .left
-        cell.textColor = .labelColor
+        cell.textColor = theme.textPrimary
         return cell
     }
 }

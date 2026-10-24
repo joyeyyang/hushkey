@@ -161,22 +161,70 @@ enum SelfTest {
     ///
     /// Each PNG is written where `OVC_SELFTEST_THEMES` says (a temp folder by
     /// default) so the themes can be looked at rather than argued about.
-    /// Renders the 模型 tab so the model manager can be looked at without a
-    /// download. Runs against the real models directory, so what the picture
-    /// shows is the state of this machine.
-    static func runModelManagerSelfTest(outDir: String) -> Never {
+    /// Renders every screen of the main window, offscreen, for visual review.
+    ///
+    /// This is how the redesign is checked without a window server: a PNG per
+    /// tab plus one of the whole window, for one or more themes. Runs against
+    /// the real models directory and history, so the pictures show this machine.
+    static func runWindowSelfTest(outDir: String, themeIDs: [String]) -> Never {
         let dir = URL(fileURLWithPath: outDir, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let window = MainWindow(keywords: Keywords(), history: HistoryStore())
-        let url = dir.appendingPathComponent("models.png")
-        guard window.snapshotTab("模型", to: url),
-              let data = try? Data(contentsOf: url), data.count > 5_000 else {
-            print("MODEL MANAGER SELFTEST FAIL: nothing written to \(url.path)")
-            exit(1)
+        var failures: [String] = []
+        for id in themeIDs {
+            let theme = ThemeCatalog.theme(id: id)
+            let window = MainWindow(keywords: Keywords(), history: HistoryStore())
+            window.applyTheme(theme)
+            let tabs = ["轉錄", "歷史", "關鍵字", "模型", "設定"]
+            for (index, name) in tabs.enumerated() {
+                let url = dir.appendingPathComponent("\(theme.id)-\(index)-\(name).png")
+                if window.snapshotTab(name, to: url), let data = try? Data(contentsOf: url), data.count > 3_000 {
+                    print("ok \(theme.id) \(name) \(data.count)B")
+                } else {
+                    failures.append("\(theme.id) \(name)")
+                }
+                // The first tab is the one the window opens on, so the whole
+                // window shot is worth taking once, with the header and strip.
+                if index == 0 {
+                    let full = dir.appendingPathComponent("\(theme.id)-window.png")
+                    if window.snapshotWindow(to: full) {
+                        print("ok \(theme.id) window")
+                    } else {
+                        failures.append("\(theme.id) window")
+                    }
+                }
+            }
         }
-        print("ok models \(data.count)B")
-        print("MODEL MANAGER SELFTEST PASS \(dir.path)")
-        exit(0)
+        // The floating transcript is a separate window, and it is the surface a
+        // person stares at while talking, so it is reviewed in the same pass.
+        for id in themeIDs {
+            let theme = ThemeCatalog.theme(id: id)
+            let window = TranscriptWindow()
+            window.applyTheme(theme)
+            window.begin(title: "會議逐字稿 · 10:42", status: "辨識中…")
+            window.append([
+                TranscriptSegment(index: 1, speaker: .me, start: 0, end: 3.2,
+                                  text: "那我們先確認一下這週的進度，簡報的初稿你覺得還缺什麼？"),
+                TranscriptSegment(index: 2, speaker: .other, start: 3.4, end: 7.8,
+                                  text: "主要是第二段的數字還沒更新，我明天早上補給你。"),
+                TranscriptSegment(index: 3, speaker: .me, start: 8.0, end: 9.6,
+                                  text: "好，那週三之前給客戶看。"),
+            ], showSpeaker: true)
+            window.finish(status: "完成 · 9.6 秒")
+            let url = dir.appendingPathComponent("\(theme.id)-transcript.png")
+            if window.snapshot(to: url), let data = try? Data(contentsOf: url), data.count > 3_000 {
+                print("ok \(theme.id) transcript \(data.count)B")
+            } else {
+                failures.append("\(theme.id) transcript")
+            }
+            window.hide()
+        }
+
+        if failures.isEmpty {
+            print("WINDOW SELFTEST PASS \(dir.path)")
+            exit(0)
+        }
+        print("WINDOW SELFTEST FAIL: \(failures.joined(separator: ", "))")
+        exit(1)
     }
 
     static func runThemeSelfTest() -> Never {

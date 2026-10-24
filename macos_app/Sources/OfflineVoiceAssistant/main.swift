@@ -1506,8 +1506,11 @@ app.setActivationPolicy(.accessory)
 // A scripted check for the export path: four formats, one synthetic transcript,
 // written to a temporary folder and read back. GUI-free on purpose, so it can run
 // on a headless build without any permission prompts.
-if let dir = ProcessInfo.processInfo.environment["OVC_SELFTEST_MODELS"] {
-    SelfTest.runModelManagerSelfTest(outDir: dir)
+if let dir = ProcessInfo.processInfo.environment["OVC_SELFTEST_UI"] {
+    let ids = (ProcessInfo.processInfo.environment["OVC_SELFTEST_UI_THEME"] ?? "paper")
+        .split(separator: ",")
+        .map(String.init)
+    SelfTest.runWindowSelfTest(outDir: dir, themeIDs: ids)
 }
 
 if ProcessInfo.processInfo.environment["OVC_SELFTEST_EXPORT"] != nil {
