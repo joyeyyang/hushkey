@@ -11,6 +11,9 @@ final class AppController {
     /// The live, verbatim transcript. Shown for both dictation and meeting mode;
     /// closing it never stops the recording.
     private let transcriptWindow = TranscriptWindow()
+    /// One importer for the app: the engine has one ASR session, so two file
+    /// imports at once would fight each other the same way two recordings do.
+    private let audioImporter = AudioFileImporter()
     /// The raw transcript behind the result currently being delivered, kept so
     /// history can store both the original wording and the cleaned-up line.
     private var lastRawTranscript = ""
@@ -71,8 +74,15 @@ final class AppController {
     private static let translateKey = "settings.translate"
     private static let systemAudioKey = "settings.meetingSystemAudio"
 
-    /// "off", "en" (translate into English) or "zh" (into 繁體中文).
-    private var translateTarget: String { UserDefaults.standard.string(forKey: Self.translateKey) ?? "off" }
+    /// "auto" (the default), "off", "en" (translate into English) or "zh" (into
+    /// 繁體中文).
+    ///
+    /// "auto" is not a translation pass: the refine prompt already answers in
+    /// 繁體中文 unless the dictation asks for another language ("整理成英文"), and
+    /// asking a second model to translate that answer again would undo it. The
+    /// explicit directions stay for people who want every line in one language
+    /// regardless of what they said.
+    private var translateTarget: String { UserDefaults.standard.string(forKey: Self.translateKey) ?? "auto" }
 
     /// Whether meeting mode also captures the Mac's own audio output. Default on.
     private var meetingSystemAudio: Bool {
@@ -80,7 +90,7 @@ final class AppController {
     }
 
     /// Action requested before models finished loading; run once ready.
-    private enum PendingAction { case none, dictation, meeting }
+    private enum PendingAction { case none, dictation, meeting, importFile(URL) }
     private var pendingAction: PendingAction = .none
 
     /// Whether the LLM step is applied. Defaults to on.
@@ -135,6 +145,9 @@ final class AppController {
         hud.onStop = { [weak self] in self?.stopFromCapsule() }
         hud.onPause = { [weak self] in self?.togglePause() }
 
+        window.onResetPermission = { [weak self] in self?.resetAccessibilityPermission() }
+        window.onImportAudio = { [weak self] url in self?.importAudioFile(url) }
+
         // Picking an older line out of the history pastes it where the cursor is.
         window.onPasteHistory = { [weak self] text in self?.pasteFromHistory(text) }
 
@@ -185,6 +198,11 @@ final class AppController {
         // Test-only path: feed a WAV through the ASR pipeline instead of the mic.
         if let wav = SelfTest.wavPath {
             runSelfTest(wavPath: wav)
+        } else if let path = ProcessInfo.processInfo.environment["OVC_SELFTEST_IMPORT"] {
+            // Headless proof that a file goes through decode -> engine ->
+            // segments without a GUI: the same path the 匯入音檔 button takes.
+            pendingAction = .importFile(URL(fileURLWithPath: path))
+            ensureModelsLoaded()
         } else if ProcessInfo.processInfo.environment["OVC_SELFTEST_HUD"] != nil {
             // HUD regression without audio: exercise the editable-show path (the
             // one that used to crash) and the auto-paste path, then exit.
@@ -230,10 +248,33 @@ final class AppController {
     private func refreshPermission(reason: String) {
         let granted = TextInjector.hasAccessibility
         if lastTrust != granted {
-            ModelInstaller.log("accessibility trusted: \(granted) (\(reason))")
+            // The identity is part of the line because "the switch is on and the
+            // app says no" is almost always two different copies of the app: the
+            // one TCC knows and the one running.
+            ModelInstaller.log("accessibility trusted: \(granted) (\(reason)) \(TextInjector.identity)")
             lastTrust = granted
         }
         mainWindow?.setAccessibilityGranted(granted)
+    }
+
+    /// Clears this bundle's Accessibility row and asks the system again.
+    ///
+    /// Needed because the row is bound to the code signature: after a rebuild the
+    /// switch in System Settings can read ON while nothing matches the binary
+    /// that is running, and the switch cannot be turned off and on again. The
+    /// reset is the only way to get a fresh row, and it must be followed by a new
+    /// prompt or the app never reappears in the list.
+    private func resetAccessibilityPermission() {
+        ModelInstaller.log("accessibility reset requested; \(TextInjector.identity)")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let status = TextInjector.resetAccessibility()
+            DispatchQueue.main.async {
+                ModelInstaller.log("accessibility reset finished: status \(status)")
+                TextInjector.requestAccessibility()
+                self.lastTrust = nil
+                self.refreshPermission(reason: "after reset")
+            }
+        }
     }
 
     private func registerSavedHotkey() {
@@ -274,6 +315,10 @@ final class AppController {
             if meeting { hud.notice("會議錄音中，請先結束會議") }
             return
         }
+        guard !audioImporter.isBusy else {
+            hud.notice("音檔辨識中，結束後再開始錄音")
+            return
+        }
         // Paused means "leave me alone": the hotkey neither resumes nor stops.
         // Resuming is the capsule's ▶, which cannot be pressed by accident with
         // the same hand that is writing notes.
@@ -285,6 +330,10 @@ final class AppController {
     func toggleMeeting() {
         guard !dictating, !sessionStarting else {
             if dictating { hud.notice("聽寫中，請先結束聽寫") }
+            return
+        }
+        guard !audioImporter.isBusy else {
+            hud.notice("音檔辨識中，結束後再開始會議")
             return
         }
         if paused && meeting { return }
@@ -369,11 +418,18 @@ final class AppController {
                     switch pending {
                     case .dictation: self.startDictation()
                     case .meeting: self.startMeeting()
+                    case let .importFile(url): self.importAudioFile(url)
                     case .none: break
                     }
                 }
             } catch {
                 ModelInstaller.log("setup failed: \(error)")
+                // A headless run has no window to report the failure in, and no
+                // run loop that would ever end: exiting is the only way the
+                // caller learns it failed instead of waiting forever.
+                if ProcessInfo.processInfo.environment["OVC_SELFTEST_IMPORT"] != nil {
+                    exit(1)
+                }
                 DispatchQueue.main.async {
                     self.loading = false
                     self.ready = false
@@ -480,6 +536,67 @@ final class AppController {
     }
 
     // MARK: - Dictation
+
+    /// Transcribes a file through the same engine as a recording.
+    ///
+    /// The result is NOT pasted: an import is not dictation into a field, and
+    /// pasting a ten-minute transcript into whatever happens to be focused would
+    /// be destructive. It goes to the transcript window and the clipboard, and
+    /// the user decides where it lands.
+    private func importAudioFile(_ url: URL) {
+        guard !dictating, !meeting, !sessionStarting else {
+            hud.flash("請先結束目前的錄音，再匯入音檔", seconds: 4)
+            return
+        }
+        guard !audioImporter.isBusy else {
+            hud.flash("已經在辨識另一個音檔", seconds: 3)
+            return
+        }
+        guard ready else {
+            hud.flash("模型還沒載入完成，請稍等", seconds: 3)
+            return
+        }
+        ModelInstaller.log("import audio: \(url.lastPathComponent)")
+        hud.allowShowingAgain()
+        hud.show(text: "讀取音檔…")
+        transcriptWindow.begin(title: url.lastPathComponent, status: "讀取中…")
+        transcriptWindow.show()
+
+        audioImporter.importFile(
+            at: url,
+            onProgress: { [weak self] fraction in
+                let percent = Int((fraction * 100).rounded())
+                self?.transcriptWindow.setStatus("辨識中… \(percent)%")
+                self?.hud.setCount(percent)
+            },
+            onStatus: { [weak self] status in
+                self?.transcriptWindow.setStatus(status)
+            },
+            completion: { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case let .success(imported):
+                    self.transcriptWindow.append(imported.segments, showSpeaker: false)
+                    let minutes = Int(imported.duration) / 60
+                    let seconds = Int(imported.duration) % 60
+                    self.transcriptWindow.finish(status: "辨識完成 · \(minutes):\(String(format: "%02d", seconds))")
+                    self.mainWindow?.setTranscript(imported.text)
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(imported.text, forType: .string)
+                    ModelInstaller.log("import done: \(imported.text.count) chars, \(imported.segments.count) segments")
+                    self.hud.flash("逐字稿已複製到剪貼簿（\(imported.text.count) 字）", seconds: 4)
+                case let .failure(error):
+                    self.transcriptWindow.finish(status: "失敗")
+                    ModelInstaller.log("import failed: \(error)")
+                    self.hud.flash(error.localizedDescription, seconds: 6)
+                }
+                if ProcessInfo.processInfo.environment["OVC_SELFTEST_IMPORT"] != nil {
+                    exit(0)
+                }
+            }
+        )
+    }
 
     private func startDictation() {
         // A session the user asked for may show the capsule again, even if the
@@ -695,7 +812,12 @@ final class AppController {
                     }
                     return
                 }
-                let saved = try self.saveMeeting(transcript, caveat: caveat, eventTitle: eventTitle)
+                let saved = try self.saveMeeting(
+                    transcript,
+                    caveat: caveat,
+                    eventTitle: eventTitle,
+                    startedAt: document.startedAt
+                )
                 let session = SessionExport(
                     document: document,
                     summary: saved.summary,
@@ -788,31 +910,35 @@ final class AppController {
     ///
     /// `eventTitle` is the calendar event the recording belongs to, when there is
     /// one: naming a file after the meeting is the point of asking for calendar
-    /// access, and it also gives the exported note a human title instead of
-    /// "會議紀錄 2026/10/24".
+    /// access. `startedAt` is the session's start rather than "now" so the note
+    /// and a later export of the same session produce the same name.
     @discardableResult
-    private func saveMeeting(_ transcript: String, caveat: String, eventTitle: String?) throws
-        -> (url: URL, summary: String) {
+    private func saveMeeting(
+        _ transcript: String,
+        caveat: String,
+        eventTitle: String?,
+        startedAt: Date
+    ) throws -> (url: URL, summary: String) {
         let dir = meetingsDirectory()
-        let stamp = Self.stampFormatter.string(from: Date())
         // The recognizer and the model both drift into Simplified; the file is
         // for a Taiwanese reader, so normalize once here rather than in each pass.
         let traditional = toTraditional(transcript)
-        let base: String
-        if let eventTitle, !eventTitle.isEmpty {
-            let day = Self.dayFormatter.string(from: sessionStartedAt)
-            base = "\(day) \(Naming.sanitize(eventTitle))"
-        } else {
-            base = "meeting-\(stamp)"
-        }
-        let txt = dir.appendingPathComponent("\(base).txt")
-        try traditional.write(to: txt, atomically: true, encoding: .utf8)
         // Summary is optional: a long transcript spawns several worker passes,
         // each of which reloads the model. Failure just means no shell to fill.
+        // It is computed before the file is written because it is also the name
+        // when no calendar event covers the recording.
         var summary = ""
         if !traditional.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            let answer = try? Core.summarize(traditional), !answer.isEmpty {
             summary = toTraditional(answer)
+        }
+        let base = Naming.stem(
+            title: Naming.title(summary: summary, eventTitle: eventTitle, fallback: "會議紀錄"),
+            date: startedAt
+        )
+        let txt = dir.appendingPathComponent("\(base).txt")
+        try traditional.write(to: txt, atomically: true, encoding: .utf8)
+        if !summary.isEmpty {
             let md = dir.appendingPathComponent("\(base).md")
             // A meeting recorded without the system-audio tap is missing the
             // other side of the call. Say so in the file: a reader cannot tell a
@@ -829,18 +955,6 @@ final class AppController {
             ? ""
             : "> 錄音提示：\(meetingWarnings.joined(separator: "；"))\n\n"
     }
-
-    private static let stampFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyyMMdd-HHmmss"
-        return f
-    }()
-
-    private static let dayFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
 
     // MARK: - Export
 
@@ -866,8 +980,7 @@ final class AppController {
         ExportBundle(
             title: Naming.title(
                 summary: session.summary,
-                eventTitle: session.eventTitle,
-                date: session.document.startedAt
+                eventTitle: session.eventTitle
             ),
             transcript: session.document,
             summaryMarkdown: session.caveat + session.summary,
@@ -997,7 +1110,8 @@ final class AppController {
             finish(text)
             return
         }
-        hud.show(text: translateTarget == "off" ? "AI 整理中…" : "整理並翻譯中…")
+        let explicit = translateTarget == "en" || translateTarget == "zh"
+        hud.show(text: explicit ? "整理並翻譯中…" : "AI 整理中…")
         coreQueue.async {
             let polished = self.translateIfNeeded(self.polish(text))
             DispatchQueue.main.async { self.finish(polished) }
@@ -1007,7 +1121,8 @@ final class AppController {
     /// Translate the finished line when the user asked for it. It runs as its own
     /// model pass AFTER the refine pass: refine must not change the language,
     /// translation must, and asking one prompt to do both produced drafts that
-    /// came back half-translated. A translation that fails, or that comes back as
+    /// came back half-translated. In "auto" mode there is nothing to do here --
+    /// the refine prompt is the one that decides the output language. A translation that fails, or that comes back as
     /// a note instead of a translation, falls back to the cleaned text so the
     /// dictation is never lost.
     private func translateIfNeeded(_ text: String) -> String {
@@ -1215,7 +1330,19 @@ final class AppController {
         }
 
         if raw.containsCJK {
-            guard refined.containsCJK else { return (false, "no Chinese left in the output") }
+            if !refined.containsCJK {
+                // Losing the Chinese is only legitimate when the dictation asked
+                // for another language; the refine prompt is told to honour that
+                // request and drop the instruction. Without this, "整理成英文"
+                // produced a correct English line that the guard then threw away.
+                guard raw.namesAnotherLanguage else {
+                    return (false, "no Chinese left in the output")
+                }
+                guard refined.containsLatinLetter else {
+                    return (false, "asked for another language but wrote none")
+                }
+                return (true, "ok")
+            }
             let rawCJK = Set(raw.unicodeScalars.filter(\.isCJK))
             if !rawCJK.isEmpty {
                 let refinedSet = Set(refined.unicodeScalars)
@@ -1243,7 +1370,7 @@ final class AppController {
     /// keeps a legitimate dictation about those rules from being rejected.
     private static let instructionPhrases = [
         "不要摘要", "不要漏掉任何一件事", "重複講的同一件事只留一次", "刪掉口頭禪",
-        "多餘的字", "照原樣保留", "問句保持問句", "語言跟原文相同",
+        "多餘的字", "照原樣保留", "問句保持問句", "預設用繁體中文輸出",
         "把使用者的口語改寫成通順的書面文字",
     ]
 
@@ -1353,6 +1480,24 @@ private extension String {
             ($0.value >= 65 && $0.value <= 90) || ($0.value >= 97 && $0.value <= 122)
         }
     }
+
+    /// True when the speaker named a language to answer in. Used only to let a
+    /// non-Chinese result through `sanityCheck`: a Chinese dictation that comes
+    /// back without a single Chinese character is a bug *unless* it asked for
+    /// one, and asking is the one thing the model is allowed to obey.
+    ///
+    /// Deliberately a short list of language names rather than a parser: a false
+    /// positive costs one unchecked line ("客戶要英文版合約" still answers in
+    /// Chinese, because the model was told the default is 繁中), while a false
+    /// negative throws away a correct English answer.
+    var namesAnotherLanguage: Bool {
+        let needles = [
+            "英文", "英語", "英语", "日文", "日語", "日语", "韓文", "韓語", "韩文",
+            "法文", "德文", "西班牙文", "義大利文", "越南文", "泰文",
+            "English", "Japanese", "Korean", "Spanish", "French", "German",
+        ]
+        return needles.contains { localizedCaseInsensitiveContains($0) }
+    }
 }
 
 let app = NSApplication.shared
@@ -1361,6 +1506,10 @@ app.setActivationPolicy(.accessory)
 // A scripted check for the export path: four formats, one synthetic transcript,
 // written to a temporary folder and read back. GUI-free on purpose, so it can run
 // on a headless build without any permission prompts.
+if let dir = ProcessInfo.processInfo.environment["OVC_SELFTEST_MODELS"] {
+    SelfTest.runModelManagerSelfTest(outDir: dir)
+}
+
 if ProcessInfo.processInfo.environment["OVC_SELFTEST_EXPORT"] != nil {
     SelfTest.runExportSelfTest()
 }

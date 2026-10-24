@@ -1,8 +1,9 @@
 import AppKit
+import UniformTypeIdentifiers
 
-/// The app's main window: a single persistent control panel with three tabs
-/// (轉錄 / 關鍵字 / 設定). It stays open until the user closes it; closing it does
-/// not quit the app (the menu-bar icon reopens it).
+/// The app's main window: a single persistent control panel with five tabs
+/// (轉錄 / 歷史 / 關鍵字 / 模型 / 設定). It stays open until the user closes it;
+/// closing it does not quit the app (the menu-bar icon reopens it).
 final class MainWindow: NSWindow {
     private let keywords: Keywords
     private let history: HistoryStore
@@ -21,13 +22,24 @@ final class MainWindow: NSWindow {
     var onSystemAudioChange: ((Bool) -> Void)?
     /// Paste a line picked out of the history into whatever app is in front.
     var onPasteHistory: ((String) -> Void)?
+    /// Clears a stale Accessibility row and asks the system again.
+    var onResetPermission: (() -> Void)?
+    /// Transcribe an audio file the user picked or dropped.
+    var onImportAudio: ((URL) -> Void)?
     var onQuit: (() -> Void)?
+
+    // 模型 tab. Lazy because it reads the manifest off disk, and building the
+    // window must not wait for a stat of every installed model.
+    private lazy var modelManager = ModelManagerView(theme: ThemeCatalog.current)
 
     // 轉錄 tab
     private let statusLabel = NSTextField(labelWithString: "模型：尚未載入")
     private let permissionLabel = NSTextField(wrappingLabelWithString: "")
     private let permissionButton = NSButton(title: "開啟「輔助使用」設定", target: nil, action: nil)
+    private let importButton = NSButton(title: "匯入音檔…", target: nil, action: nil)
     private let recheckButton = NSButton(title: "我已經開好了，重新檢查", target: nil, action: nil)
+    /// Only shown next to the banner: the phantom-row escape hatch.
+    private let resetPermissionButton = NSButton(title: "重設權限（清掉舊紀錄）", target: nil, action: nil)
 
     /// Called when the user asks the app to re-read the Accessibility state
     /// (typically right after enabling it in System Settings).
@@ -57,8 +69,13 @@ final class MainWindow: NSWindow {
     // 設定 tab
     private let themePopUp = NSPopUpButton()
     private let translatePopUp = NSPopUpButton()
-    private let translateTitles = ["關閉（只整理，不翻譯）", "中文 → 英文", "英文 → 中文"]
-    private let translateCodes = ["off", "en", "zh"]
+    private let translateTitles = [
+        "自動（預設繁體中文，依你的指令改變）",
+        "關閉（只整理，不指定語言）",
+        "一律翻成英文",
+        "一律翻成繁體中文",
+    ]
+    private let translateCodes = ["auto", "off", "en", "zh"]
     private let hotkeyField = NSTextField()
     private let polishCheckbox = NSButton(checkboxWithTitle: "用 AI 整理逐字稿（潤飾、去除口頭禪）", target: nil, action: nil)
     private let confirmCheckbox = NSButton(checkboxWithTitle: "貼上前先顯示文字讓我確認（按 Enter 才貼）", target: nil, action: nil)
@@ -117,10 +134,13 @@ final class MainWindow: NSWindow {
     /// permission the app can only copy the text, not paste it.
     func setAccessibilityGranted(_ granted: Bool) {
         permissionLabel.stringValue = granted ? ""
-            : "⚠️ 系統回報尚未取得「輔助使用」權限，無法自動貼上（文字只會複製到剪貼簿）。請按下方按鈕開啟設定 →「隱私權與安全性 → 輔助使用」，確認清單中有 OfflineVoiceAssistant 而且開關是開啟的。若剛剛才開啟，請把 App 完全結束再重新打開。"
+            : "⚠️ 系統回報尚未取得「輔助使用」權限，無法自動貼上（文字只會複製到剪貼簿）。\n"
+            + "請按「開啟設定」到「隱私權與安全性 → 輔助使用」，用「＋」把 /Applications/OfflineVoiceAssistant.app 加進去並打開開關。\n"
+            + "開關看起來已經是開的、App 卻仍說沒有權限，代表清單裡那一列是舊版本留下來的（授權綁在程式簽章上，換版本就失效）。這種情況請按「重設權限」，把舊紀錄清掉再重新加入。"
         permissionLabel.isHidden = granted
         permissionButton.isHidden = granted
         recheckButton.isHidden = granted
+        resetPermissionButton.isHidden = granted
     }
 
     func setTranscript(_ text: String) {
@@ -133,10 +153,17 @@ final class MainWindow: NSWindow {
     private func buildUI() {
         let tabView = NSTabView()
         tabView.translatesAutoresizingMaskIntoConstraints = false
-        tabView.addTabViewItem(makeItem("轉錄", buildTranscribeTab()))
+        // Files can be dropped anywhere on the 轉錄 tab's background; the text
+        // view itself keeps its own drop behaviour, so the button next to the
+        // record buttons is the path that always works.
+        let transcribe = buildTranscribeTab()
+        transcribe.acceptAudioFileDrops { [weak self] url in self?.onImportAudio?(url) }
+        tabView.addTabViewItem(makeItem("轉錄", transcribe))
         tabView.addTabViewItem(makeItem("歷史", buildHistoryTab()))
         tabView.addTabViewItem(makeItem("關鍵字", buildKeywordsTab()))
+        tabView.addTabViewItem(makeItem("模型", modelManager))
         tabView.addTabViewItem(makeItem("設定", buildSettingsTab()))
+        tabView.delegate = self
         contentView!.addSubview(tabView)
         NSLayoutConstraint.activate([
             tabView.leadingAnchor.constraint(equalTo: contentView!.leadingAnchor, constant: 8),
@@ -173,6 +200,7 @@ final class MainWindow: NSWindow {
 
         for (button, action) in [(dictationButton, #selector(didTapDictation)),
                                  (meetingButton, #selector(didTapMeeting)),
+                                 (importButton, #selector(didTapImport)),
                                  (folderButton, #selector(didTapFolder))] {
             button.bezelStyle = .rounded
             button.target = self
@@ -193,6 +221,11 @@ final class MainWindow: NSWindow {
         recheckButton.target = self
         recheckButton.action = #selector(didTapRecheckPermission)
         recheckButton.isHidden = true
+        resetPermissionButton.bezelStyle = .rounded
+        resetPermissionButton.target = self
+        resetPermissionButton.action = #selector(didTapResetPermission)
+        resetPermissionButton.isHidden = true
+        resetPermissionButton.toolTip = "執行 tccutil reset 清掉這個 App 的輔助使用紀錄，再重新跳出系統權限對話框"
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
@@ -213,8 +246,9 @@ final class MainWindow: NSWindow {
         scroll.documentView = transcriptView
 
         let stack = NSStackView(views: [statusLabel, permissionLabel,
-                                        permissionButton, recheckButton,
-                                        dictationButton, meetingButton, folderButton, hintLabel, scroll])
+                                        permissionButton, recheckButton, resetPermissionButton,
+                                        dictationButton, meetingButton, importButton, folderButton,
+                                        hintLabel, scroll])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -500,7 +534,7 @@ final class MainWindow: NSWindow {
     private var selectedTranslate: String {
         get {
             let i = translatePopUp.indexOfSelectedItem
-            return (i >= 0 && i < translateCodes.count) ? translateCodes[i] : "off"
+            return (i >= 0 && i < translateCodes.count) ? translateCodes[i] : "auto"
         }
         set { if let i = translateCodes.firstIndex(of: newValue) { translatePopUp.selectItem(at: i) } }
     }
@@ -508,7 +542,7 @@ final class MainWindow: NSWindow {
     private func syncSettings() {
         let defaults = UserDefaults.standard
         selectedTheme = defaults.string(forKey: "settings.theme") ?? "system"
-        selectedTranslate = defaults.string(forKey: "settings.translate") ?? "off"
+        selectedTranslate = defaults.string(forKey: "settings.translate") ?? "auto"
         hotkeyField.stringValue = defaults.string(forKey: "settings.hotkey") ?? "Option+Space"
         polishCheckbox.state = (defaults.object(forKey: "settings.polish") as? Bool ?? true) ? .on : .off
         confirmCheckbox.state = (defaults.object(forKey: "settings.confirmInsert") as? Bool ?? false) ? .on : .off
@@ -540,6 +574,25 @@ final class MainWindow: NSWindow {
         backgroundColor = theme.background
         contentView?.wantsLayer = true
         contentView?.layer?.backgroundColor = theme.background.cgColor
+        modelManager.applyTheme(theme)
+    }
+
+    /// Renders one tab offscreen and writes it as a PNG.
+    ///
+    /// Offscreen on purpose: the visual self-tests run headless, so a tab that
+    /// only looks right while the window is on screen would never be checked.
+    /// Returns false when the tab or the drawing context is missing.
+    func snapshotTab(_ label: String, to url: URL) -> Bool {
+        guard let tab = contentView?.subviews.compactMap({ $0 as? NSTabView }).first,
+              let item = tab.tabViewItems.first(where: { $0.label == label }),
+              let view = item.view else { return false }
+        tab.selectTabViewItem(item)
+        view.layoutSubtreeIfNeeded()
+        guard view.bounds.width > 1, view.bounds.height > 1,
+              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return false }
+        return (try? data.write(to: url)) != nil
     }
 
     // MARK: - Actions
@@ -547,6 +600,19 @@ final class MainWindow: NSWindow {
     @objc private func didTapDictation() { onToggleDictation?() }
     @objc private func didTapMeeting() { onToggleMeeting?() }
     @objc private func didTapFolder() { onOpenMeetingsFolder?() }
+
+    /// A file picker next to drag-and-drop: the drop area is the tab's own
+    /// background, which the transcript view covers, so the button is the path
+    /// that always works.
+    @objc private func didTapImport() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.audio, .mpeg4Audio, .mp3, .wav, .aiff]
+        panel.message = "選一個音檔，逐字稿會在浮動視窗裡出現"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        onImportAudio?(url)
+    }
 
     // MARK: History actions
 
@@ -586,6 +652,8 @@ final class MainWindow: NSWindow {
 
     @objc private func didTapPermission() { TextInjector.requestAccessibility() }
     @objc private func didTapRecheckPermission() { onRecheckPermission?() }
+
+    @objc private func didTapResetPermission() { onResetPermission?() }
 
     @objc private func didTapAddKeyword() {
         let trimmed = keywordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -668,7 +736,7 @@ final class MainWindow: NSWindow {
 
     @objc private func didTapReset() {
         selectedTheme = "system"
-        selectedTranslate = "off"
+        selectedTranslate = "auto"
         hotkeyField.stringValue = "Option+Space"
         polishCheckbox.state = .on
         confirmCheckbox.state = .off
@@ -684,6 +752,16 @@ final class MainWindow: NSWindow {
 }
 
 // MARK: - NSTextFieldDelegate
+
+extension MainWindow: NSTabViewDelegate {
+    /// Disk state is re-read when the tab is opened, not on a timer: models are
+    /// downloaded by this window and deleted outside it, so "what is installed"
+    /// is only worth trusting as of the moment the user looked.
+    func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
+        guard item?.identifier as? String == "模型" else { return }
+        modelManager.reload()
+    }
+}
 
 extension MainWindow: NSTextFieldDelegate {
     func controlTextDidEndEditing(_ obj: Notification) {

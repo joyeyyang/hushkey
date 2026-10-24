@@ -19,6 +19,10 @@ struct ModelEntry: Codable, Identifiable, Sendable {
     let sourceURL: URL?
     let sourceRepo: String?
     let note: String?
+    /// One Chinese line for the model manager. `note` is the long English
+    /// rationale written for whoever maintains the manifest; it is shown as a
+    /// tooltip, not as body text in a Chinese UI.
+    let summaryZH: String?
     let license: String?
     let download: Bool
     let isDefault: Bool
@@ -27,6 +31,7 @@ struct ModelEntry: Codable, Identifiable, Sendable {
         case id, role, file, bytes, sha256, note, license, download
         case sourceURL = "source_url"
         case sourceRepo = "source_repo"
+        case summaryZH = "summary_zh"
         case isDefault = "default"
     }
 
@@ -67,6 +72,7 @@ extension ModelEntry {
         }
         sourceRepo = try c.decodeIfPresent(String.self, forKey: .sourceRepo)
         note = try c.decodeIfPresent(String.self, forKey: .note)
+        summaryZH = try c.decodeIfPresent(String.self, forKey: .summaryZH)
         license = try c.decodeIfPresent(String.self, forKey: .license)
         // Match ModelInstaller: a row that omits the flag is downloadable by default.
         download = try c.decodeIfPresent(Bool.self, forKey: .download) ?? true

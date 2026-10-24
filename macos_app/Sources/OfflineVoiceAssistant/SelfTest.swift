@@ -161,6 +161,24 @@ enum SelfTest {
     ///
     /// Each PNG is written where `OVC_SELFTEST_THEMES` says (a temp folder by
     /// default) so the themes can be looked at rather than argued about.
+    /// Renders the 模型 tab so the model manager can be looked at without a
+    /// download. Runs against the real models directory, so what the picture
+    /// shows is the state of this machine.
+    static func runModelManagerSelfTest(outDir: String) -> Never {
+        let dir = URL(fileURLWithPath: outDir, isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let window = MainWindow(keywords: Keywords(), history: HistoryStore())
+        let url = dir.appendingPathComponent("models.png")
+        guard window.snapshotTab("模型", to: url),
+              let data = try? Data(contentsOf: url), data.count > 5_000 else {
+            print("MODEL MANAGER SELFTEST FAIL: nothing written to \(url.path)")
+            exit(1)
+        }
+        print("ok models \(data.count)B")
+        print("MODEL MANAGER SELFTEST PASS \(dir.path)")
+        exit(0)
+    }
+
     static func runThemeSelfTest() -> Never {
         let dir = URL(
             fileURLWithPath: ProcessInfo.processInfo.environment["OVC_SELFTEST_THEMES"]

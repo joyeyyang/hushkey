@@ -18,16 +18,21 @@ enum Naming {
     /// else a date-based fallback.
     ///
     /// Never empty, never longer than 40 characters.
-    static func title(summary: String, eventTitle: String?, date: Date) -> String {
-        if let line = firstSummaryLine(summary) {
-            let candidate = cap(line)
-            if !candidate.isEmpty { return candidate }
-        }
+    /// The calendar event wins. Reading the calendar only pays off if the file is
+    /// then called "週五產品會議" rather than the first sentence of a summary
+    /// that may describe one slide. The summary line is the fallback for
+    /// recordings made outside a meeting, and `fallback` covers the rest -- the
+    /// date lives in the stem, so repeating it here would print it twice.
+    static func title(summary: String, eventTitle: String?, fallback: String = "逐字稿") -> String {
         if let eventTitle {
             let candidate = cap(cutAtSentenceEnd(cleanInline(eventTitle)))
             if !candidate.isEmpty { return candidate }
         }
-        return cap("會議紀錄 \(dayFormatter.string(from: date))")
+        if let line = firstSummaryLine(summary) {
+            let candidate = cap(line)
+            if !candidate.isEmpty { return candidate }
+        }
+        return cap(fallback)
     }
 
     /// Filesystem-safe: drops `/ : \ ? * | " < >` and control characters,
@@ -73,10 +78,16 @@ enum Naming {
         return text.isEmpty ? fallbackName : text
     }
 
+    /// "2026-10-20 1430 週五產品會議" — one stem per session, shared by every
+    /// file that session produces. The auto-saved meeting note and a later export
+    /// must agree, or the same meeting lands in the folder twice under two names.
+    static func stem(title: String, date: Date) -> String {
+        "\(stampFormatter.string(from: date)) \(sanitize(title))"
+    }
+
     /// "2026-10-20 1430 <title>.<ext>"
     static func filename(title: String, date: Date, format: ExportFormat) -> String {
-        let stamp = stampFormatter.string(from: date)
-        return "\(stamp) \(sanitize(title)).\(format.fileExtension)"
+        "\(stem(title: title, date: date)).\(format.fileExtension)"
     }
 
     // MARK: Summary → sentence
@@ -178,14 +189,6 @@ enum Naming {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = .current
         formatter.dateFormat = "yyyy-MM-dd HHmm"
-        return formatter
-    }()
-
-    private static let dayFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
 }

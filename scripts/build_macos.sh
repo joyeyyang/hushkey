@@ -76,5 +76,13 @@ else
     --entitlements "$ROOT/macos_app/Resources/OfflineVoiceAssistant.entitlements" "$APP"
 fi
 codesign --verify --deep --strict "$APP" && echo "codesign verify: ok"
+# LaunchServices caches the bundle it first saw at a given path. When the binary
+# behind that path is replaced, System Settings can keep showing the old record --
+# a permission switch that is ON but applies to a build that no longer exists.
+# Re-registering after signing makes the pane describe the build that is on disk.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [ -x "$LSREGISTER" ]; then
+  "$LSREGISTER" -f "$APP" && echo "registered with LaunchServices"
+fi
 codesign -dv "$APP" 2>&1 | grep -E "^Authority=|^Identifier=" | head -2
 echo "built: $APP"

@@ -59,7 +59,9 @@ const UNDERSTAND_SYSTEM: &str = "把下面這段口語改寫成通順、完整�
 const REFINE_SYSTEM: &str = "把使用者的口語改寫成通順的書面文字，只輸出改寫後的內容。\
 不要摘要、不要漏掉任何一件事；重複講的同一件事只留一次；刪掉口頭禪和多餘的字；\
 只有一個重點就寫一句，多個重點就一行一個、行首加「• 」；\
-數字、時間、名字照原樣保留；問句保持問句；語言跟原文相同。";
+數字、時間、名字照原樣保留；問句保持問句。\
+預設用繁體中文輸出；如果這段話裡明確要求換成別的語言（例如「整理成英文」「翻成日文」「用英文寫」），\
+就照那個語言輸出，並且那句要求本身不要出現在結果裡。";
 
 /// Worked pairs for translation. Same reasoning as the refine examples: two
 /// short rules plus the shape, because a 1.5B model copies what it sees far

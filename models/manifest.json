@@ -36,7 +36,8 @@
         "word timestamps",
         "hotwords"
       ],
-      "download": true
+      "download": true,
+      "summary_zh": "預設辨識模型：40 種語言、22 種中文方言（含閩南語），體積與記憶體都最小。"
     },
     {
       "id": "asr-dolphin-base-tokens",
@@ -47,7 +48,8 @@
       "bytes": 504662,
       "sha256": "c3788261a51df1899ea4b210b552cd42139204de72c0ad60f6cebb199078872e",
       "license": "Apache 2.0 (DataoceanAI Dolphin)",
-      "download": true
+      "download": true,
+      "summary_zh": "Dolphin 的字典檔，要跟權重一起存在才能載入。"
     },
     {
       "id": "asr-sensevoice-small-int8",
@@ -67,7 +69,8 @@
         "yue"
       ],
       "taiwanese_hokkien_supported": false,
-      "download": false
+      "download": false,
+      "summary_zh": "上一版預設，現在是備援：找不到 Dolphin 時自動接手。"
     },
     {
       "id": "asr-sensevoice-tokens",
@@ -79,7 +82,8 @@
       "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
       "license": "MIT (FunASR)",
       "download": false,
-      "note": "Now the fallback for installs that predate Dolphin; not downloaded on a fresh install."
+      "note": "Now the fallback for installs that predate Dolphin; not downloaded on a fresh install.",
+      "summary_zh": "SenseVoice 的字典檔，備援用。"
     },
     {
       "id": "asr-sensevoice-small-fp32",
@@ -99,7 +103,8 @@
         "yue"
       ],
       "taiwanese_hokkien_supported": false,
-      "download": false
+      "download": false,
+      "summary_zh": "SenseVoice 全精度版，只在前兩個都缺少時才會載入。"
     },
     {
       "id": "llm-qwen3.5-2b-q4-k-m",
@@ -112,7 +117,8 @@
       "license": "Apache-2.0",
       "default": true,
       "note": "Default LLM. ChatML like Qwen2.5, but its chat template opens a reasoning block: generation must be prefilled with a closed, empty think block or the model streams its reasoning into the answer (handled in llm.rs from the GGUF chat template).",
-      "download": true
+      "download": true,
+      "summary_zh": "預設整理模型：品質與記憶體（實測峰值約 1.5 GB）的平衡點。"
     },
     {
       "id": "llm-qwen3.5-2b-q5-k-m",
@@ -124,7 +130,8 @@
       "sha256": "1885b3a9195f8cc09da9a7a7a75afdc1e8d5cbf9fc4a499c3961dddea37098ac",
       "license": "Apache-2.0",
       "note": "Same model at higher precision: ~155 MB more for a little more robustness.",
-      "download": false
+      "download": false,
+      "summary_zh": "同一個模型的 5-bit 版：檔案更大，品質略好，速度略慢。"
     },
     {
       "id": "llm-qwen3.5-0.8b-q4-k-m",
@@ -136,7 +143,8 @@
       "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
       "license": "Apache-2.0",
       "note": "Fastest option, roughly half the size. Expect weaker cleanup on long or messy speech.",
-      "download": false
+      "download": false,
+      "summary_zh": "最省記憶體，適合邊錄邊整理；會議摘要會比較粗。"
     },
     {
       "id": "llm-qwen3.5-4b-q4-k-m",
@@ -148,7 +156,8 @@
       "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
       "license": "Apache-2.0",
       "note": "Quality option. Its peak footprint is about 3 GB, which does not fit comfortably next to the ASR model on an 8 GB machine; not recommended there.",
-      "download": false
+      "download": false,
+      "summary_zh": "品質最好，但記憶體需求明顯更高（這台機器未實測，8 GB 要關掉其他 App）。"
     },
     {
       "id": "llm-qwen2.5-1.5b-instruct-q4-k-m",
@@ -160,7 +169,8 @@
       "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e",
       "license": "Apache-2.0",
       "note": "Legacy default, kept as the engine's fallback when the selected model is missing.",
-      "download": false
+      "download": false,
+      "summary_zh": "舊版模型：回答快，整理品質比 Qwen3.5 差。"
     },
     {
       "id": "rag-embeddinggemma-300m",
@@ -172,7 +182,8 @@
       "sha256": "PENDING",
       "license": "Gemma Terms of Use (not Apache-2.0); accept terms on HF before download",
       "note": "Unquantized 1.2 GB safetensors. Excluded from download and from the 700 MB budget until a quantized artifact is produced and verified.",
-      "download": false
+      "download": false,
+      "summary_zh": "RAG 用的向量模型，還沒有可驗證的檔案，暫不提供下載。"
     }
   ]
 }
