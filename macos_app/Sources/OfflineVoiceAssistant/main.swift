@@ -207,6 +207,11 @@ final class AppController {
         // Test-only path: feed a WAV through the ASR pipeline instead of the mic.
         if let wav = SelfTest.wavPath {
             runSelfTest(wavPath: wav)
+        } else if let wav = ProcessInfo.processInfo.environment["OVC_SELFTEST_MEETING"] {
+            // The meeting path: a WAV through a MEETING session, checked for the
+            // thing a meeting must not have -- the dictation cleanup run over
+            // the transcript.
+            runMeetingSelfTest(wavPath: wav)
         } else if let path = ProcessInfo.processInfo.environment["OVC_SELFTEST_IMPORT"] {
             // Headless proof that a file goes through decode -> engine ->
             // segments without a GUI: the same path the 匯入音檔 button takes.
@@ -662,7 +667,7 @@ final class AppController {
         sessionStarting = true
         coreQueue.async {
             do {
-                let session = try engine.makeSession()
+                let session = try engine.makeSession(mode: isMeeting ? .meeting : .dictation)
                 // Wired before `start()`: an utterance, a level sample or a
                 // system-audio failure must have somewhere to land the moment the
                 // session exists.
@@ -1362,6 +1367,128 @@ final class AppController {
                 exit(5)
             }
         }
+    }
+
+    /// Runs a WAV through a MEETING session and checks that the cleanup chain
+    /// does not run over it. Enabled by `OVC_SELFTEST_MEETING`.
+    ///
+    /// A meeting's transcript is a record of what was said, so it must not be
+    /// rewritten by the dictation cleanup prompt. The check is that the model is
+    /// not asked at all: a meeting used to pay for a full refinement and throw
+    /// the answer away, which was both wrong (the transcript came back
+    /// rewritten) and slow (minutes on a long meeting, and a second worker job
+    /// contending with the summary).
+    ///
+    /// The proof is the WORKER TRACE: the app's own path is used, so if the
+    /// cleanup ran, the worker would be invoked with the "refine" task. The
+    /// trace is read at the end and the run fails when a refine shows up.
+    ///
+    /// `OVC_SELFTEST_MEETING_MODE=dictation` runs the CONTROL: the same
+    /// harness with a dictation session, which must show a refine. Without it,
+    /// a harness that never detects anything would pass every time -- the
+    /// control is what makes the meeting result mean something.
+    private func runMeetingSelfTest(wavPath: String) {
+        let control = ProcessInfo.processInfo.environment["OVC_SELFTEST_MEETING_MODE"] == "dictation"
+        let mode: VoiceInputSession.Mode = control ? .dictation : .meeting
+        ModelInstaller.log("selftest meeting: wav=\(wavPath) mode=\(control ? "dictation" : "meeting")")
+        hud.show(text: "自我測試中…")
+        // The worker is a subprocess, so the only record of what it was asked
+        // is a wrapper that writes the task down. Pointing the engine at one
+        // makes the question answerable: did the cleanup run?
+        let trace = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ovc-worker-trace-\(UUID().uuidString).log")
+        let worker = Self.installWorkerTrace(at: trace)
+        setenv("OVC_LLM_WORKER", worker.path, 1)
+        coreQueue.async {
+            do {
+                let dir = try Self.modelsDirectory { ModelInstaller.log($0) }
+                // The cleanup has to be ON for this check to mean anything: a
+                // dictation with polish off never asks the model, so the
+                // control would pass for the wrong reason and the meeting
+                // result would prove nothing.
+                var config = Self.engineConfig(modelsDir: dir)
+                config.polishEnabled = true
+                let engine = try VoiceInputEngine(config: config)
+                try engine.prepare()
+                // The session is driven by the same audio the microphone would
+                // feed, so the ASR path is the real one.
+                let samples = try SelfTest.readWav(URL(fileURLWithPath: wavPath))
+                let session = try engine.makeSession(mode: mode)
+                try session.start(audioSource: { deliver in
+                    // The WAV is fed in the chunks the microphone would deliver,
+                    // so the ASR sees the same shape of audio it sees live.
+                    for chunk in stride(from: 0, to: samples.count, by: 1600) {
+                        deliver(Array(samples[chunk..<min(chunk + 1600, samples.count)]))
+                    }
+                })
+                let result = try session.finish()
+                let tasks = Self.workerTrace(at: trace)
+                ModelInstaller.log("selftest meeting transcript: \(result.raw)")
+                ModelInstaller.log("selftest meeting worker tasks: \(tasks)")
+                DispatchQueue.main.async {
+                    self.engine = engine
+                    try? FileManager.default.removeItem(at: trace)
+                    if control {
+                        // The control has to FAIL without a refine, or the
+                        // harness is not looking at anything.
+                        if !tasks.contains("refine") {
+                            ModelInstaller.log("selftest meeting CONTROL FAILED: a dictation did not run the cleanup")
+                            exit(9)
+                        }
+                        ModelInstaller.log("selftest meeting CONTROL PASS")
+                        exit(0)
+                    }
+                    if tasks.contains("refine") {
+                        ModelInstaller.log("selftest meeting FAILED: the cleanup ran over a meeting transcript")
+                        exit(6)
+                    }
+                    // The meeting text must be the transcript with the script
+                    // normalised and nothing else: the recogniser emits
+                    // Simplified, so the meeting text is Traditional while the
+                    // raw text is not. What it must NOT be is a REWRITE -- the
+                    // cleanup prompt condenses and reorders, and a meeting
+                    // record that does that is wrong about what was said.
+                    let expected = VoiceText.toTraditional(result.raw)
+                    if result.refined != expected {
+                        ModelInstaller.log("selftest meeting FAILED: the meeting text was rewritten, not normalised")
+                        exit(7)
+                    }
+                    ModelInstaller.log("selftest meeting PASS")
+                    exit(result.raw.isEmpty ? 8 : 0)
+                }
+            } catch {
+                ModelInstaller.log("selftest meeting failed: \(error)")
+                exit(5)
+            }
+        }
+    }
+
+    /// A wrapper around the real worker that writes down each task it is asked
+    /// for, and runs the real thing.
+    ///
+    /// The task is the first argument, so the wrapper records it and hands every
+    /// argument on unchanged. The real worker is found the same way the engine
+    /// finds it -- beside the library, or through the environment -- so the
+    /// wrapper does not change what actually runs.
+    private static func installWorkerTrace(at trace: URL) -> URL {
+        let worker = ProcessInfo.processInfo.environment["OVC_LLM_WORKER"]
+            ?? (Bundle.main.bundlePath as NSString).appendingPathComponent("Contents/Frameworks/ovc-llm-worker")
+        let script = """
+        #!/bin/sh
+        echo "$1" >> "\(trace.path)"
+        exec "\(worker)" "$@"
+        """
+        let path = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ovc-worker-trace-\(UUID().uuidString).sh")
+        try? Data(script.utf8).write(to: path)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
+        return path
+    }
+
+    /// The tasks the worker was asked for, in order.
+    private static func workerTrace(at trace: URL) -> [String] {
+        guard let text = try? String(contentsOf: trace, encoding: .utf8) else { return [] }
+        return text.split(separator: "\n").map(String.init)
     }
 
     // MARK: - Model directory & meetings directory

@@ -76,9 +76,9 @@ public final class VoiceInputEngine {
 
     /// Creates a live session. The caller drives it through `VoiceInputSession`;
     /// only one session may exist at a time, which the engine enforces.
-    public func makeSession() throws -> VoiceInputSession {
+    public func makeSession(mode: VoiceInputSession.Mode = .dictation) throws -> VoiceInputSession {
         ensurePrepared()
-        return VoiceInputSession(config: config)
+        return VoiceInputSession(config: config, mode: mode)
     }
 
     /// The meeting-summary entry point: a finished transcript in, the reduced
@@ -118,6 +118,24 @@ public final class VoiceInputEngine {
 /// raw → refine → translate chain the file path runs.
 public final class VoiceInputSession {
 
+    /// What the recording is FOR, which decides what happens to the text when
+    /// it ends.
+    ///
+    /// A DICTATION is one sentence the user is typing somewhere, so it goes
+    /// through the cleanup chain before it is pasted.
+    ///
+    /// A MEETING is a record of what was said. The transcript is kept as it was
+    /// spoken -- summarised separately afterwards -- so the cleanup chain must
+    /// NOT run over it: that chain is a dictation prompt (one tidy line, no
+    /// invented content), and a meeting transcript run through it comes back
+    /// rewritten, condensed, and wrong about what was actually said. The
+    /// meeting's own summary is a different prompt with its own rules, and it
+    /// reads the raw transcript.
+    public enum Mode {
+        case dictation
+        case meeting
+    }
+
     /// 0…1 microphone level, for a meter. Delivered on the main queue.
     public var onLevel: ((Float) -> Void)?
     /// Live partial transcript so far. Delivered on the main queue.
@@ -134,6 +152,9 @@ public final class VoiceInputSession {
     public static var systemAudioSupported: Bool { VoiceInputEngine.systemAudioSupported }
 
     private let config: VoiceInputConfig
+    /// What this recording is for. Decides whether the cleanup chain runs when
+    /// the session ends.
+    public let mode: Mode
     /// Serial queue for everything that talks to the core and touches
     /// `segments`. The audio tap hops onto it per buffer; polling and finishing
     /// run on it too, so ordering is `submit` → poll → `stop` with no gaps.
@@ -149,8 +170,9 @@ public final class VoiceInputSession {
     private var finished = false
     private var paused = false
 
-    init(config: VoiceInputConfig) {
+    init(config: VoiceInputConfig, mode: Mode) {
         self.config = config
+        self.mode = mode
     }
 
     /// Opens the ASR session, starts the microphone, and begins polling.
@@ -159,23 +181,47 @@ public final class VoiceInputSession {
     /// leftover session from a previous recording) surfaces as an error, not a
     /// silent mix of two streams.
     public func start() throws {
+        try start(audioSource: nil)
+    }
+
+    /// Opens the ASR session with the audio coming from somewhere other than
+    /// the microphone.
+    ///
+    /// `audioSource` is handed the samples instead of the microphone, and the
+    /// microphone is not opened at all. That is what a scripted check needs: it
+    /// can run the real session -- the real ASR, the real segments, the real
+    /// cleanup decision -- without a microphone and without a permission
+    /// prompt, and the audio it feeds is the audio it has.
+    ///
+    /// `source` is 0 for the microphone and 1 for system audio, so a scripted
+    /// check can stand in for either.
+    public func start(audioSource: ((@escaping ([Float]) -> Void) -> Void)?) throws {
         guard !started else { throw VoiceInputError.badConfig("session already started") }
-        guard MicrophoneCapture.microphoneAuthorized() else { throw VoiceInputError.microphoneDenied }
+        // A substitute source means no microphone, so the permission is not
+        // needed -- and asking for it would put a system prompt in front of a
+        // headless check.
+        if audioSource == nil {
+            guard MicrophoneCapture.microphoneAuthorized() else { throw VoiceInputError.microphoneDenied }
+        }
 
         try CoreABI.startASR()
-        let cap = MicrophoneCapture(
-            onSamples: { [weak self] in self?.feed($0) },
-            onLevel: { [weak self] in self?.deliverLevel($0) })
-        do {
-            try cap.start()
-        } catch {
-            // The session was opened by this call, so ending it is ours to do:
-            // leaving it open would make every later start fail with "session
-            // already active".
-            try? CoreABI.stopASR()
-            throw VoiceInputError.decoderUnavailable("microphone: \(error.localizedDescription)")
+        if let audioSource {
+            audioSource { [weak self] samples in self?.feed(samples) }
+        } else {
+            let cap = MicrophoneCapture(
+                onSamples: { [weak self] in self?.feed($0) },
+                onLevel: { [weak self] in self?.deliverLevel($0) })
+            do {
+                try cap.start()
+            } catch {
+                // The session was opened by this call, so ending it is ours to do:
+                // leaving it open would make every later start fail with "session
+                // already active".
+                try? CoreABI.stopASR()
+                throw VoiceInputError.decoderUnavailable("microphone: \(error.localizedDescription)")
+            }
+            capture = cap
         }
-        capture = cap
         started = true
         if config.captureSystemAudio {
             startSystemAudio()
@@ -286,7 +332,20 @@ public final class VoiceInputSession {
             segments.append(contentsOf: (try? CoreABI.takeSegments()) ?? [])
             let joined = Text.join(segments.map(\.text))
             let raw = joined.isEmpty ? stopText.trimmingCharacters(in: .whitespacesAndNewlines) : joined
-            let refined = Refiner.refine(raw: raw, config: config)
+            // A meeting keeps the transcript as it was spoken, so the cleanup
+            // chain does not run over it. It is the dictation prompt, and a
+            // meeting transcript run through it comes back rewritten and
+            // condensed -- wrong about what was said, which is the one thing a
+            // record of a meeting cannot be. The summary is a separate, explicit
+            // step over the raw text.
+            //
+            // It was not only wrong: it was also wasted. Every meeting paid for
+            // a full model refinement and threw the answer away, which on a
+            // long meeting is minutes of wall-clock and a second worker job
+            // contending with the summary that the user actually wanted.
+            let refined = mode == .dictation
+                ? Refiner.refine(raw: raw, config: config)
+                : Refiner.tidy(raw)
             return VoiceInputResult(raw: raw, refined: refined, segments: segments)
         }
     }

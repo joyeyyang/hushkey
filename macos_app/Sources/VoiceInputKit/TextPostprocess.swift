@@ -207,6 +207,22 @@ enum Refiner {
         Text.normalizeOutput(Text.toTraditional(raw.trimmingCharacters(in: .whitespacesAndNewlines)))
     }
 
+    /// The transcript with no model involved at all.
+    ///
+    /// This is what a meeting ends with: the words as they were spoken, with
+    /// only the script normalised (the recogniser emits Simplified) and the
+    /// bullet style made consistent. Nothing is rewritten, condensed or
+    /// reordered, because the meeting's own summary is a separate step that
+    /// reads this text and applies its own rules.
+    ///
+    /// The difference from `fallback` is the intent rather than the result:
+    /// `fallback` is a degraded dictation (the model was there and its answer
+    /// was rejected), this is a meeting transcript that was never meant to go
+    /// through the model at all.
+    static func tidy(_ raw: String) -> String {
+        Text.normalizeOutput(Text.toTraditional(raw.trimmingCharacters(in: .whitespacesAndNewlines)))
+    }
+
     /// Translate the finished line when the user asked for it. Runs AFTER the
     /// refine pass on purpose (see `VoiceInputConfig.translateTarget`). A
     /// translation that fails, or that comes back as a note instead of a

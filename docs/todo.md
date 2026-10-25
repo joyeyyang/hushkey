@@ -474,6 +474,64 @@ App 呼叫它。
 找不到就不換（結果留在剪貼簿）、以及**位移是 UTF-16 單位**（輸入框有 emoji
 時位置才不會錯）。
 
+### 8.4.6 會議逐字稿被聽寫提示詞改寫（2026-10-25 晚間）
+
+會議模式搬到 Kit 之後，錄音確實走 Kit 的 `VoiceInputSession`、逐字稿確實是
+`result.raw`（沒有整理），但**整理還是有跑**——只是結果被丟掉。
+
+`session.finish()` 無論錄音目的都會跑 `Refiner.refine`，那是**聽寫**用的
+清理鏈：一行乾淨的句子、內容不多不少。會議逐字稿經過它會被改寫、濃縮，
+而會議紀錄「說了什麼」不能被改寫。會議自己的摘要是**另一個提示詞**、另一步
+（`engine.summarize`），讀的是原文——這條路本來就對。
+
+所以這不只是浪費，也是錯的。每一次會議都白白付一次完整整理：
+
+| 模式 | worker 收到的任務 | 耗時 |
+|---|---|---|
+| 聽寫（對照組） | `["refine"]` | 10 秒 |
+| 會議 | `[]` | 1 秒 |
+
+修法：`VoiceInputSession.Mode`（`.dictation` / `.meeting`）決定結束時跑不跑
+清理鏈。會議跑的是 `Refiner.tidy`——只做繁簡轉換與項目符號一致，**不重寫**。
+
+**驗證方式**：`OVC_SELFTEST_MEETING=<wav>` 跑一個真的會議 session，
+worker 被換成一個會記錄任務的 wrapper，所以「整理有沒有跑」是量得出來的。
+`OVC_SELFTEST_MEETING_MODE=dictation` 跑**對照組**：同一套 harness、聽寫模式，
+必須看到 refine。沒有對照組的話，一個永遠測不到東西的 harness 也會每次 PASS。
+
+順帶補了兩個 Kit 的洞：
+
+* **`VoiceInputSession.start()` 需要麥克風權限**，headless 的檢查會卡在權限
+  對話框。改成可以傳入替代音訊來源（`start(audioSource:)`）：走的是真的
+  session、真的 ASR、真的 segments，只是不開麥克風。
+* **App 的錄音本來就已經在 Kit 上**：`AudioCapture.swift`、
+  `SystemAudioTap.swift`、`CoreBridge.swift` 都已刪除，`AudioFileImport.swift`
+  剩下的是 App 自己的政策（重試、忙碌guard、中文訊息），解碼與分段在 Kit。
+
+### 8.4.7 一次跑完所有檢查（2026-10-25 晚間）
+
+這些檢查散在不同地方（Rust 單元測試、Swift 單元測試、App 自己的自我測試、
+命令列工具），而且正是因為分散，會議那個洞才會留到現在。
+
+`scripts/verify.sh` 把它們收在一個指令裡，任何一個失敗就停：
+
+```
+$ scripts/verify.sh
+PASS  rust tests
+PASS  swift tests
+PASS  cli self-test
+PASS  offscreen ui (paper)
+PASS  offscreen ui (night)
+PASS  dictation end to end
+PASS  audio import
+PASS  meeting session (no cleanup over a meeting transcript)
+PASS  meeting session control (a dictation DOES run the cleanup)
+ALL CHECKS PASSED
+```
+
+runner 本身也要證明它**測得到東西**：把會議模式故意弄壞（讓會議也跑清理鏈），
+「meeting session」就以 exit 6 失敗，而對照組仍然 PASS。修回去後全部綠。
+
 ### 8.5 ASR 的 VAD：安靜講話被整句丟掉、雜訊被當成人聲（2026-10-25 下午）
 
 使用者回報「辨識比內建差」。用 `scripts/asr_bench.py`（`say` 合成 15 個片段，
