@@ -265,7 +265,57 @@ hint。理由寫在程式裡：清單裡有、但這次沒講到的名字會被�
 
 ## 7. 還沒做
 
-- 語音編輯指令（「把第二段改成…」）：要新的 LLM ABI 與提示詞，最後做。
-  這輪沒動，維持未完成。
+- 語音編輯：實機驗證。
+- ASR 準確度仍不如 macOS 內建聽寫（使用者回報 2026-10-25），
+  待逐項檢查 VAD 邊界、語言提示、解碼方式與輸入增益。
 - 長會議（>5 分鐘）的切段與去重尚未在真實錄音上跑過。
 - 台語（Minnan）只驗過模型支援，沒有用真人錄音聽過。
+
+## 8. ASR 退回 SenseVoice、浮動視窗合併、檢索移除確認、語音編輯（2026-10-25）
+
+### 8.1 語音輸入結果不符 — ASR 退回 SenseVoice Small int8
+
+**症狀**：使用者回報輸出跟講的完全對不上。
+
+**證據（`history.json` 的 raw 欄位）**：10-25 06:22–08:22（舊建置，SenseVoice）可讀；
+09:57 之後（重新打包後開始載入 Dolphin base int8）變成「说费三个。不敢干母亲一个专门的行为」，
+甚至出現日文「手がちょっと」。
+
+用 `say` 合成乾淨中文 A/B（同音訊、同機）：
+
+- Dolphin：「明天下午三点跟小林开会。讨论第四季时乘地点还没。确定搞我会先更新。」
+- SenseVoice：「明天下午3点跟小林开会，讨论第四季时辰地点还没确定搞我会先更新。」
+
+兩者各錯一詞（時程）。結論：Dolphin 只贏在 99 MB／0.141 s（單一 5.6 秒片段），
+**沒換到準確度**，預設改回 SenseVoice；Dolphin 仍安裝，`OVC_ASR_MODEL=dolphin` 可切回。
+
+manifest 的 download 旗標同步交換（新安裝抓 SenseVoice int8＋tokens），
+`scripts/verify_models.sh` 對新清單通過。`ova.log` 現在每次聽寫寫出 ASR 原文（`asr: …`，
+160 字截斷），因為先前無法從日誌分辨是辨識錯還是整理錯。
+
+### 8.2 兩個浮動視窗合併成一個
+
+使用者第二次明確要求合併。作法：取回 `10ae502` 的合併版 `DictationWindow`、
+刪除 `TranscriptWindow.swift`。單一視窗＝控制列（麥克風、波形、字數、暫停、停止、拖曳）
+＋標題列（狀態膠囊、複製、Esc）＋逐字稿卡（我：／對方：）。Esc 只關視窗不停止錄音，
+暫停仍是獨立功能。
+
+注意：使用者當下跑的仍是舊建置，所以還看到兩個視窗（本節取代 6.7 的「兩個視窗還原」）。
+
+### 8.3 檢索完全移除的確認
+
+磁碟（`models/embedding/`、`models/.cache/`）、manifest、程式皆無殘留；
+關鍵字維持「交給原本的 AI 模型自己判斷」，不注入提示。
+
+### 8.4 語音編輯（`LLM_EditText`）
+
+worker 新任務 `edit`：core 自己編號（多行或多句），提示詞要求保留原編號只改被指到的行，
+程式依編號解析回來；沒有編號的回覆一律當失敗（聊天式回覆不能覆蓋使用者的文字）。
+Kit 加 `isVoiceEditInstruction`／`applyVoiceEdit`；App 把指令套用到上次交付的文字，
+再用 Accessibility 精準選取後貼上覆蓋，無法證明位置時只放剪貼簿＋提示。
+**本節標明「尚未實機驗證」**。
+
+**驗證**：`history.json` raw 欄位前後對照（06:22–08:22 vs 09:57 之後）＋`say` 同音訊
+A/B（Dolphin／SenseVoice 各錯一詞）；manifest 新清單過 `scripts/verify_models.sh`；
+檔案層面 `models/embedding/`、`models/.cache/`、`TranscriptWindow.swift`、
+`core_engine/src/embed.rs` 皆已不存在；8.4 只有程式與提示詞，**尚未實機驗證**。

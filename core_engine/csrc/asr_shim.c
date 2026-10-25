@@ -16,7 +16,8 @@
 #define OVC_ASR_SENSE_VOICE 0
 #define OVC_ASR_DOLPHIN 1
 
-void *ovc_asr_create(const char *model, const char *tokens, int32_t num_threads, int32_t kind) {
+void *ovc_asr_create(const char *model, const char *tokens, int32_t num_threads, int32_t kind,
+                     const char *language) {
   SherpaOnnxOfflineRecognizerConfig cfg;
   memset(&cfg, 0, sizeof(cfg));
   cfg.feat_config.sample_rate = 16000;
@@ -24,6 +25,14 @@ void *ovc_asr_create(const char *model, const char *tokens, int32_t num_threads,
   cfg.model_config.tokens = tokens;
   cfg.model_config.num_threads = num_threads;
   cfg.model_config.provider = "cpu";
+  /* Greedy, because that is the only thing this sherpa-onnx build offers here.
+     `modified_beam_search` was tried first (a whole utterance decodes in
+     0.14-0.19 s, so extra hypotheses are affordable) and the recogniser refused
+     to be created at all:
+       "OfflineRecognizerSenseVoiceImpl:82 Only greedy_search is supported at
+        present. Given modified_beam_search"
+     So accuracy has to come from the audio the model is handed and from the
+     language hint, not from the search. Re-test after a sherpa-onnx upgrade. */
   cfg.decoding_method = "greedy_search";
 
   if (kind == OVC_ASR_DOLPHIN) {
@@ -34,7 +43,12 @@ void *ovc_asr_create(const char *model, const char *tokens, int32_t num_threads,
     cfg.model_config.model_type = "dolphin";
   } else {
     cfg.model_config.sense_voice.model = model;
-    cfg.model_config.sense_voice.language = "auto";
+    /* "auto" makes the model identify the language from the utterance itself,
+       and it has no context to do that with on a short, accented, technical
+       sentence -- a Chinese dictation came back carrying a Japanese fragment.
+       The language the caller passes is the speaker's own, so it is used unless
+       it is empty, in which case the model decides. */
+    cfg.model_config.sense_voice.language = (language && *language) ? language : "auto";
     cfg.model_config.sense_voice.use_itn = 1;
     cfg.model_config.model_type = "sense_voice";
   }

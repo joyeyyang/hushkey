@@ -1,13 +1,13 @@
 import Foundation
 
-/// The spoken-edit feature: the user says what to change about text that is
-/// already on screen, and the line is applied instead of pasted.
-///
-/// Two halves, deliberately apart. `isVoiceEditInstruction` is a pure predicate
-/// over the recognised line and decides whether to *try* an edit at all;
-/// `applyVoiceEdit` is the model call that performs one. Keeping the decision
-/// free of the model is what makes it reviewable — the cost of getting it wrong
-/// is described on the predicate itself.
+// The spoken-edit feature: the user says what to change about text that is
+// already on screen, and the line is applied instead of pasted.
+//
+// Two halves, deliberately apart. `isVoiceEditInstruction` is a pure predicate
+// over the recognised line and decides whether to *try* an edit at all;
+// `applyVoiceEdit` is the model call that performs one. Keeping the decision
+// free of the model is what makes it reviewable — the cost of getting it wrong
+// is written down on the predicate itself.
 
 /// Whether a recognised line is an instruction to EDIT something rather than
 /// text to paste.
@@ -31,12 +31,12 @@ import Foundation
 ///             這個會議改成線上開
 ///             我用英文寫了一封信
 ///
-/// The two 改成 rejections each carry a verb but name no target — 顏色 and a
-/// 把-sentence's object are not "this line", which is what an edit needs. 這個會議
-/// names a thing, but with 這個 rather than one of the edit targets: a whole
-/// sentence's subject is not the line under discussion. 我用英文寫了一封信 has
-/// neither half. The predicate is a pure function of its argument on purpose —
-/// it is the one piece of this feature that can be argued about instead of run.
+/// Of the rejections, 顏色改成藍色 and 我把檔案刪掉了 each carry a verb but name no
+/// target at all. 這個會議改成線上開 names a thing, but with 這個 rather than one of
+/// the edit targets: a whole sentence's subject is not the line under discussion.
+/// 我用英文寫了一封信 has neither half. The predicate is a pure function of its
+/// argument on purpose — it is the one piece of this feature that can be argued
+/// about instead of run.
 public func isVoiceEditInstruction(_ text: String) -> Bool {
     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return false }

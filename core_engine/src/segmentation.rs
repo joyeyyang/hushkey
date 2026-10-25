@@ -16,25 +16,72 @@ pub const SAMPLE_RATE: usize = 16_000;
 /// 30 ms of audio per analysis frame.
 pub const FRAME: usize = 480;
 
-/// A frame counts as the *start* of speech above this mean square (about
-/// -35 dBFS). Speech through a built-in microphone lands near 1e-2; a quiet room
-/// sits near 1e-6, so this leaves headroom on both sides without being deaf to
-/// someone talking at arm's length.
-pub const ONSET_MEAN_SQUARE: f32 = 3e-4;
+/// A frame counts as the *start* of speech above this mean square.
+///
+/// Lowered from 3e-4 (about -35 dBFS) to 5e-5 (about -43 dBFS), measured on
+/// synthesised speech scaled down to a peak of 0.05 (a quiet speaker, or someone
+/// sitting back from the microphone): at 3e-4 the whole utterance was dropped --
+/// the transcript came back EMPTY -- and that is the failure the user reported as
+/// "the words do not match what I said", because an onset that fires late eats
+/// the first word and an onset that never fires eats the sentence.
+///
+/// The floor is not lowered with it: `onset_threshold` still takes
+/// `max(this, noise_floor * 8)`, and the floor tracks the room while nothing is
+/// being said, so a noisy room raises the gate back up on its own.
+pub const ONSET_MEAN_SQUARE: f32 = 5e-5;
 /// Once speaking, a quieter frame still counts as speech. The gap between the
 /// two thresholds is what stops a soft final syllable from cutting the
 /// utterance in half.
-pub const CONTINUE_MEAN_SQUARE: f32 = 1e-4;
+///
+/// Lowered from 1e-4 (about -40 dBFS) after the user reported recognition worse
+/// than the system dictation: a phrase that trails off is a quieter frame, not a
+/// pause, and a split there costs the recogniser the end of a word. The floor
+/// still clamps this upward in a noisy room (`continue_threshold`), so the extra
+/// sensitivity only applies where the room is quiet enough to earn it.
+pub const CONTINUE_MEAN_SQUARE: f32 = 7e-5;
 /// 540 ms of quiet closes an utterance.
 pub const END_SILENCE_FRAMES: usize = 18;
 /// Shorter than 240 ms and it is a click, a lip smack or a chair, not speech.
 pub const MIN_SPEECH_FRAMES: usize = 8;
 /// Keep 300 ms of the trailing quiet so the recogniser never hears a clipped stop.
 pub const TAIL_FRAMES: usize = 10;
-/// 150 ms of audio kept before the onset, so the first phoneme is not lost.
-pub const PREROLL_FRAMES: usize = 5;
+/// Audio kept before the onset, so the first phoneme is not lost.
+///
+/// 360 ms, up from 150: the recogniser is non-autoregressive and cannot infer a
+/// clipped consonant back, and a word-initial fricative or an aspirated stop is
+/// exactly what the onset test fires after. The gap a previous utterance closes
+/// on is 540 ms (`END_SILENCE_FRAMES`), so this window is always inside silence
+/// and cannot pull the previous sentence back in.
+pub const PREROLL_FRAMES: usize = 12;
 /// Close a monologue after 30 s so the buffer cannot grow without bound.
 pub const MAX_UTTERANCE_FRAMES: usize = 1000;
+
+/// Bring a quiet utterance up to a level the recogniser was trained on.
+///
+/// The model consumes log-mel energies, so a recording 15 dB below the training
+/// level is not a scaled copy of the same input -- it is a different input, and
+/// the word error rate moves with it. The gain is therefore applied per
+/// utterance, only upwards, and capped:
+///
+/// * a loud utterance is left alone, because normalising it downwards would take
+///   away level information the model expects to see;
+/// * a segment whose peak is under `MIN_PEAK_TO_BOOST` is left alone as well,
+///   because that is room tone and the decoder can invent words for it;
+/// * the cap keeps one stray sample (a click, a keyboard) from setting a gain
+///   that makes the rest of the utterance clip.
+fn normalize_gain(samples: &mut [f32]) {
+    const TARGET_PEAK: f32 = 0.5;
+    const MAX_GAIN: f32 = 4.0;
+    const MIN_PEAK_TO_BOOST: f32 = 0.02;
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    if peak < MIN_PEAK_TO_BOOST || peak >= TARGET_PEAK {
+        return;
+    }
+    let gain = (TARGET_PEAK / peak).min(MAX_GAIN);
+    for sample in samples.iter_mut() {
+        *sample = (*sample * gain).clamp(-1.0, 1.0);
+    }
+}
 
 /// One stretch of speech, in session time.
 #[derive(Debug, Clone, PartialEq)]
@@ -218,7 +265,8 @@ impl Segmenter {
         let available = (end_frame - start_frame) as usize * FRAME;
 
         if long_enough && available > 0 {
-            let samples = self.audio[..available.min(self.audio.len())].to_vec();
+            let mut samples = self.audio[..available.min(self.audio.len())].to_vec();
+            normalize_gain(&mut samples);
             out.push(Utterance {
                 start: start_frame as f64 * FRAME as f64 / SAMPLE_RATE as f64,
                 end: (start_frame as f64 * FRAME as f64 + samples.len() as f64) / SAMPLE_RATE as f64,
@@ -240,6 +288,7 @@ impl Segmenter {
         let cut = ((cut / FRAME) * FRAME).clamp(FRAME, self.audio.len());
         let mut head = Vec::with_capacity(cut);
         head.extend_from_slice(&self.audio[..cut]);
+        normalize_gain(&mut head);
         self.audio.drain(..cut);
         let start = self.onset_frame;
         self.onset_frame += (cut / FRAME) as u64;
@@ -295,8 +344,8 @@ mod tests {
             ],
         );
         assert_eq!(out.len(), 2, "expected two utterances, got {out:?}");
-        // The first burst starts at 0.5 s, minus the 150 ms preroll.
-        assert!((out[0].start - 0.35).abs() < 0.05, "start {}", out[0].start);
+        // The first burst starts at 0.5 s, minus the 360 ms preroll.
+        assert!((out[0].start - 0.14).abs() < 0.05, "start {}", out[0].start);
         assert!(out[0].duration() > 0.8, "duration {}", out[0].duration());
         assert!(out[1].start > 1.9, "second start {}", out[1].start);
     }

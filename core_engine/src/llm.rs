@@ -1030,7 +1030,17 @@ fn strip_item_number(line: &str) -> Option<&str> {
         return None;
     }
     let rest = body[digits..].strip_prefix(['.', '、', ')'])?;
-    let item = rest.strip_prefix(char::is_whitespace)?.trim();
+    let item = match rest.strip_prefix(char::is_whitespace) {
+        Some(after_space) => after_space,
+        // The space after the marker is the model's habit, not a rule: "1. 甲"
+        // and "2、甲" are the same item, and a line dropped here costs the user
+        // the edit. Only a dot is refused without one, because that is the
+        // marker a fraction borrows -- "3.14" must stay a remark rather than
+        // become an item named "14".
+        None if !body[digits..].starts_with('.') => rest,
+        None => return None,
+    }
+    .trim();
     if item.is_empty() {
         return None;
     }

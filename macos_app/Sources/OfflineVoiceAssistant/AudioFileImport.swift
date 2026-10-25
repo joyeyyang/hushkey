@@ -6,8 +6,8 @@ import AVFoundation
 /// The engine holds one session at a time, so this class takes that session for
 /// the length of an import and refuses to start while anything else holds it.
 /// Audio is decoded by AVFoundation, resampled with `AVAudioConverter` (the
-/// conversion `AudioCapture` already uses) and streamed in 5 s chunks, so a
-/// three-hour file costs the same memory as a five-second one.
+/// conversion the kit's `MicrophoneCapture` uses) and streamed in 5 s chunks, so
+/// a three-hour file costs the same memory as a five-second one.
 final class AudioFileImporter {
 
     struct AudioImportResult {
@@ -196,8 +196,8 @@ final class AudioFileImporter {
         catch { throw AudioImportError.decoderUnavailable("reader: \(error.localizedDescription)") }
 
         // LPCM at the source's own rate and channel count: getting to 16 kHz
-        // mono is the resampler's job, as in AudioCapture, so compressed files
-        // and odd sample rates take one code path.
+        // mono is the resampler's job, as in the kit's capture, so compressed
+        // files and odd sample rates take one code path.
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
             AVFormatIDKey: Int(kAudioFormatLinearPCM),
             AVLinearPCMBitDepthKey: 32,

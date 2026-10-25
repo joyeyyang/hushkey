@@ -13,9 +13,7 @@ public struct VoiceInputConfig {
     /// `asr/`, `llm/` and `embedding/` live directly under it.
     public var modelsDirectory: URL
 
-    /// The user's proper-noun list. Injected into the refine prompt as a hint,
-    /// and — when the retrieval model is present — pre-filtered to the terms
-    /// the transcript actually touched (see `relevantTerms(for:in:)`).
+    /// The user's proper-noun list. Injected into the refine prompt as a hint.
     public var keywords: [String]
 
     /// How many model passes the cleanup should run: 0 = let the engine decide

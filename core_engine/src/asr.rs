@@ -9,6 +9,7 @@ extern "C" {
         tokens: *const c_char,
         num_threads: c_int,
         kind: c_int,
+        language: *const c_char,
     ) -> *mut c_void;
     fn ovc_asr_decode(rec: *mut c_void, samples: *const f32, n: c_int, sample_rate: c_int) -> *mut c_char;
     fn ovc_asr_destroy(rec: *mut c_void);
@@ -44,16 +45,24 @@ pub struct Recognizer {
 unsafe impl Send for Recognizer {}
 
 impl Recognizer {
+    /// `language` is the hint SenseVoice gets ("zh", "en", ... or "auto" to let
+    /// the model identify it); Dolphin ignores it and works the language out from
+    /// its own vocabulary tokens.
     pub fn new(
         model: &Path,
         tokens: &Path,
         num_threads: i32,
         kind: AsrKind,
+        language: &str,
     ) -> Result<Self, EngineError> {
         let m = path_cstring(model)?;
         let t = path_cstring(tokens)?;
-        // SAFETY: both pointers are valid NUL-terminated strings for the call.
-        let raw = unsafe { ovc_asr_create(m.as_ptr(), t.as_ptr(), num_threads, kind.code()) };
+        let lang = CString::new(language)
+            .map_err(|_| EngineError::new(ErrorCode::InvalidArg, "language hint contains NUL"))?;
+        // SAFETY: all three pointers are valid NUL-terminated strings for the call.
+        let raw = unsafe {
+            ovc_asr_create(m.as_ptr(), t.as_ptr(), num_threads, kind.code(), lang.as_ptr())
+        };
         if raw.is_null() {
             return Err(EngineError::new(
                 ErrorCode::ModelLoad,

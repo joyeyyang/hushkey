@@ -236,6 +236,21 @@ func transcribe(_ url: URL, engine: VoiceInputEngine, opts: Options) -> String {
     }
 }
 
+// MARK: - Engine
+
+/// Builds the engine the way every path needs it: config validated, core
+/// initialised, ASR loaded. `prepare()` throws on a real install problem; report
+/// it as one line rather than a stack of core chatter.
+func makeEngine(_ config: VoiceInputConfig) -> VoiceInputEngine {
+    do {
+        let engine = try VoiceInputEngine(config: config)
+        try engine.prepare()
+        return engine
+    } catch {
+        fail("could not start the engine: \(error)", code: 2)
+    }
+}
+
 // MARK: - Edit
 
 /// Applies one spoken edit to the text on stdin and prints the result.
@@ -295,18 +310,6 @@ if let instruction = opts.editInstruction {
 
 guard !opts.files.isEmpty else {
     fail("no input file given (try --help)", code: 1)
-}
-
-// `prepare()` throws on a real install problem; report it as one line rather
-// than a stack of core chatter.
-func makeEngine(_ config: VoiceInputConfig) -> VoiceInputEngine {
-    do {
-        let engine = try VoiceInputEngine(config: config)
-        try engine.prepare()
-        return engine
-    } catch {
-        fail("could not start the engine: \(error)", code: 2)
-    }
 }
 
 let engine = makeEngine(config)

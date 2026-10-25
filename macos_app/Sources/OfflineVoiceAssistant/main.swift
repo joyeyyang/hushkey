@@ -627,305 +627,224 @@ final class AppController {
     }
 
     private func startDictation() {
-        // A session the user asked for may show the capsule again, even if the
+        startSession(meeting: false)
+    }
+
+    /// Opens one recording session: microphone in, transcript out.
+    ///
+    /// Dictation and a meeting are the same recording with three settings
+    /// different: the window's title, whether the Mac's own audio is transcribed
+    /// as 對方, and what happens to the transcript at the end (paste it, or save a
+    /// summary). The capture, the segmentation, the ASR session and the closing
+    /// utterance belong to the kit's `VoiceInputSession` -- the same code the
+    /// command-line tool runs -- so there is nothing here to drift from it.
+    private func startSession(meeting isMeeting: Bool) {
+        // A session the user asked for may show the window again, even if the
         // previous one was dismissed with Escape.
         hud.allowShowingAgain()
-        guard AudioCapture.microphoneAuthorized() else {
-            AudioCapture.requestMicrophone { granted in
+        guard VoiceInputMicrophone.isAuthorized else {
+            VoiceInputMicrophone.request { granted in
                 DispatchQueue.main.async {
-                    self.hud.flash(granted ? "已授權麥克風，再按一次開始" : "麥克風權限被拒絕 (系統設定 > 隱私權 > 麥克風)", seconds: 4)
+                    self.hud.flash(
+                        granted
+                            ? "已授權麥克風，再按一次\(isMeeting ? "開始會議" : "開始")"
+                            : "麥克風權限被拒絕 (系統設定 > 隱私權 > 麥克風)", seconds: 4)
                 }
             }
             return
         }
-        guard !sessionStarting else { return }
+        guard !sessionStarting, let engine else { return }
         sessionStarting = true
         coreQueue.async {
-            do { try Core.startASR() } catch {
+            do {
+                let session = try engine.makeSession()
+                // Wired before `start()`: an utterance, a level sample or a
+                // system-audio failure must have somewhere to land the moment the
+                // session exists.
+                self.wire(session, labelled: isMeeting)
+                try session.start()
+                DispatchQueue.main.async {
+                    self.sessionStarting = false
+                    self.session = session
+                    self.dictating = !isMeeting
+                    self.meeting = isMeeting
+                    self.sessionSegments = []
+                    self.sessionStartedAt = Date()
+                    self.paused = false
+                    self.meetingWarnings = []
+                    self.setRecordingState()
+                    self.hud.startRecording()
+                    self.hud.begin(
+                        title: isMeeting ? "會議逐字稿" : "聽寫",
+                        status: isMeeting ? "錄音中…" : "辨識中…")
+                    self.startSilenceWatch()
+                    // The Mac's own audio is a meeting feature, switched on for
+                    // THIS session rather than read from the config -- which is
+                    // also what keeps the setting live: toggling the checkbox
+                    // mid-meeting applies to the recording in progress instead of
+                    // being silently deferred to the next one.
+                    if isMeeting {
+                        session.setSystemAudioEnabled(self.meetingSystemAudio)
+                    }
+                }
+            } catch {
                 DispatchQueue.main.async {
                     self.sessionStarting = false
                     self.hud.flash("\(error)", seconds: 5)
-                }
-                return
-            }
-            DispatchQueue.main.async {
-                self.sessionStarting = false
-                self.dictating = true
-                self.sessionSegments = []
-                self.sessionStartedAt = Date()
-                self.paused = false
-                self.setRecordingState()
-                self.hud.startRecording()
-                self.hud.begin(title: "聽寫", status: "辨識中…")
-                self.startLiveCount()
-                self.startSilenceWatch()
-                let cap = AudioCapture(
-                    onSamples: { [weak self] samples in self?.feed(samples) },
-                    onLevel: { [weak self] level in self?.noteLevel(level) }
-                )
-                self.capture = cap
-                do { try cap.start() } catch {
-                    self.hud.flash("麥克風錯誤: \(error)")
-                    self.stopLiveCount()
-                    self.dictating = false
-                    self.setRecordingState()
-                    self.capture = nil
-                    // End the ASR session we just started, otherwise every later
-                    // start would be rejected with "session already active".
-                    self.coreQueue.async { _ = try? Core.stopASR() }
                 }
             }
         }
     }
 
+    /// Points one session's callbacks at the window.
+    ///
+    /// `labelled` is captured rather than read from `meeting`, because that flag
+    /// is only set once the session is up, and a callback that arrived first would
+    /// otherwise label the transcript from the previous recording's state.
+    private func wire(_ session: VoiceInputSession, labelled: Bool) {
+        session.onLevel = { [weak self] level in self?.noteLevel(level) }
+        session.onPartial = { [weak self] text in self?.hud.setCount(text.count) }
+        session.onSegments = { [weak self] fresh in
+            guard let self else { return }
+            let segments = fresh.map(Self.transcriptSegment)
+            self.sessionSegments.append(contentsOf: segments)
+            self.hud.append(segments, showSpeaker: labelled)
+        }
+        // A refused or unsupported tap is never fatal: the recording continues on
+        // the microphone, and the reason is remembered so the saved file can say
+        // the other side of the call is missing.
+        session.onSystemAudioFailure = { [weak self] reason in
+            DispatchQueue.main.async { self?.reportSystemAudioFailure(reason) }
+        }
+    }
+
+    private static func transcriptSegment(_ utterance: Utterance) -> TranscriptSegment {
+        TranscriptSegment(
+            index: utterance.index,
+            speaker: utterance.source == .systemAudio ? .other : .me,
+            start: utterance.start,
+            end: utterance.end,
+            text: utterance.text
+        )
+    }
+
     private func stopDictation() {
-        capture?.stop()
-        capture = nil
         dictating = false
-        stopLiveCount()
         stopSilenceWatch()
         setRecordingState()
         hud.show(text: "轉錄中…")
-        // The same words the status line is showing: the drain below happens
-        // before the engine is stopped, so claiming "辨識完成" here would put the
-        // window a step ahead of itself.
-        finishLiveTranscript(status: "轉錄中…", labelled: false)
-        coreQueue.async {
-            do {
-                let text = try Core.stopASR()
-                DispatchQueue.main.async { self.deliver(text) }
-            } catch {
-                DispatchQueue.main.async { self.hud.show(text: "\(error)") }
-            }
+        endSession(status: "轉錄中…", labelled: false) { raw in
+            self.deliver(raw)
         }
     }
 
     // MARK: - Meeting (long recording -> saved transcript + best-effort summary)
 
     private func startMeeting() {
-        hud.allowShowingAgain()
-        guard AudioCapture.microphoneAuthorized() else {
-            AudioCapture.requestMicrophone { granted in
-                DispatchQueue.main.async {
-                    self.hud.flash(granted
-                        ? "已授權麥克風，再按一次開始會議"
-                        : "麥克風權限被拒絕 (系統設定 > 隱私權 > 麥克風)", seconds: 4)
-                }
-            }
-            return
-        }
-        guard !sessionStarting else { return }
-        sessionStarting = true
-        coreQueue.async {
-            do { try Core.startASR() } catch {
-                DispatchQueue.main.async {
-                    self.sessionStarting = false
-                    self.hud.flash("\(error)", seconds: 5)
-                }
-                return
-            }
-            DispatchQueue.main.async {
-                self.sessionStarting = false
-                self.meeting = true
-                self.dictating = false
-                self.meetingWarnings = []
-                self.sessionSegments = []
-                self.sessionStartedAt = Date()
-                self.paused = false
-                self.setRecordingState()
-                self.hud.startRecording()
-                self.hud.begin(title: "會議逐字稿", status: "錄音中…")
-                self.startLiveCount()
-                self.startSilenceWatch()
-                let cap = AudioCapture(
-                    onSamples: { [weak self] samples in self?.feed(samples) },
-                    onLevel: { [weak self] level in self?.noteLevel(level) }
-                )
-                self.capture = cap
-                do { try cap.start() } catch {
-                    self.hud.flash("麥克風錯誤: \(error)")
-                    self.stopLiveCount()
-                    self.meeting = false
-                    self.setRecordingState()
-                    self.capture = nil
-                    self.coreQueue.async { _ = try? Core.stopASR() }
-                    return
-                }
-                self.startSystemTap()
-            }
-        }
+        startSession(meeting: true)
     }
 
-    /// Starts the system-audio tap alongside the microphone, if the user asked
-    /// for it. A failure here is never fatal: the meeting keeps recording the
-    /// microphone, and the reason goes to the window and the log.
-    ///
-    /// The capsule shows one short line -- the long reason names a System
-    /// Settings path and does not fit in 190 pt -- and the full text goes to the
-    /// window and the log. `hud.notice` is used rather than `hud.flash`: it does
-    /// not take the recording away.
-    private func startSystemTap() {
-        guard meetingSystemAudio else { return }
-        guard SystemAudioTap.isSupported else {
-            reportSystemAudioFailure("此 macOS 版本不支援錄製電腦播放的聲音（需要 macOS 14.2 以上），這次只錄麥克風。")
-            return
-        }
-        let tap = SystemAudioTap(onSamples: { [weak self] samples in
-            self?.coreQueue.async { try? Core.submit(samples, speaker: .other) }
-        })
-        do {
-            try tap.start()
-            systemTap = tap
-            ModelInstaller.log("meeting system audio tap started")
-        } catch {
-            reportSystemAudioFailure(error.localizedDescription)
-        }
-    }
-
-    /// Explains a system-audio failure: short line in the capsule, full text in
-    /// the main window and the log, since only one of those is wide enough. The
-    /// capsule line is also remembered so the meeting's own summary can say the
-    /// other side of the call is missing.
+    /// Explains a system-audio failure: short line in the window, full text in the
+    /// main window and the log, since only one of those is wide enough. The window
+    /// line is also remembered so the meeting's own summary can say the other side
+    /// of the call is missing.
     private func reportSystemAudioFailure(_ reason: String) {
         let message = "只錄麥克風：\(reason)"
         ModelInstaller.log("meeting system audio tap failed: \(reason)")
-        meetingWarnings.append("系統音訊未錄到（\(reason)）")
+        if !meetingWarnings.contains(where: { $0.contains(reason) }) {
+            meetingWarnings.append("系統音訊未錄到（\(reason)）")
+        }
         hud.notice("系統音訊未錄到，只錄麥克風", seconds: 5)
         mainWindow?.setTranscript(message)
     }
 
-    /// Applies a change to the "record the Mac's own audio" setting while a
-    /// meeting is already running, so the checkbox is not silently deferred to
-    /// the next meeting.
+    /// Applies a change to the "record the Mac's own audio" setting to the meeting
+    /// that is already running, so the checkbox is not silently deferred to the
+    /// next one. The session owns the tap, so this is one call rather than a
+    /// second copy of the start/stop logic.
     private func applyMeetingSystemAudioChange(_ enabled: Bool) {
-        guard meeting else { return }
-        if enabled {
-            guard systemTap == nil else { return }
-            startSystemTap()
-        } else if let tap = systemTap {
-            tap.stop()
-            systemTap = nil
-            ModelInstaller.log("meeting system audio tap stopped by setting")
-        }
+        guard meeting, let session else { return }
+        session.setSystemAudioEnabled(enabled)
+        ModelInstaller.log("meeting system audio set to \(enabled) for the running meeting")
     }
 
     private func stopMeeting() {
-        capture?.stop()
-        capture = nil
-        systemTap?.stop()
-        systemTap = nil
         meeting = false
-        stopLiveCount()
         stopSilenceWatch()
         paused = false
         setRecordingState()
         hud.show(text: "整理會議中…長會議需要幾分鐘")
-        finishLiveTranscript(status: "錄音結束", labelled: true)
-        // Everything below is read on the main thread and handed to the worker as
-        // values: the summary takes minutes, EventKit and the segment list are
-        // both main-thread state, and reading them from the worker would be a
-        // race that only shows up on a long meeting.
         let eventTitle = CalendarNaming.recentlyEndedTitle()
-        let caveat = meetingCaveat
-        let document = makeDocument()
-        let warnings = meetingWarnings
-        coreQueue.async {
-            do {
-                let transcript = try Core.stopASR()
-                // Nothing was picked up: a saved file would be an empty record
-                // that reads like a successful meeting.
-                let body = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !body.isEmpty else {
-                    DispatchQueue.main.async {
-                        self.hud.flash("沒有錄到聲音，未儲存會議記錄", seconds: 5)
-                        self.mainWindow?.setTranscript("（這次會議沒有錄到聲音，未儲存檔案。）")
-                        self.meetingWarnings = []
-                    }
-                    return
-                }
-                let saved = try self.saveMeeting(
-                    transcript,
-                    caveat: caveat,
-                    eventTitle: eventTitle,
-                    startedAt: document.startedAt
-                )
-                let session = SessionExport(
-                    document: document,
-                    summary: saved.summary,
-                    translation: nil,
-                    caveat: caveat,
-                    eventTitle: eventTitle
-                )
-                DispatchQueue.main.async {
-                    self.lastSession = session
-                    self.mainWindow?.setTranscript(transcript)
-                    if warnings.isEmpty {
-                        self.hud.flash("已儲存會議記錄：\(saved.url.lastPathComponent)", seconds: 4)
-                    } else {
-                        self.hud.flash("已儲存（部分內容未錄到，詳見紀錄）", seconds: 5)
-                    }
-                    self.meetingWarnings = []
-                    self.autoExport(session)
-                }
-            } catch {
-                DispatchQueue.main.async { self.hud.flash("\(error)", seconds: 5) }
+        let startedAt = sessionStartedAt
+        endSession(status: "錄音結束", labelled: true) { transcript in
+            // Read on the main thread and handed to the worker as values: the
+            // summary takes minutes, EventKit and the segment list are both
+            // main-thread state, and reading them from the worker would be a race
+            // that only shows up on a long meeting.
+            let caveat = self.meetingCaveat
+            let document = self.makeDocument()
+            let body = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Nothing was picked up: a saved file would be an empty record that
+            // reads like a successful meeting.
+            guard !body.isEmpty else {
+                self.hud.flash("沒有錄到聲音，未儲存會議記錄", seconds: 5)
+                self.mainWindow?.setTranscript("（這次會議沒有錄到聲音，未儲存檔案。）")
+                self.meetingWarnings = []
+                return
             }
-        }
-    }
-
-    // MARK: - Live capsule readout
-
-    /// Polls the engine for freshly decoded utterances.
-    ///
-    /// Two jobs in one thread hop, for one reason: `takeSegments` is what makes
-    /// the engine segment and decode the audio it has queued, and `peek` is then
-    /// just a join over the utterances that already exist. Polling only `peek`
-    /// (as this used to) shows an empty transcript, because nothing ever asked
-    /// the engine to decode.
-    private func startLiveCount() {
-        stopLiveCount()
-        recordingStart = Date()
-        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            // Stops itself when the session ends; a long meeting must keep
-            // polling, so this is not a duration limit.
-            guard self.dictating || self.meeting else { self.stopLiveCount(); return }
-            if self.peeking { return }
-            self.peeking = true
             self.coreQueue.async {
-                let segments = (try? Core.takeSegments()) ?? []
-                let text = (try? Core.peekASR()) ?? ""
-                DispatchQueue.main.async {
-                    self.peeking = false
-                    self.hud.setCount(text.count)
-                    self.sessionSegments.append(contentsOf: segments)
-                    self.hud.append(segments, showSpeaker: self.meeting)
+                do {
+                    let saved = try self.saveMeeting(
+                        body, caveat: caveat, eventTitle: eventTitle, startedAt: startedAt)
+                    let session = SessionExport(
+                        document: document,
+                        summary: saved.summary,
+                        translation: nil,
+                        caveat: caveat,
+                        eventTitle: eventTitle
+                    )
+                    DispatchQueue.main.async {
+                        self.lastSession = session
+                        self.mainWindow?.setTranscript(body)
+                        if caveat.isEmpty {
+                            self.hud.flash("已儲存會議記錄：\(saved.url.lastPathComponent)", seconds: 4)
+                        } else {
+                            self.hud.flash("已儲存（部分內容未錄到，詳見紀錄）", seconds: 5)
+                        }
+                        self.meetingWarnings = []
+                        self.autoExport(session)
+                    }
+                } catch {
+                    DispatchQueue.main.async { self.hud.flash("\(error)", seconds: 5) }
                 }
             }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        liveCountTimer = timer
     }
 
-    /// `ASR_Stop` decodes the last utterance itself, after the final poll, so one
-    /// more drain is what puts the closing sentence in the window.
+    // MARK: - Ending a session
+
+    /// Ends the running session and hands its raw transcript to `then`, on the
+    /// main thread.
     ///
-    /// `labelled` is passed in rather than read from `meeting`, because the caller
-    /// clears that flag before the session ends.
-    private func finishLiveTranscript(status: String, labelled: Bool) {
-        self.coreQueue.async {
-            let tail = (try? Core.takeSegments()) ?? []
+    /// `finish()` decodes the closing utterance itself, so the tail arrives with
+    /// the result rather than through the live callbacks -- which is why the
+    /// segments it returns are folded into the window here. `append` ignores
+    /// indices it has already rendered, so the overlap is harmless.
+    private func endSession(status: String, labelled: Bool, then: @escaping (String) -> Void) {
+        let session = self.session
+        self.session = nil
+        coreQueue.async {
+            let result = try? session?.finish()
             DispatchQueue.main.async {
-                self.sessionSegments.append(contentsOf: tail)
-                self.hud.append(tail, showSpeaker: labelled)
+                if let result {
+                    let segments = result.segments.map(Self.transcriptSegment)
+                    self.sessionSegments = segments
+                    self.hud.append(segments, showSpeaker: labelled)
+                }
                 self.hud.finish(status: status)
+                then(result?.raw ?? "")
             }
         }
-    }
-
-    private func stopLiveCount() {
-        liveCountTimer?.invalidate()
-        liveCountTimer = nil
     }
 
     /// The capsule's stop button: end whichever kind of recording is running.
@@ -953,15 +872,16 @@ final class AppController {
         let dir = meetingsDirectory()
         // The recognizer and the model both drift into Simplified; the file is
         // for a Taiwanese reader, so normalize once here rather than in each pass.
-        let traditional = toTraditional(transcript)
+        let traditional = VoiceText.toTraditional(transcript)
         // Summary is optional: a long transcript spawns several worker passes,
         // each of which reloads the model. Failure just means no shell to fill.
         // It is computed before the file is written because it is also the name
         // when no calendar event covers the recording.
         var summary = ""
         if !traditional.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           let answer = try? Core.summarize(traditional), !answer.isEmpty {
-            summary = toTraditional(answer)
+           let engine,
+           let answer = try? engine.summarize(traditional), !answer.isEmpty {
+            summary = VoiceText.toTraditional(answer)
         }
         let base = Naming.stem(
             title: Naming.title(summary: summary, eventTitle: eventTitle, fallback: "會議紀錄"),
@@ -1102,6 +1022,10 @@ final class AppController {
     private func deliver(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         lastRawTranscript = trimmed
+        // The words, not just the count: whether a bad result came from the
+        // recogniser or from the cleanup pass is decided here, and until this line
+        // existed the log could not answer it.
+        ModelInstaller.log("asr: \(Self.preview(trimmed))")
         // Regression self-test: exercise both HUD paths (the editable show that
         // used to crash with doesNotRecognizeSelector, and the auto-paste path)
         // and exit cleanly if the app survives.
@@ -1133,10 +1057,19 @@ final class AppController {
 
     /// Polishes the transcript off the main thread (the LLM worker blocks for
     /// seconds while it loads the model), then inserts it.
+    ///
+    /// A dictation that is an instruction about the previous result is neither
+    /// polished nor pasted as new text: it is applied to that result and replaces
+    /// it. Catching it here means the wasted model pass is skipped too.
     private func present(_ trimmed: String) {
-        // Normalise Chinese to Traditional up front: SenseVoice emits Simplified,
-        // and the LLM otherwise just mirrors whatever script it is given.
-        let text = toTraditional(trimmed)
+        // Normalise Chinese to Traditional up front: the speech recogniser emits
+        // Simplified, and the LLM otherwise just mirrors whatever script it is
+        // given.
+        let text = VoiceText.toTraditional(trimmed)
+        if let previous = lastDelivery, !previous.isEmpty, isVoiceEditInstruction(text) {
+            applyEdit(text, to: previous)
+            return
+        }
         guard polishEnabled else {
             finish(text)
             return
@@ -1146,6 +1079,44 @@ final class AppController {
         coreQueue.async {
             let polished = self.polish(text)
             DispatchQueue.main.async { self.finish(polished) }
+        }
+    }
+
+    /// Applies a spoken edit instruction to the text this app delivered last, and
+    /// puts the result where that text is.
+    ///
+    /// Replacing means finding text that is no longer ours, so it goes through
+    /// `TextInjector.replaceLastInsertion`: the exact string this app pasted,
+    /// located at or before the caret, is selected and pasted over. When that
+    /// cannot be proven -- a field that does not expose its text, an insertion the
+    /// user has edited since -- the result stays on the clipboard with a line
+    /// saying so. Appending an edit next to the text it corrects would be worse
+    /// than not pasting it.
+    private func applyEdit(_ instruction: String, to previous: String) {
+        ModelInstaller.log("voice edit: instruction \(instruction.count) chars, text \(previous.count) chars")
+        hud.show(text: "套用編輯中…")
+        let config = passConfig()
+        coreQueue.async {
+            guard let edited = applyVoiceEdit(instruction, to: previous, config: config) else {
+                DispatchQueue.main.async { self.hud.flash("編輯沒有成功，原文未變更", seconds: 5) }
+                return
+            }
+            DispatchQueue.main.async {
+                // The edited line becomes the previous result immediately, so an
+                // instruction dictated right after this one edits the new text.
+                self.lastDelivery = edited
+                self.mainWindow?.setTranscript(edited)
+                self.recordHistory(edited)
+                self.rememberDictation(edited)
+                switch TextInjector.replaceLastInsertion(expected: previous, with: edited) {
+                case .pasted:
+                    ModelInstaller.log("voice edit: replaced \(previous.count)->\(edited.count) chars")
+                    self.hud.showResult(edited)
+                case let .needsPermission(reason), let .copiedOnly(reason):
+                    ModelInstaller.log("voice edit: result left on the clipboard (\(reason))")
+                    self.hud.show(text: "\(edited)\n(\(reason))", mode: .display)
+                }
+            }
         }
     }
 
@@ -1184,6 +1155,10 @@ final class AppController {
             hud.flash("內容為空，已忽略")
             return
         }
+        // Remembered before the paste, and in every outcome: a later edit
+        // instruction is about this text, and the text counts as delivered even
+        // when the user has to paste it themselves.
+        lastDelivery = trimmed
         switch TextInjector.insert(trimmed) {
         case .pasted:
             ModelInstaller.log("insert: pasted \(trimmed.count) chars")
@@ -1252,22 +1227,13 @@ final class AppController {
     /// safety guard prevents it from silently dropping, inventing, or translating content.
     private func polish(_ raw: String) -> String {
         // The whole chain lives in VoiceInputKit so the app and the command-line
-        // tool cannot drift apart: keyword narrowing, the spoken-edit hint, the
-        // sanity guard and the model fallback are all one implementation there.
-        let config = VoiceInputConfig(
-            // Only used by the kit's own model-existence checks; the core has
-            // already been initialised with the app's real path.
-            modelsDirectory: VoiceInputConfig.defaultModelsDirectory(),
-            keywords: keywords.all,
-            refineStages: Self.refineStagesOverride(),
-            translateTarget: translateTarget,
-            polishEnabled: polishEnabled
-        )
+        // tool cannot drift apart: the sanity guard, the model fallback, the
+        // translation pass and the spoken-edit prompt are one implementation there.
         let before = Date()
-        let result = refineTranscript(raw, config: config)
+        let result = refineTranscript(raw, config: passConfig())
         // The engine owns the decision; the app only records what came out of it,
         // which is what the diagnosis in ova.log reads.
-        let unchanged = result == toTraditional(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        let unchanged = result == VoiceText.toTraditional(raw.trimmingCharacters(in: .whitespacesAndNewlines))
         ModelInstaller.log(
             "refine \(unchanged ? "kept raw" : "applied"): \(raw.count)->\(result.count) chars"
                 + ", \(Int(Date().timeIntervalSince(before) * 1000)) ms"
@@ -1275,29 +1241,20 @@ final class AppController {
         return result
     }
 
-    /// The raw transcript, tidied just enough to paste. Used whenever the model's
-    /// answer is thrown away, so a rejected refine still pastes Traditional
-    /// Chinese with one consistent bullet style instead of whatever the speech
-    /// recogniser happened to emit.
-    private func fallback(_ raw: String) -> String {
-        normalizeOutput(toTraditional(raw.trimmingCharacters(in: .whitespacesAndNewlines)))
-    }
-
-    /// Housekeeping on the model's text before it is pasted: one newline style,
-    /// plain "• " bullets instead of Markdown dashes or asterisks (the text goes
-    /// into any app, so it must not depend on a Markdown renderer), and no bold
-    /// markers.
-    private func normalizeOutput(_ text: String) -> String {
-        var lines: [String] = []
-        for line in text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n") {
-            var trimmed = line.trimmingCharacters(in: .whitespaces)
-            for marker in ["- ", "* ", "・", "· ", "•"] where trimmed.hasPrefix(marker) {
-                trimmed = "• " + trimmed.dropFirst(marker.count).trimmingCharacters(in: .whitespaces)
-                break
-            }
-            lines.append(trimmed)
-        }
-        return lines.joined(separator: "\n").replacingOccurrences(of: "**", with: "")
+    /// The kit's view of the app's settings, for a pass the app drives itself
+    /// (refine, translate, spoken edit). The models directory is only used by the
+    /// kit's own model-existence checks; `prepare()` already pointed the core at
+    /// the real one, and the LLM choice reaches the worker through the process
+    /// environment it inherits.
+    private func passConfig() -> VoiceInputConfig {
+        VoiceInputConfig(
+            modelsDirectory: VoiceInputConfig.defaultModelsDirectory(),
+            keywords: keywords.all,
+            refineStages: Self.refineStagesOverride(),
+            translateTarget: translateTarget,
+            llmModel: LLMSelection.currentFileName,
+            polishEnabled: polishEnabled
+        )
     }
 
     /// How many model passes to ask the engine for. 0 means "decide by length";
@@ -1311,144 +1268,38 @@ final class AppController {
         }
     }
 
-    /// Label for the log line only; the engine owns the actual rule.
-    private func description(of stages: UInt32) -> String {
-        switch stages {
-        case 1: return "single pass (forced)"
-        case 2: return "two-stage (forced)"
-        default: return "single pass (default)"
-        }
-    }
-
-    /// Guards against the two ways a small model betrays us: answering the
-    /// transcript instead of cleaning it (empty output, meta phrasing, a
-    /// different language), and inventing content that was never said.
+    /// One-line excerpt for the log.
     ///
-    /// Deliberately permissive about DELETION. Condensing away filler,
-    /// repetition and whole redundant clauses is the entire point of this
-    /// feature, and the old length-ratio floor was rejecting exactly that --
-    /// three ordinary dictations in a row came back as raw transcripts.
-    private func sanityCheck(_ refined: String, comparedTo raw: String) -> (ok: Bool, reason: String) {
-        guard !refined.isEmpty else { return (false, "empty output") }
-
-        let rawLen = max(raw.count, 1)
-        let refinedLen = refined.count
-        if refinedLen < Int(Double(rawLen) * 0.15) {
-            return (false, "far too short: \(refinedLen)/\(rawLen) chars")
-        }
-        if refinedLen > Int(Double(rawLen) * 2.0) {
-            return (false, "far too long: \(refinedLen)/\(rawLen) chars")
-        }
-        for prefix in ["以下是", "很抱歉", "抱歉", "對不起", "總結：", "原文：", "Here is", "Sure,"] where refined.hasPrefix(prefix) {
-            return (false, "meta phrasing: \(prefix)")
-        }
-        if let leaked = leakedInstruction(refined, raw: raw) {
-            return (false, "echoed the instructions: \(leaked)")
-        }
-
-        if raw.containsCJK {
-            if !refined.containsCJK {
-                // Losing the Chinese is only legitimate when the dictation asked
-                // for another language; the refine prompt is told to honour that
-                // request and drop the instruction. Without this, "整理成英文"
-                // produced a correct English line that the guard then threw away.
-                guard raw.namesAnotherLanguage else {
-                    return (false, "no Chinese left in the output")
-                }
-                guard refined.containsLatinLetter else {
-                    return (false, "asked for another language but wrote none")
-                }
-                return (true, "ok")
-            }
-            let rawCJK = Set(raw.unicodeScalars.filter(\.isCJK))
-            if !rawCJK.isEmpty {
-                let refinedSet = Set(refined.unicodeScalars)
-                let kept = rawCJK.filter { refinedSet.contains($0) }.count
-                let ratio = Double(kept) / Double(rawCJK.count)
-                // Condensing to ~30% of the original length is normal, and the
-                // legitimate worst case measured 0.26 -- so 0.25 was rejecting
-                // good answers by a hair. This only has to catch the model
-                // rewriting the draft into something else entirely.
-                if ratio < 0.18 {
-                    return (false, "only kept \(Int(ratio * 100))% of the words used")
-                }
-            }
-        } else if raw.containsLatinLetter {
-            // A non-Chinese transcript must not be translated away.
-            guard refined.containsLatinLetter else { return (false, "translated away") }
-        }
-        return (true, "ok")
-    }
-
-    /// Distinctive phrases from the refine instructions in `core_engine/src/llm.rs`
-    /// (`REFINE_SYSTEM`). If the answer repeats one of these and the user never
-    /// said it, the model answered US instead of cleaning the draft -- which was
-    /// observed when the draft itself was about writing prompts. The raw check
-    /// keeps a legitimate dictation about those rules from being rejected.
-    private static let instructionPhrases = [
-        "不要摘要", "不要漏掉任何一件事", "重複講的同一件事只留一次", "刪掉口頭禪",
-        "多餘的字", "照原樣保留", "問句保持問句", "預設用繁體中文輸出",
-        "把使用者的口語改寫成通順的書面文字",
-    ]
-
-    /// Returns the leaked phrase, or nil when the answer looks like a real edit.
-    private func leakedInstruction(_ refined: String, raw: String) -> String? {
-        for phrase in Self.instructionPhrases where refined.contains(phrase) && !raw.contains(phrase) {
-            return phrase
-        }
-        return nil
-    }
-
-    /// One-line excerpt for the log so a rejection can be diagnosed later.
-    private func preview(_ text: String) -> String {
+    /// The transcript itself is logged rather than only its length: "the output
+    /// does not match what I said" is decided at exactly this point, and without
+    /// the words there is no way to tell a recognition failure from a cleanup one
+    /// after the fact.
+    private static func preview(_ text: String) -> String {
         let flat = text.replacingOccurrences(of: "\n", with: "⏎")
         return flat.count <= 160 ? flat : String(flat.prefix(160)) + "…"
     }
 
-    /// Converts Simplified Chinese to Traditional using macOS's built-in ICU
-    /// transform. Deterministic and offline, so the LLM never has to do it.
-    /// A no-op for text without Han characters (e.g. English).
-    private func toTraditional(_ text: String) -> String {
-        let mutable = NSMutableString(string: text) as CFMutableString
-        CFStringTransform(mutable, nil, "Hans-Hant" as CFString, false)
-        return mutable as String
-    }
-
-    /// Removes a leading "潤飾：" / "Output:"-style label the small model may echo
-    /// from the prompt examples.
-    private func stripLabel(_ text: String) -> String {
-        for label in ["整理：", "整理:", "潤飾：", "潤飾:", "草稿：", "草稿:", "輸出：", "Output:", "Polished:",
-                      "翻譯：", "翻譯:", "Translation:", "英文：", "中文："] {
-            if text.hasPrefix(label) {
-                return String(text.dropFirst(label.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-        return text
-    }
-
     // MARK: - Test-only WAV path
 
-    /// Feeds a 16 kHz mono WAV through the same ASR path the microphone uses,
-    /// then delivers the transcript. Enabled by the OVC_SELFTEST_WAV env var.
+    /// Feeds a WAV through the same pipeline a recording uses, then delivers the
+    /// transcript. Enabled by the OVC_SELFTEST_WAV env var.
+    ///
+    /// The engine's config says `polishEnabled: false`, so a plain run stops at the
+    /// transcript; `OVC_SELFTEST_POLISH` asks for the whole pipeline, which
+    /// `deliver` then runs through `present()` like any dictation.
     private func runSelfTest(wavPath: String) {
         ModelInstaller.log("selftest: wav=\(wavPath)")
         hud.show(text: "自我測試中…")
         coreQueue.async {
             do {
                 let dir = try Self.modelsDirectory { ModelInstaller.log($0) }
-                try Core.initialize(modelsDir: dir.path)
-                try Core.loadASR()
-                let samples = try SelfTest.readWav(URL(fileURLWithPath: wavPath))
-                try Core.startASR()
-                let chunk = 16_000
-                var i = 0
-                while i < samples.count {
-                    let end = min(i + chunk, samples.count)
-                    try Core.submit(Array(samples[i..<end]))
-                    i = end
+                let engine = try VoiceInputEngine(config: Self.engineConfig(modelsDir: dir))
+                try engine.prepare()
+                let result = try engine.transcribe(fileAt: URL(fileURLWithPath: wavPath))
+                DispatchQueue.main.async {
+                    self.engine = engine
+                    self.deliver(result.raw)
                 }
-                let text = try Core.stopASR()
-                DispatchQueue.main.async { self.deliver(text) }
             } catch {
                 ModelInstaller.log("selftest failed: \(error)")
                 exit(5)
@@ -1480,40 +1331,6 @@ final class AppController {
             .appendingPathComponent("OfflineVoiceAssistant/meetings", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
-    }
-}
-
-private extension Unicode.Scalar {
-    var isCJK: Bool {
-        (0x4E00...0x9FFF).contains(Int(value)) || (0x3400...0x4DBF).contains(Int(value))
-    }
-}
-
-private extension String {
-    var containsCJK: Bool { unicodeScalars.contains { $0.isCJK } }
-
-    var containsLatinLetter: Bool {
-        unicodeScalars.contains {
-            ($0.value >= 65 && $0.value <= 90) || ($0.value >= 97 && $0.value <= 122)
-        }
-    }
-
-    /// True when the speaker named a language to answer in. Used only to let a
-    /// non-Chinese result through `sanityCheck`: a Chinese dictation that comes
-    /// back without a single Chinese character is a bug *unless* it asked for
-    /// one, and asking is the one thing the model is allowed to obey.
-    ///
-    /// Deliberately a short list of language names rather than a parser: a false
-    /// positive costs one unchecked line ("客戶要英文版合約" still answers in
-    /// Chinese, because the model was told the default is 繁中), while a false
-    /// negative throws away a correct English answer.
-    var namesAnotherLanguage: Bool {
-        let needles = [
-            "英文", "英語", "英语", "日文", "日語", "日语", "韓文", "韓語", "韩文",
-            "法文", "德文", "西班牙文", "義大利文", "越南文", "泰文",
-            "English", "Japanese", "Korean", "Spanish", "French", "German",
-        ]
-        return needles.contains { localizedCaseInsensitiveContains($0) }
     }
 }
 

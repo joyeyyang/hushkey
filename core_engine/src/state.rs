@@ -123,31 +123,58 @@ pub fn load_asr() -> Result<()> {
         .models_dir
         .clone()
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
-    // Dolphin first: 104 MB (99 MB of weights), 40 languages and 22 Chinese
-    // dialects including Minnan, which SenseVoice cannot do at all. On identical
-    // audio it decoded a 5.6 s clip in 0.141 s (RTF 0.025) with a 299 MB peak RSS,
-    // against SenseVoice's 0.190 s and 452 MB -- smaller, faster, and broader.
+    // SenseVoice Small int8 first, which is the model this install was tuned on.
     //
-    // SenseVoice stays as the fallback: an install that predates this choice has
-    // asr/model.int8.onnx but no asr/dolphin/, and picking a model the user does
-    // not have would break dictation on upgrade.
+    // Dolphin base int8 was the default for part of 2026-10-25 because it is
+    // smaller and faster (99 MB vs 228 MB, 0.141 s vs 0.190 s on one clip), and
+    // that measurement was the whole case for it: speed, memory and language
+    // coverage. It is not a better transcriber of the audio this app actually
+    // receives. Real dictations after it became the default came back incoherent
+    // -- "说费三个。不敢干母亲一个专门的行为", "手がちょっと" (the 40-language CTC
+    // drifting into Japanese) -- while the same speaker's recordings from the
+    // previous weeks, all SenseVoice, were readable. On clean synthesised speech
+    // the two are comparable, so there is no accuracy to be bought back by the
+    // smaller model, and the typo Dolphin made there ("時程" -> "時乘") is not one
+    // SenseVoice avoided either.
+    //
+    // Dolphin stays installed and reachable via `OVC_ASR_MODEL=dolphin` so the
+    // comparison can be re-run on real recordings; an install that only has
+    // Dolphin still dictates.
+    let override_choice = std::env::var("OVC_ASR_MODEL").unwrap_or_default().to_lowercase();
     let dolphin_model = dir.join("asr/dolphin/model.int8.onnx");
     let dolphin_tokens = dir.join("asr/dolphin/tokens.txt");
     let sense_int8 = dir.join("asr/model.int8.onnx");
     let sense_fp32 = dir.join("asr/model.onnx");
     let sense_tokens = dir.join("asr/tokens.txt");
+    let have_dolphin = dolphin_model.exists() && dolphin_tokens.exists();
+    let forced_dolphin = override_choice.contains("dolphin");
 
-    let (model, tokens, kind) = if dolphin_model.exists() && dolphin_tokens.exists() {
+    let (model, tokens, kind) = if forced_dolphin && have_dolphin {
         (dolphin_model, dolphin_tokens, crate::asr::AsrKind::Dolphin)
     } else if sense_int8.exists() {
         (sense_int8, sense_tokens, crate::asr::AsrKind::SenseVoice)
-    } else {
+    } else if sense_fp32.exists() {
         (sense_fp32, sense_tokens, crate::asr::AsrKind::SenseVoice)
+    } else {
+        (dolphin_model, dolphin_tokens, crate::asr::AsrKind::Dolphin)
     };
 
+    // The language hint. SenseVoice identifies the language per utterance when
+    // this is "auto", and it has nothing to identify from on a short, accented,
+    // technical sentence -- a Chinese dictation came back carrying a Japanese
+    // fragment ("手がちょっと"). "zh" is the better prior for the person this app
+    // was built for, who dictates Chinese with English terms and numbers in it;
+    // `OVC_ASR_LANGUAGE=auto|en|ja|ko|yue` says otherwise. Dolphin ignores it.
+    let language = {
+        let requested = std::env::var("OVC_ASR_LANGUAGE").unwrap_or_default().trim().to_lowercase();
+        match requested.as_str() {
+            "auto" | "en" | "ja" | "ko" | "yue" | "zh" => requested,
+            _ => "zh".to_string(),
+        }
+    };
     let bytes = file_len(&model)? + file_len(&tokens)?;
     let threads = std::thread::available_parallelism().map(|n| n.get().min(4)).unwrap_or(2) as i32;
-    let rec = Recognizer::new(&model, &tokens, threads, kind)?;
+    let rec = Recognizer::new(&model, &tokens, threads, kind, &language)?;
     s.asr = Some(rec);
     s.asr_model_bytes = bytes;
     Ok(())
