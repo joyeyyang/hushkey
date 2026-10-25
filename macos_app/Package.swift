@@ -11,7 +11,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "OfflineVoiceAssistant",
-            dependencies: ["COfflineVoiceCore"],
+            // The app now consumes the packaged voice-input pipeline: the cleanup
+            // chain (keyword narrowing, spoken-edit hint, sanity guard, fallback)
+            // has one implementation, in VoiceInputKit, and the command-line tool
+            // uses the same one.
+            dependencies: ["COfflineVoiceCore", "VoiceInputKit"],
             path: "Sources/OfflineVoiceAssistant",
             linkerSettings: [
                 .unsafeFlags([

@@ -210,7 +210,8 @@ public final class VoiceInputSession {
         }
     }
 
-    // MARK: - Private
+
+// MARK: - Private
 
     /// The one place microphone audio enters the engine. Pause gates this and
     /// nothing else, which is what keeps the ASR session open across a pause.
@@ -254,4 +255,20 @@ public final class VoiceInputSession {
             DispatchQueue.main.async { [weak self] in self?.onPartial?(partial) }
         }
     }
+}
+
+/// The cleanup chain, for a caller that already has text.
+///
+/// Exactly what `VoiceInputEngine.transcribe(fileAt:)` runs between the
+/// transcript and the result: Traditional-Chinese normalisation, the refine pass
+/// with the engine's own keyword narrowing and spoken-edit detection, the sanity
+/// guard, and the optional translation. It is public so a host that owns its own
+/// capture and ASR — the app does — still uses one implementation of the
+/// cleanup rather than a second copy that drifts from this one.
+///
+/// Never throws and never returns nothing: a failure falls back to the
+/// script-normalised transcript, because losing a dictation to a bad generation
+/// is worse than pasting a rough one.
+public func refineTranscript(_ raw: String, config: VoiceInputConfig) -> String {
+Refiner.refine(raw: raw, config: config)
 }

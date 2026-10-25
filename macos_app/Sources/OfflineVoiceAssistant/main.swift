@@ -1,3 +1,4 @@
+import VoiceInputKit
 import AppKit
 import Foundation
 import UniformTypeIdentifiers
@@ -1143,7 +1144,7 @@ final class AppController {
         let explicit = translateTarget == "en" || translateTarget == "zh"
         hud.show(text: explicit ? "整理並翻譯中…" : "AI 整理中…")
         coreQueue.async {
-            let polished = self.translateIfNeeded(self.polish(text))
+            let polished = self.polish(text)
             DispatchQueue.main.async { self.finish(polished) }
         }
     }
@@ -1155,27 +1156,6 @@ final class AppController {
     /// the refine prompt is the one that decides the output language. A translation that fails, or that comes back as
     /// a note instead of a translation, falls back to the cleaned text so the
     /// dictation is never lost.
-    private func translateIfNeeded(_ text: String) -> String {
-        let target = translateTarget
-        guard target == "en" || target == "zh" else { return text }
-        guard let raw = try? Core.translate(text, to: target) else {
-            ModelInstaller.log("translate unavailable; keeping the cleaned text")
-            return text
-        }
-        let translated = normalizeOutput(toTraditional(stripLabel(raw.trimmingCharacters(in: .whitespacesAndNewlines))))
-        // The model sometimes answers with an explanation instead of a
-        // translation; the target script must actually be present, and a
-        // translation that is five times the original is a note, not a line.
-        let hasLatin = translated.unicodeScalars.contains { (65...90).contains($0.value) || (97...122).contains($0.value) }
-        let plausible = (target == "en") ? hasLatin : translated.containsCJK
-        guard !translated.isEmpty, plausible, translated.count <= text.count * 5 else {
-            ModelInstaller.log("translate output looked wrong; keeping the cleaned text")
-            return text
-        }
-        ModelInstaller.log("translated to \(target): \(preview(translated))")
-        return translated
-    }
-
     /// Shows the result in the window and either inserts it immediately or (if
     /// the user asked to confirm first) shows an editable HUD and waits for Enter.
     private func finish(_ polished: String) {
@@ -1271,21 +1251,28 @@ final class AppController {
     /// output is empty or obviously corrupt. The bundled model is small, so this
     /// safety guard prevents it from silently dropping, inventing, or translating content.
     private func polish(_ raw: String) -> String {
-        let hint = keywords.hintString()
-        let stages = Self.refineStagesOverride()
-        guard let refined = try? Core.refineWithKeywords(raw, keywordsHint: hint, stages: stages) else {
-            ModelInstaller.log("refine unavailable; using raw transcript")
-            return fallback(raw)
-        }
-        // Convert again after the model: it may echo Simplified even when asked not to.
-        let candidate = normalizeOutput(toTraditional(stripLabel(refined.trimmingCharacters(in: .whitespacesAndNewlines))))
-        let verdict = sanityCheck(candidate, comparedTo: raw)
-        guard verdict.ok else {
-            ModelInstaller.log("refine rejected (\(verdict.reason)) | raw=\(preview(raw)) | candidate=\(preview(candidate))")
-            return fallback(raw)
-        }
-        ModelInstaller.log("refine kept: \(raw.count)->\(candidate.count) chars, \(description(of: stages))")
-        return candidate
+        // The whole chain lives in VoiceInputKit so the app and the command-line
+        // tool cannot drift apart: keyword narrowing, the spoken-edit hint, the
+        // sanity guard and the model fallback are all one implementation there.
+        let config = VoiceInputConfig(
+            // Only used by the kit's own model-existence checks; the core has
+            // already been initialised with the app's real path.
+            modelsDirectory: VoiceInputConfig.defaultModelsDirectory(),
+            keywords: keywords.all,
+            refineStages: Self.refineStagesOverride(),
+            translateTarget: translateTarget,
+            polishEnabled: polishEnabled
+        )
+        let before = Date()
+        let result = refineTranscript(raw, config: config)
+        // The engine owns the decision; the app only records what came out of it,
+        // which is what the diagnosis in ova.log reads.
+        let unchanged = result == toTraditional(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        ModelInstaller.log(
+            "refine \(unchanged ? "kept raw" : "applied"): \(raw.count)->\(result.count) chars"
+                + ", \(Int(Date().timeIntervalSince(before) * 1000)) ms"
+        )
+        return result
     }
 
     /// The raw transcript, tidied just enough to paste. Used whenever the model's

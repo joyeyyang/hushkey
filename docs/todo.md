@@ -216,7 +216,11 @@ sha256 `edc6015cb15694c27be7d1d33f1bc015db9a358ff51ed524628c027504907ba9`。
 `VoiceInputSession`（即時錄音）、`relevantTerms(for:in:)`、`editInstructions(in:config:)`、
 `CursorInserter`（貼到游標）。另有命令列工具 `voiceinput`：
 `--transcribe`／`--raw`／`--selftest`／`--warm`／`--keyword`／`--worker`。
-App 尚未改成呼叫這個模組（現行 App 走同一組 C ABI，行為一致），遷移是下一步。
+**App 已經改用這個模組**：`OfflineVoiceAssistant` target 依賴 `VoiceInputKit`，
+`AppController.polish()` 改成呼叫 `refineTranscript(_:config:)`，App 自己那份
+「整理＋檢查＋翻譯」實作刪掉了（`translateIfNeeded` 移除），所以整理鏈只有一份實作，
+App 與命令列工具不可能各自漂移。會議模式的系統音訊擷取還沒進 Kit（Kit 目前只有麥克風），
+所以會議那段仍走原本的路。
 
 ### 錄音視窗合併（使用者要求「麥克風視窗與文字視窗合併」）
 `HUDWindow` 改名 `DictationWindow`，`TranscriptWindow.swift` 刪除。現在語音輸入期間只有
