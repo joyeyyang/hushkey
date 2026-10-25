@@ -173,17 +173,17 @@
       "summary_zh": "舊版模型：回答快，整理品質比 Qwen3.5 差。"
     },
     {
-      "id": "rag-embeddinggemma-300m",
+      "id": "rag-embeddinggemma-300m-q4",
       "role": "RAG",
-      "source_repo": "google/embeddinggemma-300m",
-      "source_url": "https://huggingface.co/google/embeddinggemma-300m/resolve/main/model.safetensors",
-      "file": "rag/embeddinggemma-300m.safetensors",
-      "bytes": 1211486072,
-      "sha256": "PENDING",
-      "license": "Gemma Terms of Use (not Apache-2.0); accept terms on HF before download",
-      "note": "Unquantized 1.2 GB safetensors. Excluded from download and from the 700 MB budget until a quantized artifact is produced and verified.",
-      "download": false,
-      "summary_zh": "RAG 用的向量模型，還沒有可驗證的檔案，暫不提供下載。"
+      "source_repo": "unsloth/embeddinggemma-300m-GGUF (QAT Q4_0 build of google/embeddinggemma-300m)",
+      "source_url": "https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300m-Q4_0.gguf",
+      "file": "embedding/embeddinggemma-300m-Q4_0.gguf",
+      "bytes": 277852192,
+      "sha256": "edc6015cb15694c27be7d1d33f1bc015db9a358ff51ed524628c027504907ba9",
+      "license": "Gemma Terms of Use (not Apache-2.0)",
+      "note": "QAT (quantization-aware trained) Q4_0, 265 MiB. Weights are INT4 on purpose: MTEB multilingual mean is 60.62 against Q8_0's 60.93, and this file is the same artifact as the official ggml-org embeddinggemma-300M-qat-q4_0-GGUF. Architecture gemma-embedding, 768-dim, 2048 ctx, MEAN pooling (read from the GGUF metadata). The upstream GGUF omits the Sentence-Transformers dense modules, which is fine here: terms and transcripts are embedded by this same file, so the cosine ranking is self-consistent.",
+      "download": true,
+      "summary_zh": "關鍵字檢索與口頭指令篩選用的向量模型（INT4／QAT Q4_0，265 MiB）。它會先把你的關鍵字詞表排序，只把這次真的講到的詞交給整理模型，也會找出「這句話是在叫我刪掉或改掉什麼」的片段。"
     }
   ]
 }

@@ -6,6 +6,7 @@
 
 mod asr;
 pub mod chunking;
+pub mod embed;
 mod error;
 pub mod llm;
 mod memory;
@@ -18,6 +19,10 @@ use std::path::PathBuf;
 
 use error::{clear_last_error, last_error, set_last_error, EngineError, ErrorCode};
 pub use memory::OvcMemoryUsage;
+
+pub use embed::{
+    cosine as embed_cosine, embed_documents, embed_queries, screen as embed_screen, ScreenResult,
+};
 
 pub use llm::{
     refine as llm_refine, refine_stages as llm_refine_stages, refine_two_stage as llm_refine_two_stage,
@@ -363,6 +368,75 @@ pub unsafe extern "C" fn LLM_Translate(text: *const c_char, target: *const c_cha
         let lang = if target.is_null() { "zh" } else { read_str(target, "target")? };
         let translated = state::translate_text(input, lang)?;
         write_out(out, &translated)
+    })())
+}
+
+/// Rank the caller's terms against `text` with the retrieval model.
+///
+/// `terms` is the list joined by newlines. The result is the relevant terms, best
+/// first, joined by newlines — or an empty string when the retrieval model is not
+/// installed, which is a normal state and NOT an error: the caller then keeps its
+/// full term list, exactly as it did before this existed.
+///
+/// # Safety
+/// Pointers must follow the header contract.
+#[no_mangle]
+pub unsafe extern "C" fn LLM_RelevantTerms(
+    text: *const c_char,
+    terms: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    status((|| {
+        let input = read_str(text, "text")?;
+        let raw = if terms.is_null() { "" } else { read_str(terms, "terms")? };
+        let terms: Vec<String> = raw
+            .split('\n')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let ranked = state::relevant_terms(input, &terms)?;
+        write_out(out, &ranked.join("\n"))
+    })())
+}
+
+/// Embed the retrieval model's exemplar set (and the terms passed in, newline
+/// separated) into its cache. Returns the number of vectors computed in *out_count
+/// (0 when the cache was already warm), so a caller can log the one-time cost.
+///
+/// # Safety
+/// Pointers must follow the header contract.
+#[no_mangle]
+pub unsafe extern "C" fn LLM_WarmRetrieval(
+    terms: *const c_char,
+    out_count: *mut i32,
+) -> c_int {
+    status((|| {
+        let raw = if terms.is_null() { "" } else { read_str(terms, "terms")? };
+        let terms: Vec<String> = raw
+            .split('\n')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+        let computed = state::warm_retrieval(&terms)?;
+        if !out_count.is_null() {
+            *out_count = computed as i32;
+        }
+        Ok(())
+    })())
+}
+
+/// The clauses of `text` that read as an instruction about the text itself
+/// ("把前面那句刪掉"), joined by newlines. Empty when there are none, or when the
+/// retrieval model is not installed.
+///
+/// # Safety
+/// Pointers must follow the header contract.
+#[no_mangle]
+pub unsafe extern "C" fn LLM_EditClauses(text: *const c_char, out: *mut *mut c_char) -> c_int {
+    status((|| {
+        let input = read_str(text, "text")?;
+        let clauses = state::edit_clauses(input)?;
+        write_out(out, &clauses.join("\n"))
     })())
 }
 

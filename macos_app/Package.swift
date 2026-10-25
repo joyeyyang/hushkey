@@ -20,5 +20,27 @@ let package = Package(
                 ]),
             ]
         ),
+        .target(
+            name: "VoiceInputKit",
+            dependencies: ["COfflineVoiceCore"],
+            path: "Sources/VoiceInputKit",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L\(Context.packageDirectory)/../core_engine/target/release",
+                    "-loffline_voice_core",
+                ]),
+            ]
+        ),
+        .executableTarget(
+            name: "voiceinput",
+            dependencies: ["VoiceInputKit", "COfflineVoiceCore"],
+            path: "Sources/voiceinput",
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L\(Context.packageDirectory)/../core_engine/target/release",
+                    "-loffline_voice_core",
+                ]),
+            ]
+        ),
     ]
 )

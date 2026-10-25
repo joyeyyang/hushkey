@@ -414,7 +414,10 @@ pub fn refine_text_with_keywords(text: &str, keywords_hint: &str) -> Result<Stri
 /// understand-then-tidy. `OVC_REFINE_STAGES` (1 or 2) overrides the choice so
 /// both shapes can be compared on the same input.
 pub fn refine_text_with_keywords_stages(text: &str, keywords_hint: &str, stages: u32) -> Result<String> {
-    let _ = text;
+    // Narrow the hint to the terms this draft mentions, and tell the model which
+    // clause (if any) asked for a change. Both come from the retrieval model and
+    // both are skipped without it.
+    let keywords_hint = screened_hint(text, keywords_hint);
     let model = llm_model_path()?;
     let stages = match std::env::var("OVC_REFINE_STAGES").ok().and_then(|v| v.trim().parse::<u32>().ok()) {
         Some(forced @ (1 | 2)) => forced,
@@ -424,7 +427,201 @@ pub fn refine_text_with_keywords_stages(text: &str, keywords_hint: &str, stages:
         2 => "refine-two-stage",
         _ => "refine",
     };
-    run_worker(&worker_path()?, task, &model, text, keywords_hint)
+    run_worker(&worker_path()?, task, &model, text, &keywords_hint)
+}
+
+/// Filename of the retrieval model inside `embedding/`.
+const DEFAULT_EMBED_FILE: &str = "embeddinggemma-300m-Q4_0.gguf";
+
+/// How many terms may survive screening, and how similar a term has to be to the
+/// transcript to count as mentioned at all.
+///
+/// The floor is deliberately generous: a term the speaker really said scores well
+/// clear of it, and the cost of keeping one extra term is a slightly longer system
+/// line, while the cost of dropping a name the speaker used is a misspelling the
+/// user then has to fix by hand.
+const EMBED_TOP_K: usize = 12;
+const EMBED_MIN_SCORE: f32 = 0.35;
+/// The instruction gate, measured rather than guessed.
+///
+/// Measured, and the measurement is the honest part of this feature: similarity
+/// between short spoken Chinese clauses is dominated by register and function
+/// words, not by intent. Ordinary speech reached 0.78 against the exemplar set
+/// and a real instruction 0.77, so no single threshold separates the classes.
+///
+/// The gate is therefore "cue word AND similarity": the cue list (see
+/// `embed::EDIT_CUES`) is the decision, and this bar only rejects a cue word used
+/// literally. It is set just above the highest cue-bearing ordinary clause
+/// measured (我不要再等了, 0.597), and deliberately accepts a miss rather than a
+/// false positive -- the refine prompt already obeys an instruction this
+/// screening does NOT name, so a miss costs only a hint, while a false positive
+/// tells the model to delete something the speaker never asked it to delete.
+const EMBED_EDIT_MIN_SCORE: f32 = 0.65;
+
+/// The retrieval model, when it is installed.
+///
+/// `None` is the ordinary "not downloaded" state, not an error. Everything the
+/// screening adds is an improvement on top of a dictation that already works, so
+/// a missing model must leave the old behaviour exactly as it was.
+fn embed_model_path() -> Option<PathBuf> {
+    if std::env::var("OVC_EMBED_DISABLE").map(|v| v == "1").unwrap_or(false) {
+        return None;
+    }
+    let dir = lock().models_dir.clone()?;
+    let chosen = std::env::var("OVC_EMBED_MODEL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && !v.contains('/') && !v.contains(".."))
+        .unwrap_or_else(|| DEFAULT_EMBED_FILE.to_string());
+    let model = dir.join("embedding").join(&chosen);
+    if model.is_file() {
+        Some(model)
+    } else {
+        None
+    }
+}
+
+/// Where the term vectors are cached. Beside the models, because that is the
+/// directory the app already owns and already ignores in git.
+fn embed_cache_path(models_dir: &Path) -> PathBuf {
+    models_dir.join(".cache").join("term-vectors.tsv")
+}
+
+/// Terms from `terms` that `text` actually mentions, best first. Empty when the
+/// retrieval model is not installed, or when nothing scored high enough.
+pub fn relevant_terms(text: &str, terms: &[String]) -> Result<Vec<String>> {
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(model) = embed_model_path() else {
+        return Ok(Vec::new());
+    };
+    let cache = lock().models_dir.clone().map(|d| embed_cache_path(&d));
+    let found = crate::embed::screen(
+        &model,
+        cache.as_deref(),
+        terms,
+        text,
+        EMBED_TOP_K,
+        EMBED_MIN_SCORE,
+        EMBED_EDIT_MIN_SCORE,
+    )?;
+    Ok(found.ranked_terms)
+}
+
+/// Embed the retrieval model's exemplar set (and the caller's terms) into the
+/// cache, off the dictation path.
+///
+/// Returns how many vectors had to be computed: zero means the cache was already
+/// warm. Called from the host at startup so the first dictation does not pay for
+/// two dozen embeddings while the user waits.
+pub fn warm_retrieval(terms: &[String]) -> Result<usize> {
+    let Some(model) = embed_model_path() else {
+        return Ok(0);
+    };
+    let cache = lock().models_dir.clone().map(|d| embed_cache_path(&d));
+    crate::embed::warm(&model, cache.as_deref(), terms)
+}
+
+/// Clauses of `text` that read as an instruction to change the text itself.
+pub fn edit_clauses(text: &str) -> Result<Vec<String>> {
+    let Some(model) = embed_model_path() else {
+        return Ok(Vec::new());
+    };
+    let cache = lock().models_dir.clone().map(|d| embed_cache_path(&d));
+    let found = crate::embed::screen(
+        &model,
+        cache.as_deref(),
+        &[],
+        text,
+        0,
+        EMBED_MIN_SCORE,
+        EMBED_EDIT_MIN_SCORE,
+    )?;
+    Ok(found.edit_clauses)
+}
+
+/// Pull the term list back out of the hint the caller built.
+///
+/// The hint is prose followed by the terms ("…請優先使用以下詞彙…：甲、乙、丙。"),
+/// and the caller owns that wording, so the split is made on the two characters
+/// that carry the structure — the last full-width colon and the 、 between terms —
+/// and the hint is left untouched when they are not both there.
+fn terms_in_hint(hint: &str) -> Option<(String, Vec<String>)> {
+    let colon = hint.rfind('：')?;
+    let (head, tail) = hint.split_at(colon + '：'.len_utf8());
+    let tail = tail.trim().trim_end_matches('。');
+    if tail.is_empty() {
+        return None;
+    }
+    let terms: Vec<String> = tail
+        .split('、')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some((head.to_string(), terms))
+    }
+}
+
+/// Rewrite the caller's keyword hint so the model only sees the terms this draft
+/// actually mentions, and add the clauses that asked for a change.
+///
+/// Both jobs need the same model load, so they are done in one `screen` call, and
+/// any failure falls back to the hint as it arrived: the retrieval model is an
+/// enhancement, and an enhancement that can break a dictation is worse than none.
+fn screened_hint(text: &str, keywords_hint: &str) -> String {
+    let Some((head, terms)) = terms_in_hint(keywords_hint) else {
+        // No structured term list to narrow; still worth naming an instruction.
+        return match edit_clauses(text) {
+            Ok(clauses) if !clauses.is_empty() => format!("{keywords_hint}{}", edit_section(&clauses)),
+            _ => keywords_hint.to_string(),
+        };
+    };
+    let Some(model) = embed_model_path() else {
+        return keywords_hint.to_string();
+    };
+    let cache = lock().models_dir.clone().map(|d| embed_cache_path(&d));
+    let found = match crate::embed::screen(
+        &model,
+        cache.as_deref(),
+        &terms,
+        text,
+        EMBED_TOP_K,
+        EMBED_MIN_SCORE,
+        EMBED_EDIT_MIN_SCORE,
+    ) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("retrieval skipped: {}", e.msg);
+            return keywords_hint.to_string();
+        }
+    };
+    let mut out = if found.ranked_terms.is_empty() {
+        keywords_hint.to_string()
+    } else {
+        format!("{head}{}。", found.ranked_terms.join("、"))
+    };
+    if !found.edit_clauses.is_empty() {
+        out.push_str(&edit_section(&found.edit_clauses));
+    }
+    out
+}
+
+/// The instruction the speaker gave about their own draft, quoted back to the
+/// model.
+///
+/// The screening has already decided these clauses are instructions, so naming
+/// them removes the hardest part of the job from a 2B model: it no longer has to
+/// notice that "把第二點刪掉" is an instruction rather than content.
+fn edit_section(clauses: &[String]) -> String {
+    let quoted: Vec<String> = clauses.iter().map(|c| format!("「{c}」")).collect();
+    format!(
+        "\n【使用者的修改要求（原話，請照做，並讓要求本身從結果中消失）】{}",
+        quoted.join("")
+    )
 }
 
 /// Filename of the LLM inside `llm/`. `OVC_LLM_MODEL` overrides it so another
@@ -1027,6 +1224,15 @@ const SUMMARY_OVERLAP_CHARS: usize = 20;
 /// The worker is installed next to the core library (Contents/Frameworks in the app bundle),
 /// or next to the current executable for development runs.
 fn worker_path() -> Result<PathBuf> {
+    // An explicit path wins, so the engine can be embedded by a caller whose
+    // worker does not sit beside its own executable (a command-line tool, a test
+    // binary, another app). Without it the search below is the whole story.
+    if let Some(explicit) = std::env::var("OVC_LLM_WORKER").ok().filter(|v| !v.trim().is_empty()) {
+        let path = PathBuf::from(explicit.trim());
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
     let exe = std::env::current_exe()
         .map_err(|e| EngineError::new(ErrorCode::Internal, format!("current_exe: {e}")))?;
     let dir = exe.parent().unwrap_or(Path::new("."));

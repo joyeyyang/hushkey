@@ -67,6 +67,24 @@ int32_t ASR_Stop(char **out_text);
 /* Translates text into `target` ("en" or "zh") and writes it to *out_text. */
 int32_t LLM_Translate(const char *text, const char *target, char **out_text);
 
+/* Rank `terms` (newline-separated) against `text` with the retrieval model and
+ * write the relevant ones, best first and newline-separated, to *out_terms.
+ * An empty string is the normal result when nothing is relevant AND when the
+ * retrieval model is not installed -- that is not an error, and the caller keeps
+ * its full term list in that case. */
+int32_t LLM_RelevantTerms(const char *text, const char *terms, char **out_terms);
+
+/* The clauses of `text` that read as an instruction about the text itself
+ * ("把前面那句刪掉"), newline-separated. Empty when there are none, or when the
+ * retrieval model is not installed. */
+int32_t LLM_EditClauses(const char *text, char **out_clauses);
+
+/* Compute the retrieval model's cached vectors now instead of during the first
+ * dictation. `terms` is newline-separated (may be empty). Writes the number of
+ * vectors computed to *out_count (0 = cache already warm) and returns 0 even when
+ * the retrieval model is not installed. */
+int32_t LLM_WarmRetrieval(const char *terms, int32_t *out_count);
+
 /* ---- LLM: implemented via an out-of-process worker (see state.rs).
  *      RAG: declared for the planned API; currently returns OVC_ERR_NOT_IMPLEMENTED. ---- */
 int32_t LLM_Summarize(const char *transcript, char **out_summary);

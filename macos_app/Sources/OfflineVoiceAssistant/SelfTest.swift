@@ -194,27 +194,47 @@ enum SelfTest {
                 }
             }
         }
-        // The floating transcript is a separate window, and it is the surface a
-        // person stares at while talking, so it is reviewed in the same pass.
+        // The floating window is where a recording is watched, and it is the
+        // surface a person stares at while talking, so it is reviewed in the same
+        // pass -- in each of the three shapes the merge produced: the live
+        // controls with the words arriving under them, the confirm-before-insert
+        // card, and the finished line over the same transcript.
+        let dictationSegments = [
+            TranscriptSegment(index: 1, speaker: .me, start: 0, end: 3.2,
+                              text: "那我們先確認一下這週的進度，簡報的初稿你覺得還缺什麼？"),
+            TranscriptSegment(index: 2, speaker: .other, start: 3.4, end: 7.8,
+                              text: "主要是第二段的數字還沒更新，我明天早上補給你。"),
+            TranscriptSegment(index: 3, speaker: .me, start: 8.0, end: 9.6,
+                              text: "好，那週三之前給客戶看。"),
+        ]
         for id in themeIDs {
             let theme = ThemeCatalog.theme(id: id)
-            let window = TranscriptWindow()
+            // One window, re-skinned across the three shots: a fresh one per
+            // shape would install another pair of Escape monitors for nothing.
+            let window = DictationWindow()
             window.applyTheme(theme)
-            window.begin(title: "會議逐字稿 · 10:42", status: "辨識中…")
-            window.append([
-                TranscriptSegment(index: 1, speaker: .me, start: 0, end: 3.2,
-                                  text: "那我們先確認一下這週的進度，簡報的初稿你覺得還缺什麼？"),
-                TranscriptSegment(index: 2, speaker: .other, start: 3.4, end: 7.8,
-                                  text: "主要是第二段的數字還沒更新，我明天早上補給你。"),
-                TranscriptSegment(index: 3, speaker: .me, start: 8.0, end: 9.6,
-                                  text: "好，那週三之前給客戶看。"),
-            ], showSpeaker: true)
-            window.finish(status: "完成 · 9.6 秒")
-            let url = dir.appendingPathComponent("\(theme.id)-transcript.png")
-            if window.snapshot(to: url), let data = try? Data(contentsOf: url), data.count > 3_000 {
-                print("ok \(theme.id) transcript \(data.count)B")
-            } else {
-                failures.append("\(theme.id) transcript")
+            window.snapshotTranscript(
+                to: dir.appendingPathComponent("\(theme.id)-dictation-recording.png"),
+                title: "會議逐字稿 · 10:42",
+                status: "辨識中…",
+                segments: dictationSegments,
+                showSpeaker: true
+            )
+            window.snapshotEdit(
+                to: dir.appendingPathComponent("\(theme.id)-dictation-edit.png"),
+                text: "那我們先確認一下這週的進度，簡報的初稿還缺第二段的數字。"
+            )
+            window.snapshotResult(
+                to: dir.appendingPathComponent("\(theme.id)-dictation-result.png"),
+                text: "下週三上線，其他頁面之後再排。"
+            )
+            for shape in ["dictation-recording", "dictation-edit", "dictation-result"] {
+                let url = dir.appendingPathComponent("\(theme.id)-\(shape).png")
+                if let data = try? Data(contentsOf: url), data.count > 3_000 {
+                    print("ok \(theme.id) \(shape) \(data.count)B")
+                } else {
+                    failures.append("\(theme.id) \(shape)")
+                }
             }
             window.hide()
         }
@@ -237,9 +257,9 @@ enum SelfTest {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         var failures: [String] = []
-        // One capsule, re-skinned: a fresh HUDWindow per palette would install
-        // five global Escape monitors and five panels for no reason.
-        let hud = HUDWindow()
+        // One window, re-skinned: a fresh DictationWindow per palette would
+        // install five pairs of Escape monitors and five panels for no reason.
+        let hud = DictationWindow()
 
         for theme in ThemeCatalog.all {
             let body = contrast(theme.textPrimary, on: theme.background)
@@ -267,7 +287,7 @@ enum SelfTest {
         // The recording capsule in the three states this batch added: live (with
         // the new pause button), paused, and folded to a dot. Rendered offscreen
         // on one palette so the controls can be looked at without recording.
-        hud.applyTheme(ThemeCatalog.theme(id: "paper") ?? ThemeCatalog.all[0])
+        hud.applyTheme(ThemeCatalog.theme(id: "paper"))
         for (name, paused, folded) in [
             ("rec-live", false, false),
             ("rec-paused", true, false),

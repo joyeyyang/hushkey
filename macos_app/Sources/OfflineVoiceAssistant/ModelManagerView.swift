@@ -41,6 +41,9 @@ final class ModelManagerView: NSView {
                     + "新下載的 ASR 要重新啟動 App 才會載入；目前使用中的那份不提供刪除。"),
         Section(role: "LLM", title: "語言模型（LLM）",
                 hint: "按「使用」會記住檔名並設成 OVC_LLM_MODEL，下一次整理逐字稿就換成這個模型。"),
+        Section(role: "RAG", title: "檢索模型（向量）",
+                hint: "關鍵字檢索與口頭指令篩選用的向量模型。不是選項，裝好就會用；"
+                    + "關掉設定裡的「檢索輔助」即可停用，沒有它也能正常聽寫。"),
     ]
 
     private var theme: Theme

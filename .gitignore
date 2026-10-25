@@ -13,3 +13,5 @@ core_engine/vendor/
 models/asr/
 models/llm/
 models/rag/
+models/embedding/
+models/.cache/

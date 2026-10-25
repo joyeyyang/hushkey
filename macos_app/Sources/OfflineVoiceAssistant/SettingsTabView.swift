@@ -17,6 +17,8 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
     var onPolishChange: ((Bool) -> Void)?
     var onConfirmChange: ((Bool) -> Void)?
     var onSystemAudioChange: ((Bool) -> Void)?
+    /// The retrieval (embedding) screening: keyword narrowing + spoken-edit naming.
+    var onRetrievalChange: ((Bool) -> Void)?
     var onExportSettingsChange: ((ExportSettings) -> Void)?
     var onExportNow: (() -> Void)?
     var onQuit: (() -> Void)?
@@ -48,6 +50,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
     private let polishSwitch = NSSwitch(frame: .zero)
     private let confirmSwitch = NSSwitch(frame: .zero)
     private let systemAudioSwitch = NSSwitch(frame: .zero)
+    private let retrievalSwitch = NSSwitch(frame: .zero)
 
     private let exportFormatPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
     private let exportFolderLabel = NSTextField(labelWithString: "")
@@ -142,6 +145,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
         polishSwitch.state = storedBool(defaults, "settings.polish", fallback: true) ? .on : .off
         confirmSwitch.state = storedBool(defaults, "settings.confirmInsert", fallback: false) ? .on : .off
         systemAudioSwitch.state = storedBool(defaults, "settings.meetingSystemAudio", fallback: true) ? .on : .off
+        retrievalSwitch.state = storedBool(defaults, "settings.retrieval", fallback: true) ? .on : .off
 
         let export = ExportSettings.load()
         setFolder(export.folder)
@@ -161,6 +165,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
         polishSwitch.state = .on
         confirmSwitch.state = .off
         systemAudioSwitch.state = .on
+        retrievalSwitch.state = .on
         setFolder("")
         exportFormatPopUp.selectItem(at: ExportFormat.allCases.firstIndex(of: .markdown) ?? 0)
         exportAutoSwitch.state = .off
@@ -171,6 +176,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
         onPolishChange?(true)
         onConfirmChange?(false)
         onSystemAudioChange?(true)
+        onRetrievalChange?(true)
         onExportSettingsChange?(currentExportSettings)
     }
 
@@ -337,6 +343,10 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
                                    caption: "需要「螢幕與系統音訊錄製」權限；戴耳機可避免重複收音。",
                                    control: systemAudioSwitch,
                                    action: #selector(didToggleSystemAudio)), to: card)
+        addFullWidth(makeToggleRow(title: "檢索輔助",
+                                   caption: "用向量模型挑出這次真的講到的專有名詞，並找出「這句是在叫我改什麼」。第一次會慢一點，之後有快取。",
+                                   control: retrievalSwitch,
+                                   action: #selector(didToggleRetrieval)), to: card)
     }
 
     private func buildTranslateCard() {
@@ -537,6 +547,10 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
 
     @objc private func didToggleConfirm() {
         onConfirmChange?(confirmSwitch.state == .on)
+    }
+
+    @objc private func didToggleRetrieval() {
+        onRetrievalChange?(retrievalSwitch.state == .on)
     }
 
     @objc private func didToggleSystemAudio() {

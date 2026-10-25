@@ -164,6 +164,66 @@ OVC_SELFTEST_IMPORT=<clip>.wav dist/OfflineVoiceAssistant.app/Contents/MacOS/Off
 
 單元測試 52 項（含新增的 `strip_lone_bullet`、`detect_translation_request` 純函式測資）。
 
+## 6.6 檢索輔助（EmbeddingGemma INT4）＋語音輸入打包（2026-10-25）
+
+### 模型
+`rag-embeddinggemma-300m-q4`：`embedding/embeddinggemma-300m-Q4_0.gguf`，277,852,192 bytes，
+sha256 `edc6015cb15694c27be7d1d33f1bc015db9a358ff51ed524628c027504907ba9`。
+這是 **QAT（量化感知訓練）的 Q4_0**，不是普通 Q4：MTEB 多語言平均 60.62 對 Q8 的 60.93
+（差 0.31），繁中檢索在 5 億參數以下的開源模型裡排名第一（DRCD Hit@5 94.96%）。
+架構 `gemma-embedding`，768 維，2048 ctx，**Mean pooling**（不是 Last）。
+上游 GGUF 少了 Sentence-Transformers 的 dense module，對本用途沒差：詞與逐字稿都用
+同一顆模型算，排名自洽。
+
+### 實測（`core_engine/examples/embed_probe.rs`，全部是真實繁中句子）
+**詞彙檢索——排序可靠，門檻不可靠。** 草稿「明天下午三點要跟小林開會，討論隼的第四季
+時程，Figma 的稿子我會先更新」：該抓到的 0.402–0.465（小林／隼／第四季／Figma），
+不該抓到的 0.260–0.479（`小林設計` 0.479 甚至比 `小林` 0.465 高，因為它真的共用「小林」）。
+→ 所以門檻只設 0.35 砍掉明顯無關的尾巴，真正的價值在**排序**與 top-12，不做硬切。
+
+**指令篩選——單一相似度門檻做不到。** 兩次量測間隙都是負的：一般說話
+`順序是這樣沒錯` 0.783 ＞ 真指令 `第二點不要` 0.765；`他說時間會改` 0.648、
+`我要加薪` 0.628。短句中文 embedding 的相似度主要反映語氣與虛詞，不是意圖。
+→ 改成**「關鍵字必須命中」＋「相似度 0.65 確認」**：關鍵字表決定召回（可擴充），
+門檻決定精確度（寧漏不錯殺，因為漏掉的指令整理提示詞本身還是會照做）。
+保留樣本（未放進範例表的真指令）靠這條規則通過 4/4，帶關鍵字的一般說話誤判 0 筆。
+
+**ASR 沒有標點，這是第一版真正的破口。** 實機聽寫整段是一個超長子句，被長度上限丟掉，
+篩選等於完全沒作用（而手寫測試全過）。改成在關鍵字附近取 24 字內的**視窗**；而視窗
+**只算分、不注入**——實測把 `季時程把地點那句拿掉我還沒確定另外稿我會` 這種錯位片段
+餵給模型，它會認不出來並把指令留成內容；只有完整的短句才引用給模型。
+
+### 架構
+- `core_engine/src/embed.rs`：載入、Mean pooling 向量、L2 正規化、詞向量磁碟快取
+  （`models/.cache/term-vectors.tsv`，含範例向量，以 model 檔名＋維度驗證；範例用
+  `\u{1}` 命名空間與詞彙分開，因為兩者前綴不同）、關鍵字排序、指令篩選、視窗切句。
+- `core_engine/src/state.rs`：`screened_hint()` 在整理前把提示詞換成「這次真的講到的詞」，
+  並附上「使用者的修改要求（原話）」；`warm_retrieval()` 供主程式先算好向量。
+- C ABI：`LLM_RelevantTerms`／`LLM_EditClauses`／`LLM_WarmRetrieval`（沒有模型時回空字串，
+  不是錯誤）。`OVC_EMBED_DISABLE=1` 可停用，`OVC_EMBED_MODEL` 可換檔名。
+- 設定頁新增「檢索輔助」開關（預設開，`settings.retrieval`）；模型管理頁多一個
+  「檢索模型（向量）」分類。
+
+### 效能（M1 8GB，實測）
+- 冷快取取暖：29 個向量 2.9 秒；再取暖 0 個（快取有效）。
+- 完整聽寫（ASR＋檢索＋LLM 整理）13.2 秒，其中基準線（ASR＋LLM）7.5 秒，
+  檢索約多 5.7 秒（主要是每次都要載入 277 MB 的向量模型）。
+- `voiceinput --warm` 可在安裝後／啟動時先把向量算好，避開第一次的延遲。
+
+### 語音輸入打包成可呼叫模組（使用者要求「放在另外一個資料夾」）
+`macos_app/Sources/VoiceInputKit/`：獨立 target，含 `VoiceInputConfig`、
+`VoiceInputEngine`（`prepare`／`transcribe(fileAt:)`／`makeSession`／`warmRetrievalCache`）、
+`VoiceInputSession`（即時錄音）、`relevantTerms(for:in:)`、`editInstructions(in:config:)`、
+`CursorInserter`（貼到游標）。另有命令列工具 `voiceinput`：
+`--transcribe`／`--raw`／`--selftest`／`--warm`／`--keyword`／`--worker`。
+App 尚未改成呼叫這個模組（現行 App 走同一組 C ABI，行為一致），遷移是下一步。
+
+### 錄音視窗合併（使用者要求「麥克風視窗與文字視窗合併」）
+`HUDWindow` 改名 `DictationWindow`，`TranscriptWindow.swift` 刪除。現在語音輸入期間只有
+**一個**浮動視窗：上方控制列（麥克風、波形、字數、暫停、停止、拖曳點），下方標題列
+（狀態膠囊、複製、Esc 關閉）與逐字稿卡片（我：／對方：）。視窗由 56pt 長到 274pt，
+逐字稿過長時自己捲動，錨定左上角所以停止鍵不會移動。Escape 仍然只關視窗、不停止錄音。
+
 ## 7. 還沒做
 
 - 語音編輯指令（「把第二段改成…」）：要新的 LLM ABI 與提示詞，最後做。
