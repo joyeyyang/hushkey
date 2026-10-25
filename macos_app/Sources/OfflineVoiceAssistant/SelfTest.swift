@@ -209,35 +209,26 @@ enum SelfTest {
         ]
         for id in themeIDs {
             let theme = ThemeCatalog.theme(id: id)
-            // The floating transcript is its own window and the surface a person
-            // stares at while talking, so it is reviewed on its own.
-            let transcript = TranscriptWindow()
-            transcript.applyTheme(theme)
-            transcript.begin(title: "會議逐字稿 · 10:42", status: "辨識中…")
-            transcript.append(dictationSegments, showSpeaker: true)
-            transcript.finish(status: "完成 · 9.6 秒")
-            let transcriptURL = dir.appendingPathComponent("\(theme.id)-transcript.png")
-            if transcript.snapshot(to: transcriptURL),
-               let data = try? Data(contentsOf: transcriptURL), data.count > 3_000 {
-                print("ok \(theme.id) transcript \(data.count)B")
-            } else {
-                failures.append("\(theme.id) transcript")
-            }
-            transcript.hide()
-
-            // The capsule keeps its own shapes: the editable confirm card and the
-            // finished-result line.
-            let capsule = HUDWindow()
-            capsule.applyTheme(theme)
-            capsule.snapshotEdit(
+            // One window, re-skinned across the three shots: a fresh one per
+            // shape would install another pair of Escape monitors for nothing.
+            let window = DictationWindow()
+            window.applyTheme(theme)
+            window.snapshotTranscript(
+                to: dir.appendingPathComponent("\(theme.id)-dictation-recording.png"),
+                title: "會議逐字稿 · 10:42",
+                status: "辨識中…",
+                segments: dictationSegments,
+                showSpeaker: true
+            )
+            window.snapshotEdit(
                 to: dir.appendingPathComponent("\(theme.id)-dictation-edit.png"),
                 text: "那我們先確認一下這週的進度，簡報的初稿還缺第二段的數字。"
             )
-            capsule.snapshotResult(
+            window.snapshotResult(
                 to: dir.appendingPathComponent("\(theme.id)-dictation-result.png"),
                 text: "下週三上線，其他頁面之後再排。"
             )
-            for shape in ["dictation-edit", "dictation-result"] {
+            for shape in ["dictation-recording", "dictation-edit", "dictation-result"] {
                 let url = dir.appendingPathComponent("\(theme.id)-\(shape).png")
                 if let data = try? Data(contentsOf: url), data.count > 3_000 {
                     print("ok \(theme.id) \(shape) \(data.count)B")
@@ -245,7 +236,7 @@ enum SelfTest {
                     failures.append("\(theme.id) \(shape)")
                 }
             }
-            capsule.hide()
+            window.hide()
         }
 
         if failures.isEmpty {
@@ -268,7 +259,7 @@ enum SelfTest {
         var failures: [String] = []
         // One window, re-skinned: a fresh DictationWindow per palette would
         // install five pairs of Escape monitors and five panels for no reason.
-        let hud = HUDWindow()
+        let hud = DictationWindow()
 
         for theme in ThemeCatalog.all {
             let body = contrast(theme.textPrimary, on: theme.background)

@@ -39,9 +39,6 @@ public struct VoiceInputConfig {
     /// only thing that can travel.
     public var llmModel: String?
 
-    /// Bare filename of the retrieval (embedding) model inside `models/embedding/`,
-    /// or nil for the conventional default. See `relevantTerms(for:in:)` for why
-    /// this is currently advisory rather than load-bearing.
     /// Whether a session also captures what the Mac is playing.
     ///
     /// Off by default: it is a meeting feature, it needs a separate permission

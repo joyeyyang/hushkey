@@ -135,4 +135,30 @@ enum CoreABI {
         defer { Core_FreeString(p) }
         return String(cString: p)
     }
+
+    /// Applies a spoken instruction to an existing draft. The whole edit — the
+    /// line numbering the model needs, the parse of its numbered answer, and the
+    /// refusal to accept commentary instead of text — lives in the core
+    /// (`llm.rs::edit_with_instruction`), so this is only the pointer dance.
+    /// Throws when the worker is unavailable or when the model answered with a
+    /// remark rather than an edit; callers leave the draft alone then.
+    static func edit(_ text: String, instruction: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_EditText(text, instruction, &out))
+        guard let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
+
+    /// Meeting summary: a finished transcript in, 摘要／待辦／決議 sections out.
+    /// The chunking and the three section prompts live in the core
+    /// (`state.rs::summarize_text`), so this is again only the pointer dance.
+    /// Same worker as refine; a failure means the caller keeps the transcript.
+    static func summarize(_ transcript: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_Summarize(transcript, &out))
+        guard let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
 }

@@ -192,6 +192,65 @@ const REFINE_EXAMPLES_EN: [(&str, &str); 4] = [
     ),
 ];
 
+/// System line for the voice-edit pass: the user dictates an instruction that
+/// has to be applied to text the app already produced, which is a different job
+/// from refinement (there is no speech to clean, and the text already has the
+/// shape the user is looking at).
+///
+/// The draft arrives NUMBERED, and the model is told to keep the numbers it was
+/// given instead of renumbering its answer. Two reasons, both structural:
+/// * The numbering is the one thing the code and the user agree on. "把第二點改
+///   成…" is only checkable against lines the code numbered itself, so the model
+///   is not allowed to invent a numbering of its own that the code cannot verify.
+/// * A deletion only stays identifiable this way. If the model renumbered, the
+///   survivors of a deletion would come back shifted (`1. a\n2. c` for a deleted
+///   `b`) and look exactly like an edit that rewrote every line, so a mangled
+///   answer could not be told from a correct one.
+///
+/// The delete rule is stated with the number: the deleted line simply disappears
+/// from the answer (there is no blank numbered line to parse).
+const EDIT_SYSTEM: &str = "使用者已經打好一份文字，每一行都編好號了。\
+使用者會說一句要怎麼改的指令，你要照著改寫整份文字，只輸出改寫後的內容。\
+輸出要保留原本的編號：改哪一行就只動那一行，沒改到的行照原樣輸出、不要重新編號，\
+也不要只輸出改過的那一行；被刪掉的那一行整行都不要出現。\
+不要加說明、不要加標題、不要翻譯。\
+使用者的訊息裡，第一行是指令，空一行之後才是要改的文字。";
+
+/// Worked pairs for the voice-edit pass: `(instruction + blank line + numbered
+/// draft, edited result)`. Few-shot for the same reason as everywhere else in
+/// this file -- a 1.5B model copies the shape it just saw far more reliably than
+/// it follows a rule list -- and split by language because a Chinese draft next
+/// to an English answer comes back translated.
+///
+/// Each set carries the two shapes a reader would otherwise have to guess: a
+/// replacement that keeps the untouched lines byte-identical, and a deletion
+/// whose line is gone rather than blanked. The pairs also show that the answer
+/// repeats EVERY line and not just the changed one, which the rule alone was not
+/// enough to carry.
+const EDIT_EXAMPLES_ZH: [(&str, &str); 2] = [
+    (
+        "把第二點改成禮拜五下午兩點\n\n1. 跟客戶確認規格\n2. 下週三下午三點開會\n3. 把報價單寄出去",
+        "1. 跟客戶確認規格\n2. 禮拜五下午兩點\n3. 把報價單寄出去",
+    ),
+    // The deleted item's number disappears with it: the answer is two lines, not
+    // three with a hole where the third was.
+    (
+        "第三句刪掉\n\n1. 先確認規格\n2. 再找供應商\n3. 最後排時程",
+        "1. 先確認規格\n2. 再找供應商",
+    ),
+];
+
+const EDIT_EXAMPLES_EN: [(&str, &str); 2] = [
+    (
+        "change the second one to Friday at 2 pm\n\n1. Confirm the spec with the client\n2. Meeting on Wednesday at 3 pm\n3. Send the quote",
+        "1. Confirm the spec with the client\n2. Friday at 2 pm\n3. Send the quote",
+    ),
+    (
+        "delete the third one\n\n1. Confirm the spec\n2. Find a supplier\n3. Set the schedule",
+        "1. Confirm the spec\n2. Find a supplier",
+    ),
+];
+
 /// True for the CJK ranges that decide "this draft is Chinese".
 pub(crate) fn has_cjk(text: &str) -> bool {
     text.chars().any(|c| {
@@ -874,6 +933,173 @@ pub fn translate(model_path: &Path, text: &str, target: &str) -> Result<String> 
     generate(model_path, &translate_prompt(text, target))
 }
 
+/// Split text into the items the edit pass numbers.
+///
+/// The item boundaries are decided HERE and not by the model, because the text
+/// is the app's own output and its shape is the app's business: a spoken draft
+/// arrives as one run-on line, while a refine result may already be a bullet
+/// list. Numbering it in code is what makes "把第二點改成…" mean the same line to
+/// the user and to the model.
+///
+/// A single line is treated as a spoken sentence rather than a one-item list and
+/// split at its own sentence ends, so "第三句刪掉" can name one; a multi-line
+/// text already carries its structure, and splitting inside its lines would
+/// renumber lines the user can see.
+fn numbered_items(text: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let body = strip_bullet(trimmed).trim();
+        if !body.is_empty() {
+            items.push(body.to_string());
+        }
+    }
+    if items.len() == 1 && items[0].chars().any(is_sentence_end) {
+        let sentences = split_sentences(&items[0]);
+        if !sentences.is_empty() {
+            items = sentences;
+        }
+    }
+    items
+}
+
+/// A bullet marker a refine result may carry. The same markers `strip_lone_bullet`
+/// knows, listed again because that one fires only on a whole answer and this one
+/// on each line of a draft.
+fn strip_bullet(line: &str) -> &str {
+    for marker in ["• ", "- ", "* "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return rest;
+        }
+    }
+    line
+}
+
+/// Punctuation that ends a sentence in either language the app handles.
+fn is_sentence_end(c: char) -> bool {
+    matches!(c, '。' | '！' | '？' | '!' | '?')
+}
+
+/// Split at sentence ends, keeping each sentence's own punctuation: the edit
+/// pass must be able to answer with a sentence that still ends in `。` when it
+/// did not touch that sentence.
+fn split_sentences(text: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        current.push(c);
+        if is_sentence_end(c) {
+            items.push(current.trim().to_string());
+            current.clear();
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        items.push(tail.to_string());
+    }
+    items.retain(|item| !item.is_empty());
+    items
+}
+
+/// Render items as the numbered lines the edit prompt shows the model.
+fn number_lines(items: &[String]) -> String {
+    let mut out = String::new();
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("{}. {item}", i + 1));
+    }
+    out
+}
+
+/// The text of one numbered line of the model's answer, if that line is one.
+///
+/// Strict on purpose: a line is an item only when it OPENS with an optional
+/// bullet, a run of digits, one of `.` `、` `)` and whitespace. That is what
+/// keeps a trailing remark ("(我把第二點改掉了)", "done!") out of the result --
+/// see `parse_edited_items`.
+fn strip_item_number(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let body = strip_bullet(trimmed);
+    let digits = body.len() - body.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return None;
+    }
+    let rest = body[digits..].strip_prefix(['.', '、', ')'])?;
+    let item = rest.strip_prefix(char::is_whitespace)?.trim();
+    if item.is_empty() {
+        return None;
+    }
+    Some(item)
+}
+
+/// Read the model's numbered lines back, in answer order.
+///
+/// Anything that is not a numbered line is dropped: the answer often carries a
+/// closing remark, and a remark is not part of the user's text. An answer with no
+/// numbered line at all leaves this EMPTY, which the caller turns into an error.
+fn parse_edited_items(answer: &str) -> Vec<String> {
+    answer.lines().filter_map(strip_item_number).map(str::to_string).collect()
+}
+
+/// Rejoin the edited items using the ORIGINAL text's layout.
+///
+/// The model was asked for numbered lines because they are unambiguous to edit,
+/// but the user never asked for a list: a text that was one line has to come back
+/// as one line, or a dictated sentence returns looking like a bullet list. So a
+/// multi-line original keeps newlines, and a single-line original is rejoined the
+/// way it was written -- no space inside CJK, one space between Latin words.
+fn join_edited_items(original: &str, items: &[String]) -> String {
+    let multiline = original.lines().filter(|line| !line.trim().is_empty()).count() > 1;
+    let separator = if multiline {
+        "\n"
+    } else if has_cjk(original) {
+        ""
+    } else {
+        " "
+    };
+    items.join(separator)
+}
+
+/// Prompt for one voice edit: the instruction and the numbered draft, with one
+/// worked pair per edit shape for the draft's language.
+fn edit_prompt(instruction: &str, text: &str) -> String {
+    let examples: &[(&str, &str)] = if has_cjk(text) {
+        &EDIT_EXAMPLES_ZH
+    } else {
+        &EDIT_EXAMPLES_EN
+    };
+    let user = format!("{}\n\n{}", instruction.trim(), number_lines(&numbered_items(text)));
+    chatml_few_shot(EDIT_SYSTEM, examples, &user)
+}
+
+/// Apply a spoken edit instruction to text the app already produced. Used by the
+/// worker's `edit` task, where the instruction arrives as the command-line
+/// argument and the text on stdin.
+///
+/// The result is passed through `tidy_output` like every other text inserted at
+/// the cursor (no wrapping quotes, no trailing full stop), and it is the WHOLE
+/// text: the numbered lines exist only inside the prompt, so the caller replaces
+/// the text rather than asking the user to accept a diff.
+pub fn edit_with_instruction(model_path: &Path, text: &str, instruction: &str) -> Result<String> {
+    let answer = generate(model_path, &edit_prompt(instruction, text))?;
+    let items = parse_edited_items(&answer);
+    // No numbered line means the model answered conversationally -- a sentence
+    // like "好的，我改好了" about the edit rather than the edited text. That is an
+    // ERROR and deliberately not a success: what came back is commentary, and
+    // returning it would replace the user's own text with that remark. A failure
+    // leaves the user with the text they already have, which is the harmless
+    // outcome of the two.
+    if items.is_empty() {
+        return Err(EngineError::new(ErrorCode::Inference, "the model did not answer with numbered lines"));
+    }
+    Ok(tidy_output(&join_edited_items(text, &items)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1010,5 +1236,96 @@ mod tests {
         // 3+ blank lines collapse to one; single newlines are the bullet layout.
         assert_eq!(tidy_output("第一行\n\n\n\n第二行"), "第一行\n\n第二行");
         assert_eq!(tidy_output("  我用 Slack 跟 PM 確認  "), "我用 Slack 跟 PM 確認");
+    }
+
+    #[test]
+    fn numbering_keeps_the_lines_of_a_multi_line_draft() {
+        // Blank lines in the draft are not items, and each line keeps its order.
+        assert_eq!(
+            numbered_items("跟客戶確認規格\n下週三下午三點開會\n\n把報價單寄出去"),
+            vec!["跟客戶確認規格", "下週三下午三點開會", "把報價單寄出去"]
+        );
+    }
+
+    #[test]
+    fn a_single_line_draft_is_split_into_its_sentences() {
+        // Speech has no line breaks, so "第三句刪掉" has to be able to name a
+        // sentence: one line becomes one item per sentence, punctuation kept.
+        assert_eq!(
+            numbered_items("先確認規格。再找供應商！最後排時程"),
+            vec!["先確認規格。", "再找供應商！", "最後排時程"]
+        );
+        assert_eq!(numbered_items("我先跟客戶確認規格。等下再回你"), vec!["我先跟客戶確認規格。", "等下再回你"]);
+        // A single line with no sentence end stays one item.
+        assert_eq!(numbered_items("下週三下午三點開會"), vec!["下週三下午三點開會"]);
+    }
+
+    #[test]
+    fn numbering_drops_bullets() {
+        assert_eq!(numbered_items("• 甲\n- 乙\n* 丙"), vec!["甲", "乙", "丙"]);
+    }
+
+    #[test]
+    fn numbering_and_parsing_agree() {
+        // The whole design rests on these two being inverses: the prompt's
+        // numbering is only usable if the answer's numbering reads back the same.
+        let items = numbered_items("• 甲\n• 乙。丙");
+        assert_eq!(number_lines(&items), "1. 甲\n2. 乙。丙");
+        assert_eq!(parse_edited_items(&number_lines(&items)), items);
+    }
+
+    #[test]
+    fn parsing_strips_every_number_marker() {
+        assert_eq!(parse_edited_items("2. 禮拜五下午兩點"), vec!["禮拜五下午兩點"]);
+        assert_eq!(parse_edited_items("2、禮拜五下午兩點"), vec!["禮拜五下午兩點"]);
+        assert_eq!(parse_edited_items("12) 禮拜五下午兩點"), vec!["禮拜五下午兩點"]);
+        // A bullet in front of the number is allowed too, and the answer keeps
+        // its own order rather than being sorted by the numbers.
+        assert_eq!(parse_edited_items("- 2. 甲\n1. 乙"), vec!["甲", "乙"]);
+    }
+
+    #[test]
+    fn parsing_ignores_anything_that_is_not_a_numbered_line() {
+        // The remark the model likes to append is not part of the user's text. A
+        // line whose number is not followed by a marker ("3 pm") is not an item
+        // either, and a numbered line with nothing after the number is not one.
+        assert_eq!(
+            parse_edited_items("1. 跟客戶確認規格\n2. 禮拜五下午兩點\n（我把第二點改掉了）"),
+            vec!["跟客戶確認規格", "禮拜五下午兩點"]
+        );
+        assert_eq!(parse_edited_items("1. 甲\n3 pm 開會"), vec!["甲"]);
+        assert_eq!(parse_edited_items("1.\n1. 甲"), vec!["甲"]);
+    }
+
+    #[test]
+    fn an_unnumbered_answer_parses_to_nothing() {
+        // Deliberately empty rather than "one item": the caller turns this into
+        // an error, so chatty prose is never handed back as an edit.
+        assert!(parse_edited_items("好的，我把第二點改成禮拜五下午兩點了").is_empty());
+        assert!(parse_edited_items("").is_empty());
+        assert!(parse_edited_items("   \n  ").is_empty());
+    }
+
+    #[test]
+    fn joining_follows_the_original_layout() {
+        let items = vec!["甲".to_string(), "乙".to_string()];
+        // The original was one CJK line: no separator, or a sentence comes back
+        // looking like a list.
+        assert_eq!(join_edited_items("甲。乙", &items), "甲乙");
+        // One Latin line: words need the space.
+        assert_eq!(join_edited_items("one two", &items), "甲 乙");
+        // Multiple lines: the newlines were the user's layout and stay.
+        assert_eq!(join_edited_items("甲\n乙", &items), "甲\n乙");
+    }
+
+    #[test]
+    fn an_edited_single_line_is_tidied_like_a_refine_result() {
+        // The joined result goes through `tidy_output`, so the delivery rule
+        // holds for an edit too: only the end of the text loses its full stop,
+        // and an interior one stays.
+        let items = vec!["先確認規格。".to_string(), "再找供應商。".to_string(), "最後排時程。".to_string()];
+        let joined = join_edited_items("先確認規格。再找供應商。最後排時程", &items);
+        assert_eq!(joined, "先確認規格。再找供應商。最後排時程。");
+        assert_eq!(tidy_output(&joined), "先確認規格。再找供應商。最後排時程");
     }
 }

@@ -8,14 +8,12 @@ import UniformTypeIdentifiers
 final class AppController {
     private let keywords = Keywords()
     private let history = HistoryStore()
-    /// The recording capsule: mic, level, character count, pause, stop, grip.
-    /// It answers "am I still recording?" and carries the transient notices.
-    private let hud = HUDWindow()
-    /// The floating transcript: the live, verbatim words with 我／對方 prefixes,
-    /// its own status pill and its own copy button. It is the surface a person
-    /// stares at while talking, so it stays a window of its own that can be put
-    /// wherever it is out of the way.
-    private let transcriptWindow = TranscriptWindow()
+    /// The one floating surface for a live session: the capsule's controls with
+    /// the verbatim transcript under them. There used to be a second panel for
+    /// the transcript, which meant two windows to move, two Escape handlers and
+    /// two answers to the same question ("am I still recording?"); a single
+    /// window cannot disagree with itself. Escape still only closes it.
+    private let hud = DictationWindow()
     /// One importer for the app: the engine has one ASR session, so two file
     /// imports at once would fight each other the same way two recordings do.
     private let audioImporter = AudioFileImporter()
@@ -24,10 +22,20 @@ final class AppController {
     private var lastRawTranscript = ""
     private var statusItem: StatusItem?
     private var mainWindow: MainWindow?
-    private var capture: AudioCapture?
-    /// Records what the Mac plays during a meeting, so the other side of the
-    /// call is transcribed too. Only active when the setting is on.
-    private var systemTap: SystemAudioTap?
+    /// The packaged pipeline, and the only thing that touches audio or the core:
+    /// it points the core at the model tree, publishes the LLM choice into the
+    /// process environment the worker inherits, and loads the ASR model. Every
+    /// recording is one of its sessions, so capture, segmentation, the
+    /// system-audio tap and the ASR lifecycle have one implementation instead of
+    /// a copy per mode.
+    private var engine: VoiceInputEngine?
+    /// The recording in progress, if any. Dictation and meeting are the same
+    /// session with different settings; only what happens to the transcript at
+    /// the end differs.
+    private var session: VoiceInputSession?
+    /// The text this app last handed to another app, so a spoken edit
+    /// instruction ("第二點改成禮拜五") has something to apply itself to.
+    private var lastDelivery: String?
     private var hotkey: Hotkey?
     private var dictating = false
     private var meeting = false
@@ -67,11 +75,6 @@ final class AppController {
     private var permissionTicks = 0
     private var lastTrust: Bool?
     private let coreQueue = DispatchQueue(label: "ovc.core")
-
-    /// Live character-count poll while recording.
-    private var liveCountTimer: Timer?
-    private var peeking = false
-    private var recordingStart = Date()
 
     private static let hotkeyKey = "settings.hotkey"
     private static let themeKey = "settings.theme"
@@ -360,15 +363,34 @@ final class AppController {
     private func shutdown() {
         permissionTimer?.invalidate()
         permissionTimer = nil
-        stopLiveCount()
-        capture?.stop()
-        capture = nil
-        systemTap?.stop()
-        systemTap = nil
+        stopSilenceWatch()
         if meeting || dictating {
             ModelInstaller.log("shutdown while recording: \(meeting ? "meeting" : "dictation") discarded")
         }
-        Core.shutdown()
+        // Ending the session closes the microphone and the system-audio tap, and
+        // `shutdown()` releases the core. Both happen here rather than at process
+        // teardown, because the tap is a process-wide Core Audio object that
+        // lights the system-audio indicator while it exists.
+        session?.cancel()
+        session = nil
+        engine?.shutdown()
+    }
+
+    /// The kit's view of this install: where the models are, and which LLM the
+    /// engine should load.
+    ///
+    /// `polishEnabled: false` on purpose. A session only captures and
+    /// transcribes; the cleanup chain runs in `present()` instead, which is where
+    /// the app can also notice that the dictation was an edit instruction about
+    /// the previous result and edit that, rather than polishing an instruction
+    /// into a sentence. System audio is switched on per recording
+    /// (`setSystemAudioEnabled`), so the session config does not carry it either.
+    static func engineConfig(modelsDir: URL) -> VoiceInputConfig {
+        VoiceInputConfig(
+            modelsDirectory: modelsDir,
+            llmModel: LLMSelection.currentFileName,
+            polishEnabled: false
+        )
     }
 
     // MARK: - 主題套用
@@ -382,7 +404,6 @@ final class AppController {
         NSApp.appearance = NSAppearance(named: theme.isDark ? .darkAqua : .aqua)
         mainWindow?.applyTheme(theme)
         hud.applyTheme(theme)
-        transcriptWindow.applyTheme(theme)
     }
 
     private func reloadTheme() {
@@ -405,15 +426,17 @@ final class AppController {
                         self.hud.show(text: msg)
                     }
                 }
-                // The core spawns ovc-llm-worker with Command::new, so the worker
-                // inherits this process's environment. Setting OVC_LLM_MODEL here --
-                // before the first refine -- is what makes the user's model choice
-                // reach the engine; passing it to a spawn call would reach nothing.
-                LLMSelection.applyToProcessEnvironment()
-                try Core.initialize(modelsDir: dir.path)
-                try Core.loadASR()
+                // `prepare()` publishes the models directory and the LLM choice
+                // into this process's environment -- the only route that reaches
+                // the worker, because the core spawns `ovc-llm-worker` with
+                // `Command::new` and that child inherits *this* process's
+                // environment -- and then loads the ASR model, so the first
+                // dictation does not pay for the load.
+                let engine = try VoiceInputEngine(config: Self.engineConfig(modelsDir: dir))
+                try engine.prepare()
                 ModelInstaller.log("core ready: \(dir.path) llm=\(LLMSelection.currentFileName)")
                 DispatchQueue.main.async {
+                    self.engine = engine
                     self.loading = false
                     self.ready = true
                     ModelInstaller.log("ready")
@@ -463,16 +486,6 @@ final class AppController {
     /// entirely muted mic is caught while the user is still in the meeting.
     private static let silenceWarnSeconds: TimeInterval = 12
 
-    /// The one place microphone audio enters the engine.
-    ///
-    /// Pause has to gate this and nothing else: cutting the feed here keeps the
-    /// ASR session open, so the transcript continues where it stopped instead of
-    /// starting a second one.
-    private func feed(_ samples: [Float]) {
-        guard !paused else { return }
-        coreQueue.async { try? Core.submit(samples) }
-    }
-
     /// The one place the level is read: it drives the meter, and it is how the
     /// app knows the microphone has gone quiet.
     private func noteLevel(_ level: Float) {
@@ -488,14 +501,18 @@ final class AppController {
 
     /// Pause / resume. Called from the capsule's ‖ button.
     ///
-    /// `hud.setPaused` states 已暫停 where the capsule has room for it;
+    /// `hud.setPaused` is the only call: it states 已暫停 where the window has
     /// room for it and puts the session's own state back on resume, so the
     /// controller no longer has to say the same thing to a second window.
     private func togglePause() {
         guard dictating || meeting else { return }
         paused.toggle()
         hud.setPaused(paused)
-        transcriptWindow.setStatus(paused ? "已暫停" : (meeting ? "錄音中…" : "辨識中…"))
+        // The session owns the audio, so pausing it is what actually stops the
+        // input -- the microphone feed and the system-audio tap together, while
+        // the ASR session stays open, so the transcript continues where it stopped
+        // instead of starting a second one.
+        if paused { session?.pause() } else { session?.resume() }
         if paused {
             // A paused recording is not a silent one: the warning must not fire
             // at the user for the state they asked for.
@@ -572,28 +589,25 @@ final class AppController {
         hud.allowShowingAgain()
         // `begin` shows the window itself and leaves the mode as a status line,
         // since an import is not a recording.
-        hud.show(text: "讀取音檔…")
-        transcriptWindow.begin(title: url.lastPathComponent, status: "讀取中…")
-        transcriptWindow.show()
+        hud.begin(title: url.lastPathComponent, status: "讀取音檔…")
 
         audioImporter.importFile(
             at: url,
             onProgress: { [weak self] fraction in
                 let percent = Int((fraction * 100).rounded())
-                self?.transcriptWindow.setStatus("辨識中… \(percent)%")
-                self?.hud.setCount(percent)
+                self?.hud.setStatus("辨識中… \(percent)%")
             },
             onStatus: { [weak self] status in
-                self?.transcriptWindow.setStatus(status)
+                self?.hud.setStatus(status)
             },
             completion: { [weak self] result in
                 guard let self else { return }
                 switch result {
                 case let .success(imported):
-                    self.transcriptWindow.append(imported.segments, showSpeaker: false)
+                    self.hud.append(imported.segments, showSpeaker: false)
                     let minutes = Int(imported.duration) / 60
                     let seconds = Int(imported.duration) % 60
-                    self.transcriptWindow.finish(status: "辨識完成 · \(minutes):\(String(format: "%02d", seconds))")
+                    self.hud.finish(status: "辨識完成 · \(minutes):\(String(format: "%02d", seconds))")
                     self.mainWindow?.setTranscript(imported.text)
                     let pasteboard = NSPasteboard.general
                     pasteboard.clearContents()
@@ -601,7 +615,7 @@ final class AppController {
                     ModelInstaller.log("import done: \(imported.text.count) chars, \(imported.segments.count) segments")
                     self.hud.flash("逐字稿已複製到剪貼簿（\(imported.text.count) 字）", seconds: 4)
                 case let .failure(error):
-                    self.transcriptWindow.finish(status: "失敗")
+                    self.hud.finish(status: "失敗")
                     ModelInstaller.log("import failed: \(error)")
                     self.hud.flash(error.localizedDescription, seconds: 6)
                 }
@@ -642,8 +656,7 @@ final class AppController {
                 self.paused = false
                 self.setRecordingState()
                 self.hud.startRecording()
-                self.transcriptWindow.begin(title: "聽寫", status: "辨識中…")
-                self.transcriptWindow.show()
+                self.hud.begin(title: "聽寫", status: "辨識中…")
                 self.startLiveCount()
                 self.startSilenceWatch()
                 let cap = AudioCapture(
@@ -676,7 +689,7 @@ final class AppController {
         // The same words the status line is showing: the drain below happens
         // before the engine is stopped, so claiming "辨識完成" here would put the
         // window a step ahead of itself.
-        finishTranscriptWindow(status: "辨識完成", labelled: false)
+        finishLiveTranscript(status: "轉錄中…", labelled: false)
         coreQueue.async {
             do {
                 let text = try Core.stopASR()
@@ -721,8 +734,7 @@ final class AppController {
                 self.paused = false
                 self.setRecordingState()
                 self.hud.startRecording()
-                self.transcriptWindow.begin(title: "會議逐字稿", status: "錄音中…")
-                self.transcriptWindow.show()
+                self.hud.begin(title: "會議逐字稿", status: "錄音中…")
                 self.startLiveCount()
                 self.startSilenceWatch()
                 let cap = AudioCapture(
@@ -808,7 +820,7 @@ final class AppController {
         paused = false
         setRecordingState()
         hud.show(text: "整理會議中…長會議需要幾分鐘")
-        finishTranscriptWindow(status: "錄音結束", labelled: true)
+        finishLiveTranscript(status: "錄音結束", labelled: true)
         // Everything below is read on the main thread and handed to the worker as
         // values: the summary takes minutes, EventKit and the segment list are
         // both main-thread state, and reading them from the worker would be a
@@ -887,7 +899,7 @@ final class AppController {
                     self.peeking = false
                     self.hud.setCount(text.count)
                     self.sessionSegments.append(contentsOf: segments)
-                    self.transcriptWindow.append(segments, showSpeaker: self.meeting)
+                    self.hud.append(segments, showSpeaker: self.meeting)
                 }
             }
         }
@@ -900,13 +912,13 @@ final class AppController {
     ///
     /// `labelled` is passed in rather than read from `meeting`, because the caller
     /// clears that flag before the session ends.
-    private func finishTranscriptWindow(status: String, labelled: Bool) {
+    private func finishLiveTranscript(status: String, labelled: Bool) {
         self.coreQueue.async {
             let tail = (try? Core.takeSegments()) ?? []
             DispatchQueue.main.async {
                 self.sessionSegments.append(contentsOf: tail)
-                self.transcriptWindow.append(tail, showSpeaker: labelled)
-                self.transcriptWindow.finish(status: status)
+                self.hud.append(tail, showSpeaker: labelled)
+                self.hud.finish(status: status)
             }
         }
     }

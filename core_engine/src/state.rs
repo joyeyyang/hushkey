@@ -1020,6 +1020,24 @@ pub fn translate_text(text: &str, target: &str) -> Result<String> {
     run_worker(&worker_path()?, "translate", &model, text, target)
 }
 
+/// Apply a dictated edit instruction to text the app already produced.
+///
+/// A worker task of its own rather than a flag on the refine task, for the same
+/// reason `translate` is: the two jobs ask for opposite things from the model.
+/// Refine is handed speech and told to clean it, keeping the speaker's language
+/// and leaving no instruction in the result; edit is handed finished text and
+/// told to CHANGE it exactly as instructed. Refine also numbers nothing -- it
+/// receives one chunk -- while an edit needs the text numbered before the model
+/// sees it, and the numbering has to survive the round trip. A flag would make
+/// the two share one prompt and one example set, and the refine behaviour that
+/// was measured with its own examples would change under it.
+///
+/// `instruction` is the spoken instruction ("把第二點改成禮拜五下午兩點").
+pub fn edit_text(text: &str, instruction: &str) -> Result<String> {
+    let model = llm_model_path()?;
+    run_worker(&worker_path()?, "edit", &model, text, instruction)
+}
+
 /// Map chunk size in characters and the overlap between adjacent chunks.
 const SUMMARY_CHUNK_CHARS: usize = 600;
 const SUMMARY_OVERLAP_CHARS: usize = 20;

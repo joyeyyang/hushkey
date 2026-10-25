@@ -66,6 +66,8 @@ int32_t ASR_Stop(char **out_text);
 /* ---- LLM (Qwen2.5 via worker process) ---- */
 /* Translates text into `target` ("en" or "zh") and writes it to *out_text. */
 int32_t LLM_Translate(const char *text, const char *target, char **out_text);
+/* Applies a spoken edit instruction to an existing text and returns the whole edited text. */
+int32_t LLM_EditText(const char *text, const char *instruction, char **out_text);
 
 /* ---- LLM: implemented via an out-of-process worker (see state.rs).
  *      RAG: declared for the planned API; currently returns OVC_ERR_NOT_IMPLEMENTED. ---- */

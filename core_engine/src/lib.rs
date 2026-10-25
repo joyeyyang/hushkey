@@ -20,6 +20,7 @@ use error::{clear_last_error, last_error, set_last_error, EngineError, ErrorCode
 pub use memory::OvcMemoryUsage;
 
 pub use llm::{
+    edit_with_instruction as llm_edit,
     refine as llm_refine, refine_stages as llm_refine_stages, refine_two_stage as llm_refine_two_stage,
     refine_with_keywords as llm_refine_with_keywords,
     summarize_one as llm_summarize_one, translate as llm_translate,
@@ -363,6 +364,25 @@ pub unsafe extern "C" fn LLM_Translate(text: *const c_char, target: *const c_cha
         let lang = if target.is_null() { "zh" } else { read_str(target, "target")? };
         let translated = state::translate_text(input, lang)?;
         write_out(out, &translated)
+    })())
+}
+
+/// Apply a spoken edit instruction to an existing text and return the whole
+/// edited text. `instruction` is what the user said to change.
+///
+/// # Safety
+/// Pointers must follow the header contract.
+#[no_mangle]
+pub unsafe extern "C" fn LLM_EditText(
+    text: *const c_char,
+    instruction: *const c_char,
+    out: *mut *mut c_char,
+) -> c_int {
+    status((|| {
+        let input = read_str(text, "text")?;
+        let instruction = read_str(instruction, "instruction")?;
+        let edited = state::edit_text(input, instruction)?;
+        write_out(out, &edited)
     })())
 }
 

@@ -42,6 +42,10 @@ struct Options {
     var llmModel: String?
     var worker: URL?
     var polishEnabled = true
+    /// `--is-edit`: a line to classify, printed as yes/no and nothing else.
+    var isEdit: String?
+    /// `--edit`: the instruction; the text it applies to arrives on stdin.
+    var editInstruction: String?
 }
 
 let usage = """
@@ -57,6 +61,8 @@ usage: voiceinput [options] <audio-file> [...]
   --refine-stages <0|1|2> cleanup passes; 0 lets the engine decide (default 0)
   --llm <file>            bare LLM filename inside models/llm/
   --no-polish             skip the AI cleanup pass entirely
+  --is-edit <text>        print yes/no: does this line read as a spoken edit?
+  --edit <instruction>    edit the text read from stdin (whole stream) and print it
   --paste                 also paste the refined text at the cursor (needs Accessibility)
   --selftest              run a built-in check and print PASS/FAIL
   --help                  this text
@@ -113,6 +119,10 @@ func parseArguments(_ args: [String]) -> Options {
             opts.worker = URL(fileURLWithPath: value("--worker"))
         case "--no-polish":
             opts.polishEnabled = false
+        case "--is-edit":
+            opts.isEdit = value("--is-edit")
+        case "--edit":
+            opts.editInstruction = value("--edit")
         case "--paste":
             opts.paste = true
         case "--selftest":
@@ -226,6 +236,30 @@ func transcribe(_ url: URL, engine: VoiceInputEngine, opts: Options) -> String {
     }
 }
 
+// MARK: - Edit
+
+/// Applies one spoken edit to the text on stdin and prints the result.
+///
+/// The whole stream is read as UTF-8 rather than one line: the target is a draft,
+/// and a draft is allowed to be several lines. `applyVoiceEdit` returns nil when
+/// it cannot edit — the worker is missing, or the model answered with nothing
+/// usable — and that is reported as a failure rather than printed as text, so a
+/// script never pastes an empty line over a good draft.
+func runEdit(instruction: String, config: VoiceInputConfig) -> Never {
+    let data = FileHandle.standardInput.readDataToEndOfFile()
+    guard let target = String(data: data, encoding: .utf8) else {
+        fail("the text on stdin is not valid UTF-8", code: 1)
+    }
+    let engine = makeEngine(config)
+    guard let edited = applyVoiceEdit(instruction, to: target, config: config) else {
+        engine.shutdown()
+        fail("could not apply the edit (no usable result)", code: 1)
+    }
+    engine.shutdown()
+    print(edited)
+    exit(0)
+}
+
 // MARK: - Entry point
 
 let opts = parseArguments(Array(CommandLine.arguments.dropFirst()))
@@ -246,6 +280,17 @@ if let add = opts.addKeyword {
 
 if opts.selftest {
     exit(runSelfTest(config: config))
+}
+
+// `--is-edit` is a pure classification: no engine, no stdin, just the verdict a
+// script branches on.
+if let spoken = opts.isEdit {
+    print(isVoiceEditInstruction(spoken) ? "yes" : "no")
+    exit(0)
+}
+
+if let instruction = opts.editInstruction {
+    runEdit(instruction: instruction, config: config)
 }
 
 guard !opts.files.isEmpty else {

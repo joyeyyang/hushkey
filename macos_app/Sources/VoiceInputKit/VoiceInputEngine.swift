@@ -17,6 +17,14 @@ public final class VoiceInputEngine {
 
     public let config: VoiceInputConfig
 
+    /// Whether this macOS version can capture system audio at all.
+    ///
+    /// Exposed so a caller can name the macOS 14.2 reason — and grey the control
+    /// out — before a recording starts, instead of surfacing it as an
+    /// `onSystemAudioFailure` in the middle of one. Independent of any engine
+    /// instance, so it can be read before one is built.
+    public static var systemAudioSupported: Bool { SystemAudioTap.isSupported }
+
     private let lock = NSLock()
     private var prepared = false
 
@@ -38,9 +46,7 @@ public final class VoiceInputEngine {
     /// passed anywhere, because the core spawns its LLM worker with
     /// `Command::new` (state.rs) and that child inherits *this* process's
     /// environment — a dictionary handed to a spawn call here would reach
-    /// nothing. `OVC_LLM_MODEL` is the engine's own override; `OVC_EMBED_MODEL`
-    /// is set for symmetry and future use, but see `Retrieval.swift`: the
-    /// current engine has no embed entry point, so nothing reads it yet.
+    /// nothing. `OVC_LLM_MODEL` is the engine's own override.
     public func prepare() throws {
         try CoreABI.initialize(modelsDir: config.modelsDirectory.path)
         if let llm = config.llmModel, !llm.isEmpty {
@@ -73,6 +79,18 @@ public final class VoiceInputEngine {
     public func makeSession() throws -> VoiceInputSession {
         ensurePrepared()
         return VoiceInputSession(config: config)
+    }
+
+    /// The meeting-summary entry point: a finished transcript in, the reduced
+    /// 摘要／待辦／決議 sections out.
+    ///
+    /// Deliberately separate from `transcribe(fileAt:)` and from the session's
+    /// cleanup chain — summarising is a second, explicit step on text the caller
+    /// already has, not part of turning speech into a line. Throws when the LLM
+    /// worker is unavailable; the caller keeps showing the transcript then.
+    public func summarize(_ transcript: String) throws -> String {
+        ensurePrepared()
+        return try CoreABI.summarize(transcript)
     }
 
     /// Releases the engine. Safe to call more than once; a later `prepare()`
@@ -110,6 +128,10 @@ public final class VoiceInputSession {
     /// on the microphone alone -- a meeting transcript missing the far end is
     /// still worth having, and refusing to record would be worse.
     public var onSystemAudioFailure: ((String) -> Void)?
+
+    /// Whether this macOS version can capture system audio at all — the session's
+    /// spelling of `VoiceInputEngine.systemAudioSupported`.
+    public static var systemAudioSupported: Bool { VoiceInputEngine.systemAudioSupported }
 
     private let config: VoiceInputConfig
     /// Serial queue for everything that talks to the core and touches
@@ -161,11 +183,17 @@ public final class VoiceInputSession {
         startPolling()
     }
 
-    /// Starts the process tap that carries the far end of a call.
+    /// Creates the process tap that carries the far end of a call and starts it,
+    /// unless the session is currently paused.
     ///
     /// Deliberately best-effort: the permission is separate from the microphone's,
     /// it can be refused, and the version gate is 14.2. Any of those failing
     /// leaves a working microphone-only session and reports why.
+    ///
+    /// A paused session must stay paused. Enabling system audio while paused --
+    /// the app pauses both routes together -- creates the tap but leaves it
+    /// stopped, so the setting is remembered without undoing the pause; `resume()`
+    /// starts it like any other tap.
     private func startSystemAudio() {
         guard SystemAudioTap.isSupported else {
             onSystemAudioFailure?("這個 macOS 版本不支援系統音訊擷取（需要 macOS 14.2 以上）")
@@ -175,6 +203,13 @@ public final class VoiceInputSession {
             self?.feed(samples, speaker: 1)
         }) else {
             onSystemAudioFailure?("無法建立系統音訊擷取")
+            return
+        }
+        stateLock.lock()
+        let isPaused = paused
+        stateLock.unlock()
+        if isPaused {
+            systemTap = tap
             return
         }
         do {
@@ -199,6 +234,27 @@ public final class VoiceInputSession {
         stateLock.lock()
         paused = false
         stateLock.unlock()
+    }
+
+    /// Turns the system-audio tap on or off part-way through a recording.
+    ///
+    /// Turning it on starts the same tap `start()` would have — created stopped
+    /// instead when the session is paused, so the pause survives the toggle — and
+    /// a failure travels the same way, through `onSystemAudioFailure`, because
+    /// the reason (permission, a version gate) is a fact about the machine, not
+    /// about when the user asked. Turning it off stops and drops the tap so a
+    /// later `resume()` has nothing stale to restart, and the microphone keeps
+    /// going either way.
+    public func setSystemAudioEnabled(_ enabled: Bool) {
+        if enabled {
+            // Already recording the far end: leaving the existing tap alone keeps
+            // the utterance numbering continuous, which a restart would not.
+            guard systemTap == nil else { return }
+            startSystemAudio()
+        } else {
+            systemTap?.stop()
+            systemTap = nil
+        }
     }
 
     /// Stops the microphone, drains the last utterances, ends the session, and
@@ -228,6 +284,35 @@ public final class VoiceInputSession {
             let refined = Refiner.refine(raw: raw, config: config)
             return VoiceInputResult(raw: raw, refined: refined, segments: segments)
         }
+    }
+
+    /// Abandons the recording without producing a result.
+    ///
+    /// Built for termination paths — the app calls it from
+    /// `applicationWillTerminate`. Two things have to happen there and neither can
+    /// wait for a `finish()`: the microphone and the Core Audio process tap must
+    /// be closed (the tap lights the system-audio indicator for as long as it
+    /// exists), and the core's single ASR session must be released, since the
+    /// recording is being thrown away and cannot run a cleanup pass. So nothing
+    /// is decoded, nothing is delivered, and whatever was decoded is discarded.
+    ///
+    /// Marks the session finished, exactly as a normal `finish()` does, so a later
+    /// `finish()` throws rather than reading half a session. A no-op, and never a
+    /// throw, on a session that never started.
+    public func cancel() {
+        guard !finished else { return }
+        finished = true
+
+        capture?.stop()
+        capture = nil
+        systemTap?.stop()
+        systemTap = nil
+        stopPolling()
+
+        guard started else { return }
+        // Same ordering rule as `finish()`: no submit may race the stop, so the
+        // stop rides the queue. The decoded text is deliberately dropped.
+        queue.sync { _ = try? CoreABI.stopASR() }
     }
 
 
