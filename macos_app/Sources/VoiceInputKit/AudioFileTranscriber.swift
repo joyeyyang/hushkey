@@ -142,7 +142,8 @@ enum FileTranscriber {
         let raw = joined.isEmpty ? stopText.trimmingCharacters(in: .whitespacesAndNewlines) : joined
         let refined = Refiner.refine(raw: raw, config: config)
         emit(1, "done", progress)
-        return VoiceInputResult(raw: raw, refined: refined, segments: segments)
+        return VoiceInputResult(raw: raw, refined: refined, segments: segments,
+                                duration: Double(decoded) / targetRate)
     }
 
     /// `takeSegments` is what makes the engine decode what was submitted, and

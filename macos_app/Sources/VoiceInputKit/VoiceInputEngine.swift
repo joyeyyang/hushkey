@@ -246,6 +246,11 @@ public final class VoiceInputSession {
     /// later `resume()` has nothing stale to restart, and the microphone keeps
     /// going either way.
     public func setSystemAudioEnabled(_ enabled: Bool) {
+        // A tap belongs to a recording that is running. On a session that never
+        // started, or one that already finished, starting a tap would record the
+        // system's audio with nothing left that could stop it -- `finish()` and
+        // `cancel()` have both returned by then.
+        guard started, !finished else { return }
         if enabled {
             // Already recording the far end: leaving the existing tap alone keeps
             // the utterance numbering continuous, which a restart would not.

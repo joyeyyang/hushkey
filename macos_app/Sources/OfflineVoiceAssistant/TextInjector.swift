@@ -92,6 +92,13 @@ enum TextInjector {
     /// replace" (the result is on the clipboard either way) but "replaced the
     /// wrong thing".
     static func replaceLastInsertion(expected: String, with replacement: String) -> InjectionResult {
+        // First, not last: every failure path below tells the user the result is
+        // on the clipboard, and a field whose text cannot be read or selected
+        // leaves pasting it by hand as the only way to use the edit at all.
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(replacement, forType: .string)
+
         guard hasAccessibility else {
             requestAccessibility()
             return .needsPermission(reason: "未取得輔助使用權限，無法自動取代（編輯結果已複製）。請到「系統設定 → 隱私權與安全性 → 輔助使用」開啟 OfflineVoiceAssistant，再重新試一次")

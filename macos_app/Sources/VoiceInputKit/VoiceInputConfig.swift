@@ -147,11 +147,18 @@ public struct VoiceInputResult {
     public let refined: String
     /// Whatever the ASR produced, in engine order.
     public let segments: [Utterance]
+    /// Seconds of audio that were actually decoded.
+    ///
+    /// The container's own duration is not this: a file can claim a length it
+    /// does not have, and the number the user sees has to be the audio that was
+    /// heard.
+    public let duration: TimeInterval
 
-    public init(raw: String, refined: String, segments: [Utterance]) {
+    public init(raw: String, refined: String, segments: [Utterance], duration: TimeInterval = 0) {
         self.raw = raw
         self.refined = refined
         self.segments = segments
+        self.duration = duration
     }
 }
 

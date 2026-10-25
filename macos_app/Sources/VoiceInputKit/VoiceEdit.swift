@@ -30,6 +30,8 @@ import Foundation
 ///             我把檔案刪掉了
 ///             這個會議改成線上開
 ///             我用英文寫了一封信
+///             第一點要改善
+///             最後一段需要修改
 ///
 /// Of the rejections, 顏色改成藍色 and 我把檔案刪掉了 each carry a verb but name no
 /// target at all. 這個會議改成線上開 names a thing, but with 這個 rather than one of
@@ -50,8 +52,16 @@ public func isVoiceEditInstruction(_ text: String) -> Bool {
 /// because the verb alone is never enough.
 private func containsEditVerb(_ text: String) -> Bool {
     let chinese = ["改成", "改為", "換成", "刪掉", "刪除", "拿掉", "去掉", "移除",
-                   "縮短", "精簡", "重寫", "變成", "移到", "調順序", "加一句", "補一句", "改"]
+                   "縮短", "精簡", "重寫", "變成", "移到", "調順序", "加一句", "補一句"]
     if chinese.contains(where: { text.contains($0) }) { return true }
+    // The bare stem 改 only counts inside an imperative frame. On its own it is a
+    // substring of 改善／修改／改天, so "第一點要改善" -- an ordinary sentence about
+    // text, complete with a pointer at 第一點 -- read as an instruction and the
+    // whole dictation was swallowed by the edit path instead of being inserted.
+    // With 把／請／幫 in front of it, "把第二點改短" is unambiguous.
+    if text.contains("改") && ["把", "請", "幫", "將", "給我"].contains(where: { text.contains($0) }) {
+        return true
+    }
 
     let latin = ["change", "replace", "delete", "remove", "shorten", "rewrite", "make it"]
     let lower = text.lowercased()

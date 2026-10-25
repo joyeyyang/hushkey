@@ -75,20 +75,16 @@ int32_t ASR_Stop(char **out_text);
  * utterance. */
 int32_t ASR_TakeSegments(char **out_json);
 
-/* ---- LLM (Qwen2.5 via worker process) ---- */
-/* Translates text into `target` ("en" or "zh") and writes it to *out_text. */
-int32_t LLM_Translate(const char *text, const char *target, char **out_text);
-/* Applies a spoken edit instruction to an existing text and returns the whole edited text. */
-int32_t LLM_EditText(const char *text, const char *instruction, char **out_text);
-
-/* ---- LLM: implemented via an out-of-process worker (see state.rs).
- *      RAG: declared for the planned API; currently returns OVC_ERR_NOT_IMPLEMENTED. ---- */
+/* ---- LLM: implemented via an out-of-process worker (see state.rs). ---- */
 int32_t LLM_Summarize(const char *transcript, char **out_summary);
 int32_t LLM_RefineText(const char *text, char **out_text);
 int32_t LLM_RefineTextWithKeywords(const char *text, const char *keywords_hint, char **out_text);
 int32_t LLM_RefineTextWithKeywordsStages(const char *text, const char *keywords_hint, uint32_t stages, char **out_text);
-int32_t RAG_Search(const char *query, char **out_results_json);
-int32_t RAG_AddEntry(const char *entry_json);
+/* Translates text into `target` ("en" or "zh") and writes it to *out_text. */
+int32_t LLM_Translate(const char *text, const char *target, char **out_text);
+/* Applies a spoken edit instruction ("把第二點改成禮拜五") to an existing text and
+ * returns the whole edited text. The core numbers the lines itself. */
+int32_t LLM_EditText(const char *text, const char *instruction, char **out_text);
 
 #ifdef __cplusplus
 }

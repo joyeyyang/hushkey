@@ -227,36 +227,89 @@ const EDIT_SYSTEM: &str = "使用者已經打好一份文字，每一行都編�
 /// whose line is gone rather than blanked. The pairs also show that the answer
 /// repeats EVERY line and not just the changed one, which the rule alone was not
 /// enough to carry.
-const EDIT_EXAMPLES_ZH: [(&str, &str); 2] = [
+const EDIT_EXAMPLES_ZH: [(&str, &str); 3] = [
+    // The positional pair edits the LAST line, not the second one. With every
+    // positional example editing line 2, the model learned "a positional
+    // instruction means line 2" and every "把第三點改成…" came back unchanged.
+    // The deletion pair below deletes line 2, so with this one the two
+    // positional examples cover both a change and a removal on different
+    // lines.
     (
-        "把第二點改成禮拜五下午兩點\n\n1. 跟客戶確認規格\n2. 下週三下午三點開會\n3. 把報價單寄出去",
-        "1. 跟客戶確認規格\n2. 禮拜五下午兩點\n3. 把報價單寄出去",
+        "把第三點改成禮拜五下午兩點\n\n1. 跟客戶確認規格\n2. 把報價單寄出去\n3. 下週三下午三點開會",
+        "1. 跟客戶確認規格\n2. 把報價單寄出去\n3. 禮拜五下午兩點",
     ),
     // The deleted item's number disappears with it: the answer is two lines, not
     // three with a hole where the third was.
+    //
+    // The deleted line is the SECOND one, not the third. With the third as the
+    // deleted line, "把第三點改成…" came back unchanged across every draft
+    // tried: two of the three pairs left line 3 alone, and the model had
+    // learned that the last line is the one that disappears rather than the one
+    // that changes.
     (
-        "第三句刪掉\n\n1. 先確認規格\n2. 再找供應商\n3. 最後排時程",
-        "1. 先確認規格\n2. 再找供應商",
+        "第二句刪掉\n\n1. 先確認規格\n2. 再找供應商\n3. 最後排時程",
+        "1. 先確認規格\n3. 最後排時程",
+    ),
+    // The instruction names the CONTENT to change, not a position ("合約"), and
+    // the answer changes the line that carries that content. Without this pair
+    // the model had only ever seen "change the second one", and an answer with
+    // no position in it came back as the draft read out again -- the edit
+    // silently did nothing.
+    //
+    // Three things this pair has to get right, all measured:
+    //
+    // * The answer must read as a SENTENCE. A first attempt made it nonsense
+    //   ("討論第四季禮拜五"), and the model copied that shape: a content
+    //   instruction came back unchanged.
+    // * The REPLACEMENT has to be the kind of thing that slot can hold. A
+    //   second attempt put a date ("禮拜五") into a venue slot, and the model
+    //   refused -- correctly, since "地點：禮拜五" is not a place -- so the
+    //   answer came back unchanged.
+    // * The changed line must be the LAST one. With the content in the middle
+    //   line, every instruction about the last line came back unchanged: the
+    //   two earlier pairs both leave line 3 alone (one edits line 2, one
+    //   deletes line 3), and the model copied that -- "the last line is not
+    //   edited" -- which is what made "把第三點改成…" do nothing at all.
+    //
+    // So the content sits on the LAST line here, and the middle line stays
+    // untouched, which is the opposite of the earlier attempt.
+    (
+        "把合約改成報價單\n\n1. 上週的進度還沒回報，\n2. 客戶在等回覆，\n3. 合約是舊版的",
+        "1. 上週的進度還沒回報，\n2. 客戶在等回覆，\n3. 合約改成報價單",
     ),
 ];
 
-const EDIT_EXAMPLES_EN: [(&str, &str); 2] = [
+const EDIT_EXAMPLES_EN: [(&str, &str); 3] = [
+    // The positional pair edits the LAST line -- the English twin of the
+    // Chinese first pair, and for the same measured reason.
     (
-        "change the second one to Friday at 2 pm\n\n1. Confirm the spec with the client\n2. Meeting on Wednesday at 3 pm\n3. Send the quote",
-        "1. Confirm the spec with the client\n2. Friday at 2 pm\n3. Send the quote",
+        "change the third one to Friday at 2 pm\n\n1. Confirm the spec with the client\n2. Send the quote\n3. Meeting on Wednesday at 3 pm",
+        "1. Confirm the spec with the client\n2. Send the quote\n3. Friday at 2 pm",
     ),
     (
-        "delete the third one\n\n1. Confirm the spec\n2. Find a supplier\n3. Set the schedule",
-        "1. Confirm the spec\n2. Find a supplier",
+        "delete the second one\n\n1. Confirm the spec\n2. Find a supplier\n3. Set the schedule",
+        "1. Confirm the spec\n3. Set the schedule",
+    ),
+    // The instruction names the content ("the contract"), not a position -- the
+    // English twin of the Chinese third pair, and it exists for the same
+    // measured reason: with only position-based pairs in the prompt, a content
+    // instruction came back as the draft read out again. The content sits on
+    // the LAST line, for the same reason the Chinese one does: with it in the
+    // middle, every instruction about the last line changed nothing.
+    (
+        "change the contract to the quote\n\n1. Last week's progress is not reported yet,\n2. The client is waiting for an answer,\n3. The contract is the old version",
+        "1. Last week's progress is not reported yet,\n2. The client is waiting for an answer,\n3. The contract changed to the quote",
     ),
 ];
 
 /// True for the CJK ranges that decide "this draft is Chinese".
 pub(crate) fn has_cjk(text: &str) -> bool {
-    text.chars().any(|c| {
-        matches!(c as u32,
-            0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x3040..=0x30ff | 0xac00..=0xd7af)
-    })
+    text.chars().any(is_cjk)
+}
+
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x3040..=0x30ff | 0xac00..=0xd7af)
 }
 
 /// Each section is a separate model call; the program owns the structure.
@@ -683,16 +736,24 @@ fn strip_wrapping_quotes(text: &str) -> &str {
     }
 }
 
-/// Strip ONE trailing full stop: `。`, `.` or `．`.
+/// Strip ONE trailing separator the text cannot end on: `。`, `.`, `．`, `，`, `、`
+/// or `,`.
+///
+/// The full stop is the delivery rule (the text goes to a cursor). The comma and
+/// the enumeration mark are the edit pass's leftovers: the model joins an edited
+/// line back together and can leave the separator that used to sit between two
+/// clauses dangling at the end ("我明天要去開會，地點還沒確定，"). A trailing
+/// separator of any kind reads as an unfinished sentence at a cursor, and none of
+/// them is ever spoken as the last character.
 ///
 /// Deliberately literal -- only the last character is judged, so an interior
 /// period stays, and an ellipsis (`…`), a question mark, a bang, a colon or a
 /// semicolon is left as the speaker's punctuation. No abbreviation lookup and no
 /// `...` detection: the model emits `…` for an ellipsis, and the product rule is
 /// about the final character, not about guessing words.
-fn strip_trailing_full_stop(text: &str) -> &str {
+fn strip_trailing_separator(text: &str) -> &str {
     match text.chars().next_back() {
-        Some(c @ ('。' | '.' | '．')) => text[..text.len() - c.len_utf8()].trim_end(),
+        Some(c @ ('。' | '.' | '．' | '，' | '、' | ',')) => text[..text.len() - c.len_utf8()].trim_end(),
         _ => text,
     }
 }
@@ -742,7 +803,7 @@ fn strip_lone_bullet(text: &str) -> &str {
 fn tidy_output(text: &str) -> String {
     let unquoted = strip_wrapping_quotes(text);
     let single = strip_lone_bullet(unquoted);
-    collapse_blank_lines(strip_trailing_full_stop(single))
+    collapse_blank_lines(strip_trailing_separator(single))
 }
 
 /// Ways a speaker asks for another language, and the target `translate_prompt`
@@ -953,14 +1014,29 @@ fn numbered_items(text: &str) -> Vec<String> {
             continue;
         }
         let body = strip_bullet(trimmed).trim();
+        // A draft that already carries numbers ("1. 先確認規格") is numbered by
+        // the user or by an earlier pass. Numbering it again produced "1. 1.
+        // 先確認規格", and the model answered to that broken shape.
+        let body = strip_item_number(body).unwrap_or(body).trim();
         if !body.is_empty() {
             items.push(body.to_string());
         }
     }
-    if items.len() == 1 && items[0].chars().any(is_sentence_end) {
-        let sentences = split_sentences(&items[0]);
-        if !sentences.is_empty() {
-            items = sentences;
+    if items.len() == 1 {
+        // A spoken draft is one run-on line with almost no punctuation: in the
+        // app's own 43 recorded drafts, 34 carry no sentence end at all. Sentence
+        // ends alone therefore left the model looking at `1. <the whole thing>`,
+        // so a spoken 「第二句」 named nothing it had been shown, and an answer
+        // could not be checked against anything. Clause marks are the only
+        // boundaries such a draft has, so they are used when there is no sentence
+        // end to split on.
+        let parts = if items[0].chars().any(is_sentence_end) {
+            split_sentences(&items[0])
+        } else {
+            split_clause_marks(&items[0])
+        };
+        if parts.len() > 1 {
+            items = parts;
         }
     }
     items
@@ -1004,6 +1080,30 @@ fn split_sentences(text: &str) -> Vec<String> {
     items
 }
 
+/// Split at clause marks, keeping each clause's own punctuation.
+///
+/// Only reached for a draft with no sentence end anywhere. The marks stay
+/// attached to their clause so that rejoining the edited items reproduces the
+/// line as it was spoken -- `join_edited_items` puts no separator between CJK
+/// items for exactly that reason.
+fn split_clause_marks(text: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        current.push(c);
+        if matches!(c, '，' | ',' | '；' | ';' | '、') {
+            items.push(current.trim().to_string());
+            current.clear();
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        items.push(tail.to_string());
+    }
+    items.retain(|item| !item.is_empty());
+    items
+}
+
 /// Render items as the numbered lines the edit prompt shows the model.
 fn number_lines(items: &[String]) -> String {
     let mut out = String::new();
@@ -1021,7 +1121,7 @@ fn number_lines(items: &[String]) -> String {
 /// Strict on purpose: a line is an item only when it OPENS with an optional
 /// bullet, a run of digits, one of `.` `、` `)` and whitespace. That is what
 /// keeps a trailing remark ("(我把第二點改掉了)", "done!") out of the result --
-/// see `parse_edited_items`.
+/// see `parse_edited_answer`.
 fn strip_item_number(line: &str) -> Option<&str> {
     let trimmed = line.trim();
     let body = strip_bullet(trimmed);
@@ -1032,12 +1132,12 @@ fn strip_item_number(line: &str) -> Option<&str> {
     let rest = body[digits..].strip_prefix(['.', '、', ')'])?;
     let item = match rest.strip_prefix(char::is_whitespace) {
         Some(after_space) => after_space,
-        // The space after the marker is the model's habit, not a rule: "1. 甲"
-        // and "2、甲" are the same item, and a line dropped here costs the user
-        // the edit. Only a dot is refused without one, because that is the
-        // marker a fraction borrows -- "3.14" must stay a remark rather than
-        // become an item named "14".
-        None if !body[digits..].starts_with('.') => rest,
+        // The space after the marker is the model's habit, not a rule: "1. 甲",
+        // "1.甲" and "2、甲" are the same item, and a line dropped here is a line
+        // of the user's text lost without a word. The one thing that is not an
+        // item is a fraction -- "3.14" only looks like a marker because a dot is
+        // also a decimal point, so a dot followed by a digit is refused.
+        None if !rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
         None => return None,
     }
     .trim();
@@ -1047,13 +1147,52 @@ fn strip_item_number(line: &str) -> Option<&str> {
     Some(item)
 }
 
-/// Read the model's numbered lines back, in answer order.
+/// Read the model's answer back: the lines, and whether they arrived numbered.
 ///
-/// Anything that is not a numbered line is dropped: the answer often carries a
-/// closing remark, and a remark is not part of the user's text. An answer with no
-/// numbered line at all leaves this EMPTY, which the caller turns into an error.
-fn parse_edited_items(answer: &str) -> Vec<String> {
-    answer.lines().filter_map(strip_item_number).map(str::to_string).collect()
+/// Numbered lines are the shape the prompt asks for, and the only shape that can
+/// express a deletion -- the numbers that are missing say which line went. The
+/// model also answers with plain lines often enough to matter: measured on this
+/// 1.5B model, the SAME prompt and draft returned the numbered shape and the
+/// plain one on different runs (Metal reductions are not bit-identical under the
+/// memory pressure of an 8 GB machine), so refusing the plain shape made the
+/// feature fail at random.
+///
+/// A plain answer is therefore read as its own non-empty lines and left to
+/// `check_edited_shape`, which knows the draft it has to account for. Lines that
+/// are neither -- a closing remark such as "好的，我改好了" -- are dropped here,
+/// and an answer that is only remarks comes back empty, which the caller turns
+/// into an error.
+fn parse_edited_answer(answer: &str) -> (Vec<String>, bool) {
+    let numbered: Vec<String> = answer
+        .lines()
+        .filter_map(strip_item_number)
+        .map(str::to_string)
+        .collect();
+    if !numbered.is_empty() {
+        return (numbered, true);
+    }
+    let plain: Vec<String> = answer
+        .lines()
+        .map(|line| strip_bullet(line.trim()).trim())
+        .filter(|line| !line.is_empty() && !looks_like_commentary(line))
+        .map(str::to_string)
+        .collect();
+    (plain, false)
+}
+
+/// Whether a line is the model talking about the edit instead of making it.
+///
+/// Only consulted for an answer that ignored the numbering, where the line count
+/// is the whole check and one remark equals one line of the user's text. The
+/// prefixes are the ones this model actually produces ("好的", "已幫你改好",
+/// "以下是修改後的內容"); a real edited line that happens to start with 我 or 今天
+/// is not affected, which is why the list is short and specific.
+fn looks_like_commentary(line: &str) -> bool {
+    const PREFIXES: [&str; 14] = [
+        "好的", "好，", "OK", "okay", "已幫", "已經", "已完成", "完成", "以下是", "這是",
+        "抱歉", "對不起", "Here is", "Sure",
+    ];
+    PREFIXES.iter().any(|prefix| line.starts_with(prefix))
 }
 
 /// Rejoin the edited items using the ORIGINAL text's layout.
@@ -1064,7 +1203,8 @@ fn parse_edited_items(answer: &str) -> Vec<String> {
 /// multi-line original keeps newlines, and a single-line original is rejoined the
 /// way it was written -- no space inside CJK, one space between Latin words.
 fn join_edited_items(original: &str, items: &[String]) -> String {
-    let multiline = original.lines().filter(|line| !line.trim().is_empty()).count() > 1;
+    let lines: Vec<&str> = original.lines().filter(|line| !line.trim().is_empty()).collect();
+    let multiline = lines.len() > 1;
     let separator = if multiline {
         "\n"
     } else if has_cjk(original) {
@@ -1072,12 +1212,397 @@ fn join_edited_items(original: &str, items: &[String]) -> String {
     } else {
         " "
     };
-    items.join(separator)
+    let joined = items.join(separator);
+    // The numbering hid the bullet markers from the model, so they come back
+    // here: the bullets are the user's layout in the same way the newlines are,
+    // and every line of a bulleted draft carried one. "• " is the canonical
+    // marker the refine prompt asks for and `normalizeOutput` writes.
+    let bulleted = multiline && lines.iter().all(|line| line.trim_start().starts_with("• "));
+    if !bulleted {
+        return joined;
+    }
+    joined.split('\n').map(|line| format!("• {line}")).collect::<Vec<_>>().join("\n")
+}
+
+/// Which line of the draft a spoken edit instruction is about.
+///
+/// The model cannot be trusted to find it. Measured on this 2B model over a
+/// three-line draft: a positional instruction ("把第三點改成…") left the draft
+/// unchanged for most values tried, and a content instruction ("把地點改成…")
+/// changed the WRONG line or nothing at all -- the few-shot examples taught it
+/// which line the examples touched, and it copied that rather than reading the
+/// instruction. A prompt cannot fix a model that answers a different question.
+///
+/// So the line is found HERE, where it is arithmetic rather than interpretation,
+/// and the model is asked to rewrite that ONE line. The program owns the
+/// structure; the model owns the wording.
+///
+/// Two ways to name a line, both spelled out in the instruction:
+///
+/// * A POSITION: "第三點", "the second one", "3". Unambiguous, so it wins.
+/// * A CONTENT WORD: "把地點改成…", "change the venue to…". The line that
+///   contains the word is the one. When several lines contain it, the longest
+///   run of shared characters decides -- "第四季時程" points at the line that
+///   says 時程, not at one that merely says 季.
+///
+/// Returns `None` when nothing matches, which leaves the caller on the old
+/// whole-draft path: a refusal keeps the user's text, and an unlocatable
+/// instruction is exactly the case where the whole-draft model at least has a
+/// chance.
+fn locate_edit_target(instruction: &str, items: &[String]) -> Option<(usize, EditTarget)> {
+    if items.is_empty() {
+        return None;
+    }
+    if let Some(index) = locate_by_position(instruction, items.len()) {
+        return Some((index, EditTarget::Position));
+    }
+    let word = locate_by_content(instruction, items)?;
+    Some((word.0, EditTarget::Content(word.1)))
+}
+
+/// How the instruction named the line it is about.
+///
+/// The two ways need different instructions to the model. A position names a
+/// line and the replacement becomes that line ("把第二點改成禮拜五" makes the
+/// line "禮拜五"). A content word names a PART of a line, and the replacement
+/// takes that part's place ("把小林改成大衛" makes the line "明天下午三點跟大衛
+/// 開會"). Telling the model "replace this line" for the second case made it
+/// put the new value in front of the line instead of in the word's place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EditTarget {
+    Position,
+    Content(String),
+}
+
+/// The line a POSITION in the instruction names, if any.
+///
+/// The position words are the ones a person actually says: "第三點", "第三句",
+/// "第三行", "the second one", "3". Chinese numerals are read as well as
+/// Arabic ones, because "第三點" is how the instruction comes out of the
+/// microphone.
+fn locate_by_position(instruction: &str, count: usize) -> Option<usize> {
+    if let Some(n) = chinese_position(instruction) {
+        if n >= 1 && n <= count {
+            return Some(n - 1);
+        }
+    }
+    // An English ordinal: "the second one", "the third line".
+    if let Some(n) = english_ordinal(instruction) {
+        if n >= 1 && n <= count {
+            return Some(n - 1);
+        }
+    }
+    // An Arabic digit run: "把3改成…". A digit that FOLLOWS the change verb is
+    // part of the replacement ("改成3樓"), not a position, so the digit has to
+    // come before the verb -- or be followed by a word that marks it as a
+    // position ("3點").
+    let bytes = instruction.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        if !b.is_ascii_digit() {
+            continue;
+        }
+        let start = i;
+        let mut end = i;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let after = instruction[end..].chars().next().unwrap_or(' ');
+        let marked = matches!(after, '點' | '句' | '行' | '項' | '條' | '.' | ')');
+        if !marked && !before_change_verb(instruction, start) {
+            continue;
+        }
+        let n: usize = instruction[start..end].parse().ok()?;
+        if n >= 1 && n <= count {
+            return Some(n - 1);
+        }
+    }
+    None
+}
+
+/// Whether the byte offset sits before the word that marks the replacement.
+///
+/// "把3改成禮拜五" has the 3 before the verb, so it is a position; "改成3樓" has
+/// it after, so it is part of the new value.
+fn before_change_verb(instruction: &str, at: usize) -> bool {
+    const VERBS: [&str; 6] = ["改成", "換成", "改為", "換", "改", "刪掉"];
+    let head = &instruction[..at];
+    !VERBS.iter().any(|verb| head.contains(verb))
+}
+
+/// The Chinese position in the instruction, if it names one.
+///
+/// "第三點" is 3, "第十行" is 10. The numeral has to be preceded by 第 and
+/// followed by a position word, so "第四季" is not read as a line number and
+/// "把三點改成四點" is not read as "change line 3" -- 三點 there is the time
+/// in the afternoon, and reading it as a position put the new time on the
+/// wrong clause.
+fn chinese_position(instruction: &str) -> Option<usize> {
+    const DIGITS: [(&str, usize); 10] = [
+        ("一", 1), ("二", 2), ("三", 3), ("四", 4), ("五", 5),
+        ("六", 6), ("七", 7), ("八", 8), ("九", 9), ("十", 10),
+    ];
+    const POSITION_WORDS: [char; 6] = ['點', '句', '行', '項', '條', '個'];
+    let chars: Vec<char> = instruction.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        // 第 has to be there: without it, "三點" is a time and not a position.
+        if i == 0 || chars[i - 1] != '第' {
+            continue;
+        }
+        let value = match DIGITS.iter().find(|(d, _)| d.chars().next() == Some(*c)) {
+            Some((_, v)) => *v,
+            None => continue,
+        };
+        let next = i + 1;
+        // A numeral run: 十一 is 11.
+        if next + 1 < chars.len() {
+            if let Some((_, tens)) = DIGITS.iter().find(|(d, _)| d.chars().next() == Some(chars[next])) {
+                if *tens == 10 {
+                    // 十一 = 11, 十二 = 12 …
+                    if let Some((_, ones)) = DIGITS.iter().find(|(d, _)| d.chars().next() == Some(chars[next + 1])) {
+                        if *ones < 10 && POSITION_WORDS.contains(&chars[next + 2]) {
+                            return Some(10 + ones);
+                        }
+                    }
+                }
+            }
+        }
+        if next < chars.len() && POSITION_WORDS.contains(&chars[next]) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// The English position in the instruction, if it names one.
+fn english_ordinal(instruction: &str) -> Option<usize> {
+    const ORDINALS: [(&str, usize); 10] = [
+        ("first", 1), ("second", 2), ("third", 3), ("fourth", 4), ("fifth", 5),
+        ("sixth", 6), ("seventh", 7), ("eighth", 8), ("ninth", 9), ("tenth", 10),
+    ];
+    let lower = instruction.to_lowercase();
+    ORDINALS
+        .iter()
+        .find(|(word, _)| lower.contains(word))
+        .map(|(_, value)| *value)
+}
+
+/// The line a CONTENT WORD in the instruction points at.
+///
+/// The word is what the instruction names as the thing to change: "把地點改成…"
+/// names 地點, and the line that says 地點 is the one. The word is taken from
+/// the instruction's own wording rather than from a fixed list, so this works
+/// for any vocabulary the user speaks.
+///
+/// The instruction is read as "把 <TARGET> 改成 <VALUE>" or "change <TARGET> to
+/// <VALUE>": the target is what sits between the verb and the replacement. The
+/// replacement itself is dropped -- it is the new value, not a word to look for
+/// in the old text -- and so are the verbs, or "改成" would be looked for in
+/// every line.
+///
+/// Chinese has no spaces, so the target is the run of characters between the
+/// verb and the next verb or the end: "把地點改成三樓會議室" yields 地點, not
+/// 地點改成三樓會議室.
+fn locate_by_content(instruction: &str, items: &[String]) -> Option<(usize, String)> {
+    let targets = content_words(instruction);
+    if targets.is_empty() {
+        return None;
+    }
+    let mut best: Option<(usize, usize, String)> = None; // (index, shared, word)
+    for (index, item) in items.iter().enumerate() {
+        let mut shared = 0;
+        let mut word = String::new();
+        for candidate in &targets {
+            if candidate.chars().count() < 2 {
+                continue;
+            }
+            if item.contains(candidate.as_str()) && candidate.chars().count() > shared {
+                shared = candidate.chars().count();
+                word = candidate.clone();
+            }
+        }
+        // A line that carries more of the instruction's words is the better
+        // match; ties go to the earlier line.
+        if shared > 0 && best.as_ref().map(|(_, s, _)| shared > *s).unwrap_or(true) {
+            best = Some((index, shared, word));
+        }
+    }
+    let (index, _, word) = best?;
+    // The word has to be on ONE line only. "把三點改成四點" on a draft whose
+    // first and third lines both say 三點 names two lines, and which one the
+    // user meant is not decidable here. The whole-draft path is not asked
+    // either -- it put the new time in the third line, which was as likely to
+    // be wrong as right -- so this is a refusal, and the user keeps the text
+    // they already have.
+    if items.iter().filter(|i| i.contains(word.as_str())).count() != 1 {
+        return None;
+    }
+    Some((index, word))
+}
+
+/// The content words an instruction names, taken out of its own wording.
+///
+/// The instruction is read as "把 <TARGET> 改成 <VALUE>" or "change <TARGET> to
+/// <VALUE>": the target is what sits between the verb and the replacement. The
+/// replacement itself is dropped -- it is the new value, not a word to look for
+/// in the old text -- and so are the verbs.
+fn content_words(instruction: &str) -> Vec<String> {
+    // The verbs that frame the target. The FIRST one ends the target and the
+    // rest starts the replacement, so only what sits before it is the target.
+    const CHINESE_VERBS: [&str; 10] = ["改成", "換成", "改為", "換", "改", "刪掉", "刪除", "拿掉", "去掉", "換成"];
+    const ENGLISH_VERBS: [&str; 6] = ["change", "replace", "make it", "delete", "remove", "to"];
+    let mut rest = instruction.trim().to_string();
+    for verb in CHINESE_VERBS.iter() {
+        if let Some(at) = rest.find(verb) {
+            rest = rest[..at].to_string();
+            break;
+        }
+    }
+    for verb in ENGLISH_VERBS.iter() {
+        if let Some(at) = rest.find(verb) {
+            rest = rest[..at].to_string();
+            break;
+        }
+    }
+    // What is left, minus the words that frame the sentence.
+    const FRAMING: [&str; 16] = [
+        "請幫我", "幫我", "請", "幫", "把", "給我", "我要", "我想", "要", "的", "了",
+        "please", "can you", "could you", "make", "the",
+    ];
+    for word in FRAMING {
+        rest = rest.replace(word, " ");
+    }
+    let words: Vec<String> = rest
+        .split(|c: char| c.is_whitespace() || "，,。.、；;：:！!？?「」『』".contains(c))
+        .map(|w| w.trim())
+        .filter(|w| !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit()))
+        .map(|w| w.to_string())
+        .collect();
+    // A Chinese target is one run of characters, not a list of words: the
+    // split above left "地點" intact because Chinese has no spaces, but a
+    // mixed instruction can leave a run with a stray Latin word in it.
+    words
+        .into_iter()
+        .filter(|w| w.chars().count() >= 2 || w.chars().all(|c| c.is_ascii_alphabetic()))
+        .collect()
+}
+
+/// Prompt for rewriting ONE line of the draft.
+///
+/// The line has already been chosen by the program (see `locate_edit_target`),
+/// so the model is not asked which line to change -- only how to word it. The
+/// line comes back on its own, with no numbering, because there is nothing to
+/// number it against.
+///
+/// The instruction the model is given is the ONE LINE's instruction, rebuilt
+/// from the spoken one: the position is dropped (the line is already the one),
+/// and only the replacement is kept. Passing the spoken instruction through
+/// unchanged made the model echo it -- "把第二點改成禮拜五" came back as the
+/// line "第二點改成禮拜五討論第四季時程" -- because the instruction still
+/// talked about a position the model could not see.
+///
+/// The examples are the two shapes this can be: a replacement and a removal.
+/// A one-line answer is all that is wanted, so the prompt says so and the
+/// worked pairs show it.
+const EDIT_ONE_SYSTEM_ZH: &str = "使用者要修改下面這一行文字。只輸出改寫後的那一行，不要解釋、不要加標號、不要加引號。\
+如果使用者要刪掉這一行，只輸出一個固定的符號「␡」。\
+沒有被要求改的部分要保留，數字、時間、人名照原樣保留。";
+const EDIT_ONE_SYSTEM_EN: &str = "The user wants this one line changed. Output only the changed line, no explanation, no numbering, no quotes. \
+If the user wants this line deleted, output the single marker 「␡」. \
+Keep everything that was not asked to change; keep numbers, times and names as they are.";
+
+/// The marker that stands for a deleted line.
+const DELETED_LINE: &str = "␡";
+
+const EDIT_ONE_EXAMPLES_ZH: [(&str, &str); 4] = [
+    // A POSITION target replaces the WHOLE line. The first attempt showed
+    // "禮拜五下午兩點開會" for the line "下週三下午三點開會", and the model
+    // copied that shape everywhere: it put the new value in front of the line
+    // and kept the rest, so "把地點改成三樓會議室" came back as
+    // "三樓會議室地點還沒確定". A whole-line replacement is shown as one.
+    ("把這行完全改成禮拜五下午兩點\n下週三下午三點開會", "禮拜五下午兩點"),
+    ("把這行完全改成禮拜五\n討論第四季時程", "禮拜五"),
+    // A CONTENT target replaces only the word, and the rest of the line stays.
+    ("把這行裡的「小林」改成大衛，其他字不變\n明天下午三點跟小林開會，", "明天下午三點跟大衛開會，"),
+    ("刪掉這行\n地點還沒確定", DELETED_LINE),
+];
+
+const EDIT_ONE_EXAMPLES_EN: [(&str, &str); 4] = [
+    ("replace this whole line with Friday at 2 pm\nMeeting on Wednesday at 3 pm", "Friday at 2 pm"),
+    ("replace this whole line with Friday\nWe will discuss the Q4 schedule", "Friday"),
+    ("replace \"Kevin\" with David in this line, keep the rest\nMeeting with Kevin tomorrow,", "Meeting with David tomorrow,"),
+    ("delete this line\nThe venue is still undecided", DELETED_LINE),
+];
+
+/// Prompt for rewriting one chosen line.
+fn edit_one_prompt(instruction: &str, line: &str, target: &EditTarget) -> String {
+    let (system, examples): (&str, &[(&str, &str)]) = if has_cjk(line) {
+        (EDIT_ONE_SYSTEM_ZH, &EDIT_ONE_EXAMPLES_ZH)
+    } else {
+        (EDIT_ONE_SYSTEM_EN, &EDIT_ONE_EXAMPLES_EN)
+    };
+    let user = format!("{}\n{}", one_line_instruction(instruction, target), line.trim());
+    chatml_few_shot(system, examples, &user)
+}
+
+/// The instruction for rewriting ONE line, rebuilt from the spoken one.
+///
+/// The spoken instruction names a position ("把第二點改成禮拜五") and the model
+/// has only ever been shown one line, so the position is dropped and the
+/// replacement is kept. What is left is the part of the instruction after the
+/// change verb, which is the new value.
+///
+/// A CONTENT target is different: the instruction named a word INSIDE the line
+/// ("把小林改成大衛"), and the replacement has to take that word's place. So
+/// the word is named again in the instruction, and the model is told to replace
+/// it where it sits. Without that, the model put the new value in front of the
+/// line ("大衛明天下午三點跟小林開會") -- it was told to replace the line, and
+/// that is what it did.
+///
+/// A deletion keeps its own wording, because there is no value to carry over.
+fn one_line_instruction(instruction: &str, target: &EditTarget) -> String {
+    let text = instruction.trim();
+    const CHINESE_VERBS: [&str; 5] = ["改成", "換成", "改為", "換", "改"];
+    const ENGLISH_VERBS: [&str; 3] = ["change", "replace", "to"];
+    if instruction_removes(text) {
+        return if has_cjk(text) { "刪掉這行".to_string() } else { "delete this line".to_string() };
+    }
+    let value = CHINESE_VERBS
+        .iter()
+        .find_map(|verb| {
+            text.find(verb).map(|at| text[at + verb.len()..].trim().to_string())
+        })
+        .or_else(|| {
+            ENGLISH_VERBS.iter().find_map(|verb| {
+                text.to_lowercase()
+                    .find(verb)
+                    .map(|at| text[at + verb.len()..].trim().to_string())
+            })
+        })
+        .unwrap_or_default();
+    if value.is_empty() {
+        return text.to_string();
+    }
+    match target {
+        EditTarget::Position => {
+            if has_cjk(text) {
+                format!("把這行完全改成{value}")
+            } else {
+                format!("replace this whole line with {value}")
+            }
+        }
+        EditTarget::Content(word) => {
+            if has_cjk(text) {
+                format!("把這行裡的「{word}」改成{value}，其他字不變")
+            } else {
+                format!("replace \"{word}\" with {value} in this line, keep the rest")
+            }
+        }
+    }
 }
 
 /// Prompt for one voice edit: the instruction and the numbered draft, with one
 /// worked pair per edit shape for the draft's language.
-fn edit_prompt(instruction: &str, text: &str) -> String {
+pub fn edit_prompt(instruction: &str, text: &str) -> String {
     let examples: &[(&str, &str)] = if has_cjk(text) {
         &EDIT_EXAMPLES_ZH
     } else {
@@ -1096,23 +1621,359 @@ fn edit_prompt(instruction: &str, text: &str) -> String {
 /// text: the numbered lines exist only inside the prompt, so the caller replaces
 /// the text rather than asking the user to accept a diff.
 pub fn edit_with_instruction(model_path: &Path, text: &str, instruction: &str) -> Result<String> {
-    let answer = generate(model_path, &edit_prompt(instruction, text))?;
-    let items = parse_edited_items(&answer);
-    // No numbered line means the model answered conversationally -- a sentence
-    // like "好的，我改好了" about the edit rather than the edited text. That is an
-    // ERROR and deliberately not a success: what came back is commentary, and
-    // returning it would replace the user's own text with that remark. A failure
-    // leaves the user with the text they already have, which is the harmless
-    // outcome of the two.
-    if items.is_empty() {
-        return Err(EngineError::new(ErrorCode::Inference, "the model did not answer with numbered lines"));
+    let draft = numbered_items(text);
+    // The line is found here when it can be found, and the model then rewrites
+    // only that line. This is the path that works: the whole-draft prompt below
+    // measures at 4/7 on a three-line draft, because a 2B model does not
+    // reliably pick the line an instruction names.
+    if let Some((index, target)) = locate_edit_target(instruction, &draft) {
+        match edit_one_line(model_path, text, &draft, index, instruction, &target) {
+            Ok(edited) => return Ok(edited),
+            // A targeted rewrite that came back unusable falls back to the
+            // whole-draft path, which at least has a chance of applying the
+            // edit somewhere.
+            Err(e) => {
+                eprintln!("targeted edit failed ({e:?}); falling back to the whole-draft edit");
+            }
+        }
     }
+    // A content instruction whose word is on SEVERAL lines names no line, and
+    // the whole-draft path below would guess: measured, "把三點改成四點" on a
+    // draft whose first and third lines both said 三點 put the new time in the
+    // third line. A refusal keeps the user's text, which is the harmless
+    // outcome; a wrong guess rewrites the wrong sentence.
+    if let Some(word) = ambiguous_content_word(instruction, &draft) {
+        return Err(EngineError::new(
+            ErrorCode::Inference,
+            format!("the word 「{word}」 appears in more than one line"),
+        ));
+    }
+    let answer = generate(model_path, &edit_prompt(instruction, text))?;
+    let (items, numbered) = parse_edited_answer(&answer);
+    // No usable line means the model answered conversationally -- a sentence like
+    // "好的，我改好了" about the edit rather than the edited text. That is an ERROR
+    // and deliberately not a success: what came back is commentary, and returning
+    // it would replace the user's own text with that remark. A failure leaves the
+    // user with the text they already have, which is the harmless outcome of the
+    // two.
+    if items.is_empty() {
+        return Err(EngineError::new(ErrorCode::Inference, "the model's answer had no lines to use"));
+    }
+    // A one-line draft answered with one plain line: the model applied the edit and
+    // rejoined the line (measured -- the clause numbering is what it drops), so
+    // there are no line counts to compare. Content is compared instead.
+    let one_line_draft = text.lines().filter(|line| !line.trim().is_empty()).count() == 1;
+    if !numbered && one_line_draft && items.len() == 1 {
+        let candidate = tidy_output(&items[0]);
+        if !single_line_answer_is_an_edit(text, &candidate) {
+            return Err(EngineError::new(
+                ErrorCode::Inference,
+                "the answer is not an edit of the draft",
+            ));
+        }
+        return Ok(candidate);
+    }
+    check_edited_shape(&items, &draft, instruction, numbered)?;
     Ok(tidy_output(&join_edited_items(text, &items)))
+}
+
+/// The word a content instruction names, if that word is on more than one line.
+///
+/// Returns the word, so the caller can refuse the edit with a reason. The
+/// instruction named a word the draft uses twice, and the two lines are not
+/// told apart by the instruction -- so which one to change is a guess.
+fn ambiguous_content_word(instruction: &str, items: &[String]) -> Option<String> {
+    if locate_by_position(instruction, items.len()).is_some() {
+        return None;
+    }
+    for word in content_words(instruction) {
+        if word.chars().count() < 2 {
+            continue;
+        }
+        if items.iter().filter(|i| i.contains(word.as_str())).count() > 1 {
+            return Some(word);
+        }
+    }
+    None
+}
+
+/// Rewrite ONE chosen line of the draft and put it back.
+///
+/// The line was chosen by the program, so the model is only asked for the
+/// wording. The result is checked against the line it replaces -- a rewritten
+/// line that lost most of its own characters is a fragment rather than an
+/// edit, and a line that came back unchanged means the model did not apply the
+/// instruction. Both are errors: the caller keeps the user's text, which is the
+/// harmless outcome.
+///
+/// A deletion is handled here too, by the marker the model was asked to
+/// output: the line is dropped and the rest of the draft is untouched.
+fn edit_one_line(
+    model_path: &Path,
+    original: &str,
+    draft: &[String],
+    index: usize,
+    instruction: &str,
+    target: &EditTarget,
+) -> Result<String> {
+    let line = draft.get(index).ok_or_else(|| {
+        EngineError::new(ErrorCode::InvalidArg, "the edit target is outside the draft")
+    })?;
+    // A POSITION instruction replaces the whole line with the new value, and
+    // that is arithmetic, not interpretation: the program can do it exactly.
+    // Asking the model for it measured worse than doing it -- "把第三點改成
+    // 三樓會議室" came back as the line with the value in front of it, or as
+    // the line unchanged, depending on the run.
+    if let EditTarget::Position = target {
+        if let Some(value) = replacement_value(instruction) {
+            let mut items: Vec<String> = draft.to_vec();
+            items[index] = keep_trailing_mark(line, &value);
+            return Ok(tidy_output(&join_edited_items(original, &items)));
+        }
+    }
+    // A deletion removes the line, and that is arithmetic too. The model is
+    // only needed for a rewrite, where the wording is the model's job.
+    if instruction_removes(instruction) {
+        let mut items: Vec<String> = draft.to_vec();
+        items.remove(index);
+        return Ok(tidy_output(&join_edited_items(original, &items)));
+    }
+    // A CONTENT instruction that names a short word ("地點", "小林") is a plain
+    // substitution, and doing it here is exact. The model is asked only when
+    // the substitution cannot be made on its own.
+    if let EditTarget::Content(word) = target {
+        if let Some(value) = replacement_value(instruction) {
+            if let Some(substituted) = substitute_in_draft(draft, index, word, &value) {
+                let mut items: Vec<String> = draft.to_vec();
+                items[index] = keep_trailing_mark(line, &substituted);
+                return Ok(tidy_output(&join_edited_items(original, &items)));
+            }
+        }
+    }
+    let answer = generate(model_path, &edit_one_prompt(instruction, line, target))?;
+    let rewritten = answer
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !looks_like_commentary(l))
+        .unwrap_or("")
+        .trim_matches(['"', '\'', '「', '」', '『', '』'])
+        .trim();
+    if rewritten.is_empty() {
+        return Err(EngineError::new(ErrorCode::Inference, "the model returned no line"));
+    }
+    // The whole answer can be more than one line if the model ignored the
+    // instruction; only the first line is the line's new wording.
+    let deleted = rewritten == DELETED_LINE;
+    if deleted {
+        let mut items: Vec<String> = draft.to_vec();
+        items.remove(index);
+        return Ok(tidy_output(&join_edited_items(original, &items)));
+    }
+    if rewritten == *line {
+        return Err(EngineError::new(ErrorCode::Inference, "the model returned the line unchanged"));
+    }
+    // A rewritten line that keeps almost nothing of the original is a fragment
+    // of some other sentence, not this line edited. The same half-kept rule
+    // the one-line path uses applies here.
+    if retained_ratio(line, rewritten) < RETAINED_MIN {
+        return Err(EngineError::new(
+            ErrorCode::Inference,
+            "the model's line is not an edit of the line it replaced",
+        ));
+    }
+    let mut items: Vec<String> = draft.to_vec();
+    items[index] = keep_trailing_mark(line, rewritten);
+    Ok(tidy_output(&join_edited_items(original, &items)))
+}
+
+/// Replace a word INSIDE a line with a new value.
+///
+/// When the new value can stand in for the old word on its own -- the word is
+/// the whole of what the instruction named ("地點" for "地點還沒確定"), or the
+/// value is a name or a number that simply takes the word's place -- the
+/// substitution is done here, exactly. The model was asked for the same thing
+/// and came back with the word still in place ("地點改成三樓會議室" for
+/// "地點還沒確定"): asked to replace one part of a line, it rewrote the line
+/// instead.
+///
+/// The substitution only happens when the word appears ONCE. A word that
+/// appears twice is a case where which occurrence the user meant is not
+/// decidable here, and the model is asked instead.
+fn substitute_in_line(line: &str, word: &str, value: &str) -> Option<String> {
+    if word.is_empty() || value.is_empty() {
+        return None;
+    }
+    if line.matches(word).count() != 1 {
+        return None;
+    }
+    // The word has to be a NAME, a NUMBER or a short noun for the value to
+    // stand in for it. A long noun is part of the sentence ("第四季時程"), and
+    // a value cannot take its place: the model has to rewrite the clause.
+    if word.chars().count() > 4 {
+        return None;
+    }
+    // The value has to be a single term -- a name, a number, a time. Punctuation
+    // means it is a phrase, and a phrase cannot stand in for a word.
+    if value.chars().any(|c| {
+        c.is_whitespace() || "，,。.、；;：:！!？?「」『』()（）".contains(c)
+    }) {
+        return None;
+    }
+    Some(line.replacen(word, value, 1))
+}
+
+/// The same substitution, but only when the word is on ONE line of the draft.
+///
+/// The line-level check in `substitute_in_line` cannot see the other lines, and
+/// a word that is on two of them names no single line: "把三點改成四點" on a
+/// draft whose first and third lines both say 三點 has two possible targets,
+/// and taking the first one put the new time in the wrong place.
+fn substitute_in_draft(draft: &[String], index: usize, word: &str, value: &str) -> Option<String> {
+    let line = draft.get(index)?;
+    if draft.iter().filter(|l| l.contains(word)).count() != 1 {
+        return None;
+    }
+    substitute_in_line(line, word, value)
+}
+
+/// The NEW value an instruction carries, if it carries one.
+///
+/// "把第二點改成禮拜五" carries 禮拜五; "把地點改成三樓會議室" carries 三樓會議室.
+/// The value is what sits after the change verb, and it is empty for a
+/// deletion -- there is no new value in "刪掉第三句".
+fn replacement_value(instruction: &str) -> Option<String> {
+    let text = instruction.trim();
+    if instruction_removes(text) {
+        return None;
+    }
+    const CHINESE_VERBS: [&str; 5] = ["改成", "換成", "改為", "換", "改"];
+    const ENGLISH_VERBS: [&str; 3] = ["change", "replace", "to"];
+    for verb in CHINESE_VERBS.iter() {
+        if let Some(at) = text.find(verb) {
+            let value = text[at + verb.len()..].trim().trim_end_matches(['。', '.', '！', '!', '？', '?']);
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    for verb in ENGLISH_VERBS.iter() {
+        if let Some(at) = text.to_lowercase().find(verb) {
+            let value = text[at + verb.len()..].trim().trim_end_matches(['。', '.', '！', '!', '？', '?']);
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Put the original line's trailing punctuation back on the rewritten line.
+///
+/// A draft's lines are clauses, and a clause carries the comma that separates it
+/// from the next one. The model writes the new wording and leaves the comma
+/// off -- "討論第四季時程，" comes back as "討論第四季禮拜五" -- so rejoining
+/// the lines loses the punctuation and the clauses run together.
+///
+/// The mark is the original line's, not the model's: the model may well have
+/// put a different one in the middle of the line, and only the END matters for
+/// the join.
+fn keep_trailing_mark(original: &str, rewritten: &str) -> String {
+    let mark = original
+        .trim_end()
+        .chars()
+        .last()
+        .filter(|c| matches!(c, '，' | ',' | '；' | ';' | '、' | '。' | '.' | '！' | '!' | '？' | '?'));
+    match mark {
+        Some(mark) if !rewritten.trim_end().ends_with(mark) => {
+            format!("{}{}", rewritten.trim_end(), mark)
+        }
+        _ => rewritten.to_string(),
+    }
+}
+
+/// Reject an answer that cannot be the edited draft.
+///
+/// The dangerous shape is an answer that echoed only the line it changed: pasted,
+/// it would replace the user's whole text with that fragment, and the text it
+/// deleted would be gone. The draft's own line count is what makes that
+/// detectable, and the instruction's words decide how many lines may
+/// legitimately be missing -- a deletion loses lines, and nothing else does.
+/// Adding lines is refused as well: the numbering is the user's text, and the
+/// model was not asked to restructure it.
+fn check_edited_shape(items: &[String], draft: &[String], instruction: &str, numbered: bool) -> Result<()> {
+    if items.len() > draft.len() {
+        return Err(EngineError::new(
+            ErrorCode::Inference,
+            "the model's answer has more lines than the draft",
+        ));
+    }
+    // Lines may only be missing when the answer said which ones, i.e. when it came
+    // numbered and the instruction asked for a removal. Up to three, because one
+    // instruction can empty a short list ("前三句都刪掉"). Being wrong here costs a
+    // refused edit and the text the user already had; being generous costs them
+    // the text.
+    let allowed_missing = if numbered && instruction_removes(instruction) { 3 } else { 0 };
+    if items.len() + allowed_missing < draft.len() {
+        return Err(EngineError::new(
+            ErrorCode::Inference,
+            "the model's answer does not account for every line of the draft",
+        ));
+    }
+    Ok(())
+}
+
+/// Fraction of the draft's own characters that survive in the answer.
+///
+/// Only consulted for the one shape the line count cannot judge: a one-line draft
+/// the model edited and then rejoined ("我明天要去開會。禮拜五下午兩點記得帶合約書" for
+/// a draft numbered by its clauses). One line in, one line out -- there is nothing
+/// to compare line by line, so what is compared is content, exactly as the cleanup
+/// pass compares it for the same reason: an answer that kept most of the
+/// speaker's characters is an edit of that text, and one that kept a small
+/// fraction is a fragment of it.
+fn retained_ratio(draft: &str, answer: &str) -> f32 {
+    let characters: Vec<char> = draft.chars().filter(|c| is_cjk(*c)).collect();
+    if characters.is_empty() {
+        // Nothing to compare character by character; the count rules still apply.
+        return 1.0;
+    }
+    let kept = characters.iter().filter(|c| answer.contains(**c)).count();
+    kept as f32 / characters.len() as f32
+}
+
+/// Half the draft has to survive. A deletion of one clause in three keeps about
+/// two thirds, and the fragments that must be refused (the model answering with
+/// the one line it changed) keep about a third.
+const RETAINED_MIN: f32 = 0.5;
+
+/// Whether a one-line answer can be the edited version of a one-line draft.
+///
+/// Echoing the draft is not an edit, and a fragment of it is not one either.
+fn single_line_answer_is_an_edit(text: &str, candidate: &str) -> bool {
+    candidate != tidy_output(text) && retained_ratio(text, candidate) >= RETAINED_MIN
+}
+
+/// Whether the instruction asks for something to be removed.
+///
+/// Only consulted to decide how many lines the answer may be missing. A miss
+/// costs a refused edit rather than a damaged text, which is the direction this
+/// feature always fails in: the caller leaves the user's text alone.
+fn instruction_removes(instruction: &str) -> bool {
+    const CUES: [&str; 10] = [
+        "刪", "删", "拿掉", "去掉", "移除", "不要", "delete", "remove", "drop", "cut",
+    ];
+    let lower = instruction.to_lowercase();
+    CUES.iter().any(|cue| lower.contains(cue))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lines of an answer, for the tests that only care about those.
+    fn parse_edited_items(answer: &str) -> Vec<String> {
+        parse_edited_answer(answer).0
+    }
 
     #[test]
     fn think_block_lands_before_the_answer() {
@@ -1181,6 +2042,18 @@ mod tests {
         // "trailing full stop" and stays.
         assert_eq!(tidy_output("下週三開會。記得帶合約"), "下週三開會。記得帶合約");
         assert_eq!(tidy_output("Line one.\nLine two."), "Line one.\nLine two");
+    }
+
+    /// The edit pass can leave the separator that used to join two clauses at the
+    /// end of the line it rejoined; at a cursor that reads as an unfinished
+    /// sentence.
+    #[test]
+    fn tidy_drops_a_trailing_separator() {
+        assert_eq!(tidy_output("我明天要去開會，地點還沒確定，"), "我明天要去開會，地點還沒確定");
+        assert_eq!(tidy_output("買牛奶、麵包、"), "買牛奶、麵包");
+        assert_eq!(tidy_output("milk, bread,"), "milk, bread");
+        // Interior separators are the speaker's punctuation and stay.
+        assert_eq!(tidy_output("買牛奶，麵包"), "買牛奶，麵包");
     }
 
     #[test]
@@ -1282,6 +2155,216 @@ mod tests {
         let items = numbered_items("• 甲\n• 乙。丙");
         assert_eq!(number_lines(&items), "1. 甲\n2. 乙。丙");
         assert_eq!(parse_edited_items(&number_lines(&items)), items);
+    }
+
+    /// A spoken draft is one run-on line, so the numbering has to come from its
+    /// clause marks -- otherwise "第二句" names a line the model never saw.
+    #[test]
+    fn a_run_on_draft_is_numbered_by_its_clauses() {
+        assert_eq!(
+            numbered_items("我先跟客戶確認規格，等下再回你，記得帶合約書"),
+            vec!["我先跟客戶確認規格，", "等下再回你，", "記得帶合約書"]
+        );
+        // With a sentence end present, sentences win: they are what the speaker
+        // hears as sentences.
+        assert_eq!(
+            numbered_items("先確認規格。等下再回你，記得帶合約"),
+            vec!["先確認規格。", "等下再回你，記得帶合約"]
+        );
+    }
+
+    /// A dot with no space after it is an item; a decimal point is not.
+    #[test]
+    fn a_dot_without_a_space_is_an_item_but_a_fraction_is_not() {
+        assert_eq!(parse_edited_items("1.甲"), vec!["甲"]);
+        // A decimal point is not a marker: the line is read as plain text rather
+        // than as an item named "14", and it does not claim to be numbered.
+        assert_eq!(parse_edited_answer("3.14 is pi").0, vec!["3.14 is pi"]);
+        assert!(!parse_edited_answer("3.14 is pi").1);
+    }
+
+    /// The answer has to account for the draft: an answer that echoed one line is
+    /// a fragment that would replace the whole text.
+    #[test]
+    fn an_answer_that_drops_a_line_is_refused_unless_the_instruction_deletes() {
+        let draft: Vec<String> = ["甲", "乙", "丙"].iter().map(|s| s.to_string()).collect();
+        assert!(check_edited_shape(&["新甲".to_string()], &draft, "把第一句改成新甲", true).is_err());
+        assert!(check_edited_shape(&["甲".to_string(), "丙".to_string()], &draft, "第二句刪掉", true).is_ok());
+        assert!(
+            check_edited_shape(&["甲".to_string(), "丙".to_string()], &draft, "把第一句改成新甲", true).is_err(),
+            "an answer that lost a line without being asked to delete is a fragment"
+        );
+        let four: Vec<String> = ["甲", "乙", "丙", "丁"].iter().map(|s| s.to_string()).collect();
+        assert!(check_edited_shape(&four, &draft, "把第一句改成新甲", true).is_err());
+        // Unnumbered lines cannot say WHICH line went, so a deletion is not
+        // allowed to explain a short answer.
+        assert!(
+            check_edited_shape(&["甲".to_string(), "丙".to_string()], &draft, "第二句刪掉", false).is_err()
+        );
+    }
+
+    /// The model answers with plain lines often enough to matter, and the same
+    /// prompt produced both shapes on different runs. A plain answer of the right
+    /// length is used; a remark is not an answer.
+    #[test]
+    fn a_plain_answer_is_read_but_only_if_it_accounts_for_the_draft() {
+        assert_eq!(
+            parse_edited_answer("跟客戶確認規格\n禮拜五下午兩點\n把報價單寄出去"),
+            (
+                vec!["跟客戶確認規格", "禮拜五下午兩點", "把報價單寄出去"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<String>>(),
+                false
+            )
+        );
+        assert!(parse_edited_answer("好的，我改好了").0.is_empty());
+        assert!(parse_edited_answer("以下是修改後的內容").0.is_empty());
+    }
+
+    /// The one-line case the line counts cannot judge, with the answer this model
+    /// actually gave for that draft.
+    #[test]
+    fn a_rejoined_one_line_answer_is_an_edit_but_its_fragment_is_not() {
+        let draft = "我明天要去開會，地點還沒確定，記得帶合約書";
+        assert!(single_line_answer_is_an_edit(
+            draft,
+            "我明天要去開會。禮拜五下午兩點記得帶合約書"
+        ));
+        // The model echoing the draft is not an edit.
+        assert!(!single_line_answer_is_an_edit(draft, draft));
+        // One clause of three is a fragment, not an edit of the line.
+        assert!(!single_line_answer_is_an_edit(draft, "禮拜五下午兩點"));
+    }
+
+    /// The bullets are the user's layout: they are stripped before the model sees
+    /// the draft, so they are restored when the answer is rejoined.
+    #[test]
+    fn an_edited_bulleted_draft_keeps_its_bullets() {
+        let items = ["甲".to_string(), "新乙".to_string()];
+        assert_eq!(join_edited_items("• 甲\n• 乙", &items), "• 甲\n• 新乙");
+        assert_eq!(join_edited_items("甲\n乙", &items), "甲\n新乙");
+    }
+
+    /// A position in the instruction names the line, whatever the wording.
+    #[test]
+    fn a_position_names_the_line() {
+        let items = vec!["甲".to_string(), "乙".to_string(), "丙".to_string()];
+        let position = EditTarget::Position;
+        assert_eq!(locate_edit_target("把第二點改成禮拜五", &items), Some((1, position.clone())));
+        assert_eq!(locate_edit_target("把第三句刪掉", &items), Some((2, position.clone())));
+        assert_eq!(locate_edit_target("把第三行改成禮拜五", &items), Some((2, position.clone())));
+        assert_eq!(locate_edit_target("第一點改成大衛", &items), Some((0, position.clone())));
+        assert_eq!(locate_edit_target("把3改成禮拜五", &items), Some((2, position.clone())));
+        assert_eq!(locate_edit_target("change the second one to Friday", &items), Some((1, position.clone())));
+        // A position past the end of the draft names nothing: the whole-draft
+        // path is the right fallback there, not a wrong line.
+        assert_eq!(locate_edit_target("把第五點改成禮拜五", &items), None);
+    }
+
+    /// "第四季" is not a position: the character after the numeral decides.
+    #[test]
+    fn a_number_that_is_not_a_position_is_not_read_as_one() {
+        let items = vec!["甲".to_string(), "乙".to_string(), "丙".to_string()];
+        assert_eq!(locate_edit_target("把第四季改成第三季", &items), None);
+    }
+
+    /// A content word names the line that carries it, and the word itself is
+    /// kept: the model is told to replace that word where it sits.
+    #[test]
+    fn a_content_word_names_the_line_that_carries_it() {
+        let items = vec![
+            "明天下午三點跟小林開會，".to_string(),
+            "討論第四季時程，".to_string(),
+            "地點還沒確定".to_string(),
+        ];
+        assert_eq!(
+            locate_edit_target("把地點改成三樓會議室", &items),
+            Some((2, EditTarget::Content("地點".to_string())))
+        );
+        assert_eq!(
+            locate_edit_target("把小林改成大衛", &items),
+            Some((0, EditTarget::Content("小林".to_string())))
+        );
+        assert_eq!(
+            locate_edit_target("把第四季時程改成禮拜五", &items),
+            Some((1, EditTarget::Content("第四季時程".to_string())))
+        );
+    }
+
+    /// The replacement in the instruction is not a word to look for in the
+    /// draft: it is the new value.
+    #[test]
+    fn the_replacement_is_not_used_as_a_search_word() {
+        let items = vec![
+            "明天下午三點跟小林開會，".to_string(),
+            "討論第四季時程，".to_string(),
+            "地點還沒確定".to_string(),
+        ];
+        // "禮拜五" appears nowhere in the draft, so the target has to be the
+        // word before the verb.
+        assert_eq!(
+            locate_edit_target("把時程改成禮拜五", &items),
+            Some((1, EditTarget::Content("時程".to_string())))
+        );
+    }
+
+    /// The instruction the model gets for one line is rebuilt: the position is
+    /// dropped, and a content target is named again so the replacement lands in
+    /// the word's place.
+    #[test]
+    fn the_one_line_instruction_is_rebuilt_for_the_target() {
+        assert_eq!(
+            one_line_instruction("把第二點改成禮拜五", &EditTarget::Position),
+            "把這行完全改成禮拜五"
+        );
+        assert_eq!(
+            one_line_instruction("把小林改成大衛", &EditTarget::Content("小林".to_string())),
+            "把這行裡的「小林」改成大衛，其他字不變"
+        );
+        assert_eq!(
+            one_line_instruction("刪掉這行", &EditTarget::Position),
+            "刪掉這行"
+        );
+    }
+
+    /// The words an instruction names, with the verbs and the framing removed.
+    #[test]
+    fn the_named_word_is_taken_out_of_the_instruction() {
+        assert_eq!(content_words("把地點改成三樓會議室"), vec!["地點"]);
+        assert_eq!(content_words("把小林改成大衛"), vec!["小林"]);
+        assert_eq!(content_words("把時程改成禮拜五"), vec!["時程"]);
+        assert_eq!(content_words("把三點改成四點"), vec!["三點"]);
+    }
+
+    /// The whole path for one instruction: the draft's items, the word, and the
+    /// line the word is on.
+    #[test]
+    fn a_word_in_a_run_on_draft_lands_on_its_own_clause() {
+        let text = "明天下午三點跟小林開會，討論第四季時程，地點還沒確定";
+        let items = numbered_items(text);
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            locate_edit_target("把三點改成四點", &items),
+            Some((0, EditTarget::Content("三點".to_string())))
+        );
+        // And the substitution happens on that clause.
+        let substituted = substitute_in_draft(&items, 0, "三點", "四點");
+        assert_eq!(substituted, Some("明天下午四點跟小林開會，".to_string()));
+    }
+
+    /// The line's own trailing punctuation comes back after the rewrite: a
+    /// clause carries the comma that separates it from the next one.
+    #[test]
+    fn the_trailing_mark_survives_a_rewrite() {
+        assert_eq!(
+            keep_trailing_mark("討論第四季時程，", "討論第四季禮拜五"),
+            "討論第四季禮拜五，"
+        );
+        // A line that already ends in a full stop keeps it.
+        assert_eq!(keep_trailing_mark("地點還沒確定。", "三樓會議室"), "三樓會議室。");
+        // Nothing to restore: the line has no trailing mark.
+        assert_eq!(keep_trailing_mark("地點還沒確定", "三樓會議室"), "三樓會議室");
     }
 
     #[test]

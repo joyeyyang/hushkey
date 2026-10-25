@@ -591,8 +591,13 @@ final class AppController {
         // since an import is not a recording.
         hud.begin(title: url.lastPathComponent, status: "讀取音檔…")
 
+        guard let engine else {
+            hud.flash("模型還沒載入完成，請稍等", seconds: 3)
+            return
+        }
         audioImporter.importFile(
             at: url,
+            engine: engine,
             onProgress: { [weak self] fraction in
                 let percent = Int((fraction * 100).rounded())
                 self?.hud.setStatus("辨識中… \(percent)%")
@@ -1070,6 +1075,15 @@ final class AppController {
             applyEdit(text, to: previous)
             return
         }
+        polishAndFinish(text)
+    }
+
+    /// The ordinary delivery: polish, then insert.
+    ///
+    /// Also the fallback for an edit that did not work out, which is what keeps a
+    /// sentence the classifier merely suspected ("第一點要改善" said after a paste)
+    /// from being swallowed: it arrives as text, late, instead of not at all.
+    private func polishAndFinish(_ text: String) {
         guard polishEnabled else {
             finish(text)
             return
@@ -1098,25 +1112,68 @@ final class AppController {
         let config = passConfig()
         coreQueue.async {
             guard let edited = applyVoiceEdit(instruction, to: previous, config: config) else {
-                DispatchQueue.main.async { self.hud.flash("編輯沒有成功，原文未變更", seconds: 5) }
+                DispatchQueue.main.async {
+                    // Neither the text nor the words are lost: the previous line is
+                    // untouched, and what the user just said arrives as a normal
+                    // dictation. A refusal costs a wrong paste, not a silent one.
+                    self.hud.flash("沒有套用編輯，改為輸入原話", seconds: 3)
+                    self.polishAndFinish(instruction)
+                }
                 return
             }
             DispatchQueue.main.async {
-                // The edited line becomes the previous result immediately, so an
-                // instruction dictated right after this one edits the new text.
-                self.lastDelivery = edited
+                // Shown and recorded either way: the line is the result of what
+                // the user said, and they have to be able to read it even when it
+                // cannot be pasted.
                 self.mainWindow?.setTranscript(edited)
                 self.recordHistory(edited)
                 self.rememberDictation(edited)
-                switch TextInjector.replaceLastInsertion(expected: previous, with: edited) {
-                case .pasted:
-                    ModelInstaller.log("voice edit: replaced \(previous.count)->\(edited.count) chars")
-                    self.hud.showResult(edited)
-                case let .needsPermission(reason), let .copiedOnly(reason):
-                    ModelInstaller.log("voice edit: result left on the clipboard (\(reason))")
-                    self.hud.show(text: "\(edited)\n(\(reason))", mode: .display)
+                // An edit rewrites text the user can no longer see, so this is
+                // exactly the case the "confirm first" setting exists for: the
+                // edited line waits in the window, and pressing Enter pastes it
+                // over the original. Without this the edit was the one delivery
+                // path the setting did not cover.
+                guard self.confirmBeforeInsert, !SelfTest.exitsWhenDone else {
+                    self.commitEdit(edited, expected: previous)
+                    return
+                }
+                self.hud.show(text: edited, mode: .edit) { [weak self] in
+                    guard let self else { return }
+                    let shown = self.hud.getDisplayedText().trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !shown.isEmpty else {
+                        self.hud.show(text: "內容為空，已忽略")
+                        return
+                    }
+                    // The window has to get out of the way first, or the paste
+                    // lands in its own text field.
+                    self.hud.hide()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                        self.commitEdit(shown, expected: previous)
+                    }
                 }
             }
+        }
+    }
+
+    /// Puts an edited line where the text it corrects is.
+    ///
+    /// `previous` is the exact string this app pasted; the injector selects it in
+    /// the focused field and pastes over it. When that cannot be proven the result
+    /// stays on the clipboard -- `replaceLastInsertion` copies it before it looks
+    /// for the text -- and the window says why.
+    private func commitEdit(_ edited: String, expected previous: String) {
+        switch TextInjector.replaceLastInsertion(expected: previous, with: edited) {
+        case .pasted:
+            // Only a proven replacement becomes the text a later instruction
+            // edits: after a failure the field still holds `previous`, and
+            // tracking the edited line would aim the next instruction at text that
+            // is not there.
+            lastDelivery = edited
+            ModelInstaller.log("voice edit: replaced \(previous.count)->\(edited.count) chars")
+            hud.showResult(edited)
+        case let .needsPermission(reason), let .copiedOnly(reason):
+            ModelInstaller.log("voice edit: result left on the clipboard (\(reason))")
+            hud.show(text: "\(edited)\n(\(reason))", mode: .display)
         }
     }
 

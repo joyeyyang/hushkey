@@ -386,19 +386,10 @@ pub unsafe extern "C" fn LLM_EditText(
     })())
 }
 
-/// # Safety
-/// Pointers must follow the header contract. Currently always returns NotImplemented.
-#[no_mangle]
-pub unsafe extern "C" fn RAG_Search(_query: *const c_char, _out: *mut *mut c_char) -> c_int {
-    status(not_implemented("RAG_Search"))
-}
-
-/// # Safety
-/// Pointers must follow the header contract. Currently always returns NotImplemented.
-#[no_mangle]
-pub unsafe extern "C" fn RAG_AddEntry(_entry: *const c_char) -> c_int {
-    status(not_implemented("RAG_AddEntry"))
-}
+// The RAG_* pair used to sit here as placeholders for a planned entry point. The
+// retrieval feature was removed at the user's request and its model deleted, so
+// the two stubs went with it rather than staying as an API that can only ever
+// answer NotImplemented.
 
 #[cfg(test)]
 mod tests {

@@ -156,7 +156,14 @@ pub fn load_asr() -> Result<()> {
     } else if sense_fp32.exists() {
         (sense_fp32, sense_tokens, crate::asr::AsrKind::SenseVoice)
     } else {
-        (dolphin_model, dolphin_tokens, crate::asr::AsrKind::Dolphin)
+        // Nothing is installed. Naming a file here would be misleading twice
+        // over: the path that falls through is Dolphin's, which is not the pair a
+        // new install downloads (the manifest's download:true entry is the
+        // SenseVoice int8 one) and not what the model manager reports as current.
+        return Err(EngineError::new(
+            ErrorCode::ModelLoad,
+            format!("no ASR model installed under {}", dir.join("asr").display()),
+        ));
     };
 
     // The language hint. SenseVoice identifies the language per utterance when
