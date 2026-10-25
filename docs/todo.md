@@ -240,6 +240,29 @@ tap、macOS 14.2+、與麥克風分開的權限），`VoiceInputConfig.captureSy
 （狀態膠囊、複製、Esc 關閉）與逐字稿卡片（我：／對方：）。視窗由 56pt 長到 274pt，
 逐字稿過長時自己捲動，錨定左上角所以停止鍵不會移動。Escape 仍然只關視窗、不停止錄音。
 
+## 6.7 檢索模型整個移除（2026-10-25）
+
+使用者實測後判定**輸出不可用**，要求刪掉。已完整移除，不是關掉：
+
+- `core_engine/src/embed.rs`、`examples/embed_probe.rs` 刪除；`lib.rs`／`state.rs`／
+  `llm.rs`／`bin/ovc-llm-worker.rs` 退回加入檢索之前的狀態（`git checkout e67bf1f^`），
+  只保留 `OVC_LLM_WORKER`（讓命令列工具找得到 worker）。
+- C ABI `LLM_RelevantTerms`／`LLM_EditClauses`／`LLM_WarmRetrieval` 與兩份 header 的宣告移除。
+- Kit：`Retrieval.swift` 刪除、`CoreABI` 的檢索呼叫、`VoiceInputConfig.embedModel`／
+  `embeddingModelURL`、`warmRetrievalCache()`、CLI 的 `--embed`／`--warm` 全部移除。
+- App：設定頁的「檢索輔助」開關、模型管理頁的「檢索模型（向量）」分類、manifest 的
+  `rag-embeddinggemma-300m-q4`、以及磁碟上的 265 MiB 模型與 `models/.cache/` 全部刪除。
+- 單元測試從 68 回到 52（少掉的是 embed 模組自己的測試）。
+
+**關鍵字提示也不再餵給模型**（使用者指示「讓 AI 模型自己去猜」）：`Refiner.polish` 送出空的
+hint。理由寫在程式裡：清單裡有、但這次沒講到的名字會被模型拉進句子裡，這個失敗模式比
+拼錯更糟。關鍵字分頁與清單先保留（沒有刪除），但目前不影響輸出。
+
+**錄音時的兩個浮動視窗還原**（使用者澄清：要兩個視窗，只是不要重複的功能）：
+`HUDWindow`（膠囊：麥克風、波形、字數、暫停、停止、拖曳點、以及過場訊息）與
+`TranscriptWindow`（逐字稿：標題、狀態膠囊、複製、Esc）各自還原成獨立視窗，分工是
+「膠囊＝控制與過場訊息」「逐字稿視窗＝文字、狀態、複製」。離屏自檢現在兩種視窗都畫。
+
 ## 7. 還沒做
 
 - 語音編輯指令（「把第二段改成…」）：要新的 LLM ABI 與提示詞，最後做。

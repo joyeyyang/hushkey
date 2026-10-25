@@ -46,9 +46,6 @@ public final class VoiceInputEngine {
         if let llm = config.llmModel, !llm.isEmpty {
             _ = setenv("OVC_LLM_MODEL", llm, 1)
         }
-        if let embed = config.embedModel, !embed.isEmpty {
-            _ = setenv("OVC_EMBED_MODEL", embed, 1)
-        }
         // The engine looks for its worker next to its own executable, which is
         // right inside the app bundle; a tool or another host has to say where.
         if let worker = config.workerExecutable {
@@ -58,20 +55,6 @@ public final class VoiceInputEngine {
         lock.lock()
         prepared = true
         lock.unlock()
-    }
-
-    /// Pre-computes the retrieval model's vectors so the next dictation does not
-    /// pay for them.
-    ///
-    /// Roughly two dozen short embeddings happen the first time a screening pass
-    /// runs; measured, that is seconds of CPU sitting on the user's critical
-    /// path. Call this from a background queue after `prepare()` (or right after
-    /// the model finishes downloading) and the dictation itself stays cheap.
-    /// Returns the number of vectors computed; 0 means it was already warm.
-    @discardableResult
-    public func warmRetrievalCache() -> Int {
-        ensurePrepared()
-        return (try? Int(CoreABI.warmRetrieval(terms: config.keywords))) ?? 0
     }
 
     /// Convenience over `makeSession` + `start` for callers that only want file

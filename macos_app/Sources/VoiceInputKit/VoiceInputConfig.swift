@@ -42,7 +42,6 @@ public struct VoiceInputConfig {
     /// Bare filename of the retrieval (embedding) model inside `models/embedding/`,
     /// or nil for the conventional default. See `relevantTerms(for:in:)` for why
     /// this is currently advisory rather than load-bearing.
-    public var embedModel: String?
     /// Whether a session also captures what the Mac is playing.
     ///
     /// Off by default: it is a meeting feature, it needs a separate permission
@@ -62,17 +61,12 @@ public struct VoiceInputConfig {
     /// and "no translation" stay independent choices.
     public var polishEnabled: Bool
 
-    /// The conventional retrieval-model filename, matching the manifest row
-    /// `embedding/embeddinggemma-300m-Q4_0.gguf`.
-    public static let defaultEmbedModelFile = "embeddinggemma-300m-Q4_0.gguf"
-
     public init(
         modelsDirectory: URL = VoiceInputConfig.defaultModelsDirectory(),
         keywords: [String] = [],
         refineStages: UInt32 = 0,
         translateTarget: String = "auto",
         llmModel: String? = nil,
-        embedModel: String? = nil,
         workerExecutable: URL? = nil,
         captureSystemAudio: Bool = false,
         polishEnabled: Bool = true
@@ -82,19 +76,9 @@ public struct VoiceInputConfig {
         self.refineStages = refineStages
         self.translateTarget = translateTarget
         self.llmModel = llmModel
-        self.embedModel = embedModel
         self.workerExecutable = workerExecutable
         self.captureSystemAudio = captureSystemAudio
         self.polishEnabled = polishEnabled
-    }
-
-    /// Where the retrieval model is expected on disk. Not a promise that it is
-    /// there — `relevantTerms(for:in:)` checks that and degrades when it is not.
-    public var embeddingModelURL: URL {
-        let name = embedModel.flatMap { $0.isEmpty ? nil : $0 } ?? Self.defaultEmbedModelFile
-        return modelsDirectory
-            .appendingPathComponent("embedding", isDirectory: true)
-            .appendingPathComponent(name)
     }
 
     /// The standard model location, mirroring exactly what the app itself

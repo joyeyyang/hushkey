@@ -127,44 +127,6 @@ enum CoreABI {
         return String(cString: p)
     }
 
-    /// Terms the retrieval model considers relevant to `text`, best first.
-    ///
-    /// An empty result is not an error: it means either nothing was relevant or
-    /// the retrieval model is not installed, and the caller treats both the same
-    /// way (keep its own list). Returns nil when the CORE itself failed, so a
-    /// real fault is not confused with "no opinion".
-    static func relevantTerms(_ text: String, terms: [String]) throws -> [String]? {
-        guard !terms.isEmpty else { return [] }
-        var out: UnsafeMutablePointer<CChar>?
-        try check(LLM_RelevantTerms(text, terms.joined(separator: "\n"), &out))
-        guard let p = out else { return [] }
-        defer { Core_FreeString(p) }
-        let joined = String(cString: p)
-        let list = joined.split(separator: "\n").map(String.init)
-        return list.isEmpty ? nil : list
-    }
-
-    /// Computes the retrieval model's cached vectors now. Returns how many were
-    /// computed; 0 means the cache was already warm. Never fails when the model
-    /// is absent.
-    @discardableResult
-    static func warmRetrieval(terms: [String]) throws -> Int32 {
-        var count: Int32 = 0
-        try check(LLM_WarmRetrieval(terms.joined(separator: "\n"), &count))
-        return count
-    }
-
-    /// Clauses of `text` that read as an instruction about the text itself.
-    /// Empty when there are none, or when the retrieval model is not installed.
-    static func editClauses(_ text: String) throws -> [String] {
-        var out: UnsafeMutablePointer<CChar>?
-        try check(LLM_EditClauses(text, &out))
-        guard let p = out else { return [] }
-        defer { Core_FreeString(p) }
-        let joined = String(cString: p)
-        return joined.isEmpty ? [] : joined.split(separator: "\n").map(String.init)
-    }
-
     /// Separate translate pass, run after refine. `target` is "en" or "zh".
     static func translate(_ text: String, to target: String) throws -> String {
         var out: UnsafeMutablePointer<CChar>?

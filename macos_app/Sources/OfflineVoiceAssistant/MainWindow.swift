@@ -25,8 +25,6 @@ final class MainWindow: NSWindow {
     var onTranslateChange: ((String) -> Void)?
     /// Whether meeting mode also records what the Mac is playing.
     var onSystemAudioChange: ((Bool) -> Void)?
-    /// Forwarded from the settings tab: the retrieval-screening toggle.
-    var onRetrievalChange: ((Bool) -> Void)?
     /// Paste a line picked out of the history into whatever app is in front.
     var onPasteHistory: ((String) -> Void)?
     /// Clears a stale Accessibility row and asks the system again.
@@ -549,7 +547,6 @@ final class MainWindow: NSWindow {
         settingsView.onPolishChange = { [weak self] enabled in self?.onPolishChange?(enabled) }
         settingsView.onConfirmChange = { [weak self] confirm in self?.onConfirmChange?(confirm) }
         settingsView.onSystemAudioChange = { [weak self] enabled in self?.onSystemAudioChange?(enabled) }
-        settingsView.onRetrievalChange = { [weak self] enabled in self?.onRetrievalChange?(enabled) }
         settingsView.onExportSettingsChange = { [weak self] settings in self?.onExportSettingsChange?(settings) }
         settingsView.onExportNow = { [weak self] in self?.onExportNow?() }
         settingsView.onQuit = { [weak self] in self?.onQuit?() }

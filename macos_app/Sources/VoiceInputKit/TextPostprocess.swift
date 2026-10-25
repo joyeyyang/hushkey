@@ -182,13 +182,12 @@ enum Refiner {
     /// to the raw transcript whenever the model is unavailable or its answer
     /// looks wrong, so a dictation is never lost to a bad generation.
     static func polish(_ raw: String, config: VoiceInputConfig) -> String {
-        // The whole term list goes in. The ENGINE narrows it against this draft
-        // and names any clause that asked for a change, both in one screening pass
-        // inside the refine call -- so doing it here as well would load the
-        // retrieval model twice and embed everything twice for the same answer.
-        // `relevantTerms(for:in:)` stays public for callers that want the ranking
-        // on its own.
-        let hint = KeywordStore.hintString(config.keywords)
+        // No keyword hint. Proper nouns are the model's own job: it reads the
+        // draft and spells what it hears, which avoids the failure mode of a list
+        // -- a name that is on the list but was NOT said this time gets pulled
+        // into the sentence. The keyword tab keeps its list, but nothing is
+        // injected from it any more.
+        let hint = ""
         guard let refined = try? CoreABI.refine(raw, keywordsHint: hint, stages: config.refineStages) else {
             return fallback(raw)
         }

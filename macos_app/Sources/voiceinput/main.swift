@@ -40,9 +40,7 @@ struct Options {
     var translateTarget = "auto"
     var refineStages: UInt32 = 0
     var llmModel: String?
-    var embedModel: String?
     var worker: URL?
-    var warm = false
     var polishEnabled = true
 }
 
@@ -58,7 +56,6 @@ usage: voiceinput [options] <audio-file> [...]
   --translate <auto|off|en|zh>  language handling (default auto)
   --refine-stages <0|1|2> cleanup passes; 0 lets the engine decide (default 0)
   --llm <file>            bare LLM filename inside models/llm/
-  --embed <file>          bare retrieval-model filename inside models/embedding/
   --no-polish             skip the AI cleanup pass entirely
   --paste                 also paste the refined text at the cursor (needs Accessibility)
   --selftest              run a built-in check and print PASS/FAIL
@@ -112,8 +109,6 @@ func parseArguments(_ args: [String]) -> Options {
             opts.refineStages = n
         case "--llm":
             opts.llmModel = value("--llm")
-        case "--embed":
-            opts.embedModel = value("--embed")
         case "--worker":
             opts.worker = URL(fileURLWithPath: value("--worker"))
         case "--no-polish":
@@ -122,8 +117,6 @@ func parseArguments(_ args: [String]) -> Options {
             opts.paste = true
         case "--selftest":
             opts.selftest = true
-        case "--warm":
-            opts.warm = true
         default:
             if arg.hasPrefix("--") { fail("unknown option \(arg)", code: 1) }
             opts.files.append(URL(fileURLWithPath: arg))
@@ -147,7 +140,6 @@ func makeConfig(_ opts: Options) -> VoiceInputConfig {
         refineStages: opts.refineStages,
         translateTarget: opts.translateTarget,
         llmModel: opts.llmModel,
-        embedModel: opts.embedModel,
         workerExecutable: opts.worker,
         polishEnabled: opts.polishEnabled
     )
@@ -158,7 +150,7 @@ func makeConfig(_ opts: Options) -> VoiceInputConfig {
 /// A check small enough to run anywhere and complete enough to catch a broken
 /// install: it constructs the engine (validates config and that the module
 /// links), initialises the core, verifies the ASR model is on disk, and calls
-/// the retrieval function. LLM and embedding files are reported but optional —
+/// the manifest. LLM files are reported but optional —
 /// a missing cleanup model degrades to the raw transcript, not a failure.
 func runSelfTest(config: VoiceInputConfig) -> Int32 {
     var ok = true
@@ -181,8 +173,6 @@ func runSelfTest(config: VoiceInputConfig) -> Int32 {
     let llm = count("llm")
     print("  llm files: \(llm)\(llm == 0 ? "  (optional; cleanup will fall back)" : "")")
 
-    let embedPresent = fm.fileExists(atPath: config.embeddingModelURL.path)
-    print("  retrieval model: \(embedPresent ? "present" : "absent (optional)")")
 
     print("engine:")
     do {
@@ -192,15 +182,6 @@ func runSelfTest(config: VoiceInputConfig) -> Int32 {
         engine.shutdown()
     } catch {
         print("  core initialize + load ASR: FAILED — \(error)")
-        ok = false
-    }
-
-    print("retrieval:")
-    do {
-        let terms = try relevantTerms(for: "測試 retrieve", in: config)
-        print("  relevantTerms: ok (\(terms.count) terms)")
-    } catch {
-        print("  relevantTerms: FAILED — \(error)")
         ok = false
     }
 
@@ -265,21 +246,6 @@ if let add = opts.addKeyword {
 
 if opts.selftest {
     exit(runSelfTest(config: config))
-}
-
-if opts.warm {
-    do {
-        let engine = try VoiceInputEngine(config: config)
-        try engine.prepare()
-        let computed = engine.warmRetrievalCache()
-        FileHandle.standardError.write(
-            Data("voiceinput: retrieval cache warmed (\(computed) vectors computed)\n".utf8)
-        )
-        exit(0)
-    } catch {
-        FileHandle.standardError.write(Data("voiceinput: warm failed: \(error)\n".utf8))
-        exit(2)
-    }
 }
 
 guard !opts.files.isEmpty else {
