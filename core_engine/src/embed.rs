@@ -24,11 +24,9 @@
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::context::LlamaContext;
-use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
@@ -159,16 +157,17 @@ pub struct ScreenResult {
 /// deliberate -- the one in `llm` is module-private -- and harmless: statics are
 /// never dropped, so `LlamaBackend::init()` runs at most twice and never paired
 /// with a free.
-static BACKEND: OnceLock<std::result::Result<LlamaBackend, String>> = OnceLock::new();
+/// The llama.cpp backend is process-global and can only be initialised once, so
+/// this module shares `llm`'s rather than keeping its own.
+///
+/// They used to have one each, which was fine while the embedding model and the
+/// LLM only ever ran in different processes. The worker now runs both -- it
+/// screens, releases the embedder, then loads the LLM -- and a second
+/// `LlamaBackend::init()` in the same process fails with
+/// `BackendAlreadyInitialized`, which cost a whole refine pass before it was
+/// found.
+use crate::llm::backend;
 
-fn backend() -> Result<&'static LlamaBackend> {
-    BACKEND
-        .get_or_init(|| LlamaBackend::init().map_err(|e| e.to_string()))
-        .as_ref()
-        .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("llama backend init: {e}")))
-}
-
-/// Load the embedding model. One call per public entry point, never per string.
 fn load_model(model_path: &Path) -> Result<LlamaModel> {
     let be = backend()?;
     LlamaModel::load_from_file(be, model_path, &LlamaModelParams::default())

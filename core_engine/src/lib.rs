@@ -15,7 +15,7 @@ mod state;
 mod vad;
 
 use std::ffi::{c_char, c_int, CStr, CString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use error::{clear_last_error, last_error, set_last_error, EngineError, ErrorCode};
 pub use memory::OvcMemoryUsage;
@@ -38,6 +38,12 @@ pub use llm::{
 /// objects), and "which file did it open" is exactly the question a probe has to
 /// answer from the engine's own bookkeeping rather than from a manifest.
 pub use state::{load_asr, set_models_dir, usage as memory_usage};
+
+/// The retrieval hint an LLM worker computes for itself. Exported for the worker
+/// binary and for probes; see `state::screen_hint_for_worker`.
+pub fn screen_worker_hint(llm_model: &Path, text: &str, keywords_hint: &str) -> String {
+    state::screen_hint_for_worker(llm_model, text, keywords_hint)
+}
 
 type Result<T, E = EngineError> = std::result::Result<T, E>;
 

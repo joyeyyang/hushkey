@@ -123,6 +123,10 @@ public final class VoiceInputSession {
     public var onPartial: ((String) -> Void)?
     /// Utterances finalised since the previous call. Delivered on the main queue.
     public var onSegments: (([Utterance]) -> Void)?
+    /// Called when system-audio capture could not start. The recording continues
+    /// on the microphone alone -- a meeting transcript missing the far end is
+    /// still worth having, and refusing to record would be worse.
+    public var onSystemAudioFailure: ((String) -> Void)?
 
     private let config: VoiceInputConfig
     /// Serial queue for everything that talks to the core and touches
@@ -132,6 +136,8 @@ public final class VoiceInputSession {
     private let stateLock = NSLock()
 
     private var capture: MicrophoneCapture?
+    /// The process tap carrying what the Mac is playing, when a meeting asked for it.
+    private var systemTap: SystemAudioTap?
     private var timer: DispatchSourceTimer?
     private var segments: [Utterance] = []
     private var started = false
@@ -166,18 +172,47 @@ public final class VoiceInputSession {
         }
         capture = cap
         started = true
+        if config.captureSystemAudio {
+            startSystemAudio()
+        }
         startPolling()
+    }
+
+    /// Starts the process tap that carries the far end of a call.
+    ///
+    /// Deliberately best-effort: the permission is separate from the microphone's,
+    /// it can be refused, and the version gate is 14.2. Any of those failing
+    /// leaves a working microphone-only session and reports why.
+    private func startSystemAudio() {
+        guard SystemAudioTap.isSupported else {
+            onSystemAudioFailure?("這個 macOS 版本不支援系統音訊擷取（需要 macOS 14.2 以上）")
+            return
+        }
+        guard let tap = try? SystemAudioTap(onSamples: { [weak self] samples in
+            self?.feed(samples, speaker: 1)
+        }) else {
+            onSystemAudioFailure?("無法建立系統音訊擷取")
+            return
+        }
+        do {
+            try tap.start()
+            systemTap = tap
+        } catch {
+            onSystemAudioFailure?(error.localizedDescription)
+        }
     }
 
     /// Stops feeding audio without ending the session, so the transcript
     /// continues where it stopped instead of opening a second one.
     public func pause() {
+        setSystemTapPaused(true)
         stateLock.lock()
         paused = true
         stateLock.unlock()
     }
 
     public func resume() {
+        setSystemTapPaused(false)
         stateLock.lock()
         paused = false
         stateLock.unlock()
@@ -195,6 +230,8 @@ public final class VoiceInputSession {
         // queue hop below waits for every submit already enqueued.
         capture?.stop()
         capture = nil
+        systemTap?.stop()
+        systemTap = nil
         stopPolling()
 
         return try queue.sync {
@@ -213,14 +250,28 @@ public final class VoiceInputSession {
 
 // MARK: - Private
 
-    /// The one place microphone audio enters the engine. Pause gates this and
-    /// nothing else, which is what keeps the ASR session open across a pause.
-    private func feed(_ samples: [Float]) {
+    /// The one place audio enters the engine, from either route. Pause gates this
+    /// and nothing else, which is what keeps the ASR session open across a pause.
+    ///
+    /// `speaker` is 0 for the microphone and 1 for system audio; the core tags
+    /// each utterance with it, which is what lets the transcript say 我／對方.
+    private func feed(_ samples: [Float], speaker: UInt32 = 0) {
         stateLock.lock()
         let isPaused = paused
         stateLock.unlock()
         guard !isPaused else { return }
-        queue.async { try? CoreABI.submit(samples) }
+        queue.async { try? CoreABI.submit(samples, speaker: speaker) }
+    }
+
+    /// System audio keeps arriving while paused unless it is stopped too, and the
+    /// point of a pause is that nothing is transcribed.
+    private func setSystemTapPaused(_ paused: Bool) {
+        guard let tap = systemTap else { return }
+        if paused {
+            tap.stop()
+        } else {
+            try? tap.start()
+        }
     }
 
     private func deliverLevel(_ level: Float) {

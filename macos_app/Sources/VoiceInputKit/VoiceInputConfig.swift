@@ -43,6 +43,12 @@ public struct VoiceInputConfig {
     /// or nil for the conventional default. See `relevantTerms(for:in:)` for why
     /// this is currently advisory rather than load-bearing.
     public var embedModel: String?
+    /// Whether a session also captures what the Mac is playing.
+    ///
+    /// Off by default: it is a meeting feature, it needs a separate permission
+    /// (System Audio Recording), and with the Mac on loudspeakers the microphone
+    /// hears the far end too, so a phrase can arrive twice.
+    public var captureSystemAudio: Bool
     /// The `ovc-llm-worker` executable, when it does not sit beside the caller.
     ///
     /// The engine looks next to its own executable by default, which is right for
@@ -68,6 +74,7 @@ public struct VoiceInputConfig {
         llmModel: String? = nil,
         embedModel: String? = nil,
         workerExecutable: URL? = nil,
+        captureSystemAudio: Bool = false,
         polishEnabled: Bool = true
     ) {
         self.modelsDirectory = modelsDirectory
@@ -77,6 +84,7 @@ public struct VoiceInputConfig {
         self.llmModel = llmModel
         self.embedModel = embedModel
         self.workerExecutable = workerExecutable
+        self.captureSystemAudio = captureSystemAudio
         self.polishEnabled = polishEnabled
     }
 

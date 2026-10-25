@@ -206,8 +206,16 @@ sha256 `edc6015cb15694c27be7d1d33f1bc015db9a358ff51ed524628c027504907ba9`。
 
 ### 效能（M1 8GB，實測）
 - 冷快取取暖：29 個向量 2.9 秒；再取暖 0 個（快取有效）。
-- 完整聽寫（ASR＋檢索＋LLM 整理）13.2 秒，其中基準線（ASR＋LLM）7.5 秒，
-  檢索約多 5.7 秒（主要是每次都要載入 277 MB 的向量模型）。
+- 完整聽寫（ASR＋檢索＋LLM 整理）：**6.5–7.4 秒**，幾乎等於基準線（ASR＋LLM）7.5 秒，
+  也就是檢索現在幾乎不用錢。
+  對照：**檢索放在 App 行程時是 11.8–13.2 秒**，而且 `n_ctx` 從 2048 降到 256 完全沒差
+  → 那 4–5 秒不是算向量、也不是 context 配置，是**記憶體壓力**（App 行程同時持有 ASR
+  與 277 MB 向量模型，再開 1.2 GB 的 LLM 子行程）。
+  **修法：把檢索搬進 worker 行程**（`state::screen_hint_for_worker`）——worker 先載入
+  向量模型篩選、放掉它，再載入 LLM，高峰從「相加」變成「取大值」。
+  過程中撞到一個真 bug：`embed` 與 `llm` 各自有一個 `OnceLock` 包住
+  `LlamaBackend::init()`，以前兩者永遠在不同行程所以沒事，同一個行程就
+  `BackendAlreadyInitialized` 讓整個 refine 失敗（退回原文）。改成共用 `llm::backend()`。
 - `voiceinput --warm` 可在安裝後／啟動時先把向量算好，避開第一次的延遲。
 
 ### 語音輸入打包成可呼叫模組（使用者要求「放在另外一個資料夾」）
@@ -219,8 +227,12 @@ sha256 `edc6015cb15694c27be7d1d33f1bc015db9a358ff51ed524628c027504907ba9`。
 **App 已經改用這個模組**：`OfflineVoiceAssistant` target 依賴 `VoiceInputKit`，
 `AppController.polish()` 改成呼叫 `refineTranscript(_:config:)`，App 自己那份
 「整理＋檢查＋翻譯」實作刪掉了（`translateIfNeeded` 移除），所以整理鏈只有一份實作，
-App 與命令列工具不可能各自漂移。會議模式的系統音訊擷取還沒進 Kit（Kit 目前只有麥克風），
-所以會議那段仍走原本的路。
+App 與命令列工具不可能各自漂移。Kit 也已經有系統音訊能力（`VoiceInputKit/SystemAudioCapture.swift`，Core Audio process
+tap、macOS 14.2+、與麥克風分開的權限），`VoiceInputConfig.captureSystemAudio` 打開後
+逐字稿會自動分成麥克風（我）與系統音訊（對方）兩路，暫停時兩路一起停。
+**App 的會議模式仍走原本自己的 tap**：會議要的是原始逐字稿＋摘要（不是整段潤飾），
+而 `session.finish()` 會跑整理鏈，所以把會議搬過去需要一個「不潤飾」的 session 模式，
+這件事沒做完，我沒有假裝它做完了。
 
 ### 錄音視窗合併（使用者要求「麥克風視窗與文字視窗合併」）
 `HUDWindow` 改名 `DictationWindow`，`TranscriptWindow.swift` 刪除。現在語音輸入期間只有

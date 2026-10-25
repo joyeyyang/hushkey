@@ -24,8 +24,18 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     let result = match task {
-        "refine" => offline_voice_core::llm_refine_with_keywords(&model, input.trim(), &instruction),
-        "refine-two-stage" => offline_voice_core::llm_refine_two_stage(&model, input.trim(), &instruction),
+        "refine" => {
+            // The retrieval pass runs HERE, not in the caller: it loads a second
+            // model, and the caller is the app, which is holding the ASR model
+            // already. Doing it here means the embedding model is released before
+            // the LLM weights are mapped, so the two never coexist.
+            let hint = offline_voice_core::screen_worker_hint(&model, input.trim(), &instruction);
+            offline_voice_core::llm_refine_with_keywords(&model, input.trim(), &hint)
+        }
+        "refine-two-stage" => {
+            let hint = offline_voice_core::screen_worker_hint(&model, input.trim(), &instruction);
+            offline_voice_core::llm_refine_two_stage(&model, input.trim(), &hint)
+        }
         "summary" => offline_voice_core::llm_summarize_one(&model, &instruction, input.trim()),
         "translate" => offline_voice_core::llm_translate(&model, input.trim(), &instruction),
         other => {

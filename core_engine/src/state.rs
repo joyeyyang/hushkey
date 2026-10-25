@@ -414,10 +414,10 @@ pub fn refine_text_with_keywords(text: &str, keywords_hint: &str) -> Result<Stri
 /// understand-then-tidy. `OVC_REFINE_STAGES` (1 or 2) overrides the choice so
 /// both shapes can be compared on the same input.
 pub fn refine_text_with_keywords_stages(text: &str, keywords_hint: &str, stages: u32) -> Result<String> {
-    // Narrow the hint to the terms this draft mentions, and tell the model which
-    // clause (if any) asked for a change. Both come from the retrieval model and
-    // both are skipped without it.
-    let keywords_hint = screened_hint(text, keywords_hint);
+    // The hint is passed through untouched: the narrow-and-name pass runs inside
+    // the worker, which is the only process that can afford to hold the retrieval
+    // model, and only after this one's ASR has been paid for. See
+    // `screen_hint_for_worker`.
     let model = llm_model_path()?;
     let stages = match std::env::var("OVC_REFINE_STAGES").ok().and_then(|v| v.trim().parse::<u32>().ok()) {
         Some(forced @ (1 | 2)) => forced,
@@ -457,6 +457,61 @@ const EMBED_MIN_SCORE: f32 = 0.35;
 /// screening does NOT name, so a miss costs only a hint, while a false positive
 /// tells the model to delete something the speaker never asked it to delete.
 const EMBED_EDIT_MIN_SCORE: f32 = 0.65;
+
+/// The retrieval model beside an LLM model file.
+///
+/// The LLM worker is handed the LLM's path and nothing else, and it has to find
+/// the retrieval model itself: `<models>/llm/x.gguf` and
+/// `<models>/embedding/y.gguf` are siblings under the same tree, so the path is
+/// derivable even though the worker never learns the models directory. The env
+/// overrides still win, so the app's model choice and `OVC_EMBED_DISABLE` behave
+/// here exactly as they do in-process.
+pub fn embed_model_beside(llm_model: &Path) -> Option<PathBuf> {
+    if std::env::var("OVC_EMBED_DISABLE").map(|v| v == "1").unwrap_or(false) {
+        return None;
+    }
+    let root = llm_model.parent()?.parent()?;
+    let chosen = std::env::var("OVC_EMBED_MODEL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && !v.contains('/') && !v.contains(".."))
+        .unwrap_or_else(|| DEFAULT_EMBED_FILE.to_string());
+    let model = root.join("embedding").join(&chosen);
+    if model.is_file() {
+        Some(model)
+    } else {
+        None
+    }
+}
+
+/// The term-vector cache that belongs to an LLM model tree, for the same reason:
+/// the worker can find it without being told.
+pub fn embed_cache_beside(llm_model: &Path) -> Option<PathBuf> {
+    Some(llm_model.parent()?.parent()?.join(".cache").join("term-vectors.tsv"))
+}
+
+/// Screening that a WORKER runs on behalf of a caller.
+///
+/// The whole point is where it happens: in the app's own process this loads a
+/// second model next to the ASR one while the LLM worker is starting, and on an
+/// 8 GB machine that is swap. The worker is already the process that holds a big
+/// model, so the screening goes there, the embedder is dropped before the LLM is
+/// loaded, and the peak becomes max(embed, LLM) instead of their sum.
+///
+/// Returns the hint unchanged whenever the retrieval model is missing or
+/// anything fails: a screening that cannot run must never cost the user their
+/// dictation, and the refine prompt still handles a spoken instruction on its own.
+pub fn screen_hint_for_worker(llm_model: &Path, text: &str, keywords_hint: &str) -> String {
+    let current = || keywords_hint.to_string();
+    let Some(model) = embed_model_beside(llm_model) else {
+        return current();
+    };
+    let cache = embed_cache_beside(llm_model);
+    match screened_hint_with(&model, cache.as_deref(), text, keywords_hint) {
+        Some(hint) => hint,
+        None => current(),
+    }
+}
 
 /// The retrieval model, when it is installed.
 ///
@@ -570,35 +625,44 @@ fn terms_in_hint(hint: &str) -> Option<(String, Vec<String>)> {
 /// actually mentions, and add the clauses that asked for a change.
 ///
 /// Both jobs need the same model load, so they are done in one `screen` call, and
-/// any failure falls back to the hint as it arrived: the retrieval model is an
+/// any failure leaves the hint as it arrived: the retrieval model is an
 /// enhancement, and an enhancement that can break a dictation is worse than none.
-fn screened_hint(text: &str, keywords_hint: &str) -> String {
+///
+/// `None` means "the screening could not run", which the caller reports as a
+/// skipped enhancement rather than an error.
+fn screened_hint_with(
+    model: &Path,
+    cache: Option<&Path>,
+    text: &str,
+    keywords_hint: &str,
+) -> Option<String> {
     let Some((head, terms)) = terms_in_hint(keywords_hint) else {
         // No structured term list to narrow; still worth naming an instruction.
-        return match edit_clauses(text) {
-            Ok(clauses) if !clauses.is_empty() => format!("{keywords_hint}{}", edit_section(&clauses)),
-            _ => keywords_hint.to_string(),
-        };
+        let found = crate::embed::screen(
+            model,
+            cache,
+            &[],
+            text,
+            0,
+            EMBED_MIN_SCORE,
+            EMBED_EDIT_MIN_SCORE,
+        )
+        .ok()?;
+        if found.edit_clauses.is_empty() {
+            return Some(keywords_hint.to_string());
+        }
+        return Some(format!("{keywords_hint}{}", edit_section(&found.edit_clauses)));
     };
-    let Some(model) = embed_model_path() else {
-        return keywords_hint.to_string();
-    };
-    let cache = lock().models_dir.clone().map(|d| embed_cache_path(&d));
-    let found = match crate::embed::screen(
-        &model,
-        cache.as_deref(),
+    let found = crate::embed::screen(
+        model,
+        cache,
         &terms,
         text,
         EMBED_TOP_K,
         EMBED_MIN_SCORE,
         EMBED_EDIT_MIN_SCORE,
-    ) {
-        Ok(found) => found,
-        Err(e) => {
-            eprintln!("retrieval skipped: {}", e.msg);
-            return keywords_hint.to_string();
-        }
-    };
+    )
+    .ok()?;
     let mut out = if found.ranked_terms.is_empty() {
         keywords_hint.to_string()
     } else {
@@ -607,7 +671,7 @@ fn screened_hint(text: &str, keywords_hint: &str) -> String {
     if !found.edit_clauses.is_empty() {
         out.push_str(&edit_section(&found.edit_clauses));
     }
-    out
+    Some(out)
 }
 
 /// The instruction the speaker gave about their own draft, quoted back to the
