@@ -46,5 +46,14 @@ let package = Package(
                 ]),
             ]
         ),
+        // The kit's pure text rules, exercised on their own. The insertion
+        // search is the one that decides WHICH occurrence of a pasted text an
+        // edit replaces, and the wrong occurrence replaces a sentence the user
+        // did not mean -- a failure that is invisible until it has happened.
+        .testTarget(
+            name: "VoiceInputKitTests",
+            dependencies: ["VoiceInputKit"],
+            path: "Tests/VoiceInputKitTests"
+        ),
     ]
 )

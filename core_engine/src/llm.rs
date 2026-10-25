@@ -1286,6 +1286,13 @@ fn locate_by_position(instruction: &str, count: usize) -> Option<usize> {
             return Some(n - 1);
         }
     }
+    // A relative position ("最後一句", "前面那行") needs the line count to be
+    // resolved, so it is read here rather than by the number parser.
+    if let Some(n) = relative_position(instruction, count) {
+        if n >= 1 && n <= count {
+            return Some(n - 1);
+        }
+    }
     // An English ordinal: "the second one", "the third line".
     if let Some(n) = english_ordinal(instruction) {
         if n >= 1 && n <= count {
@@ -1368,6 +1375,49 @@ fn chinese_position(instruction: &str) -> Option<usize> {
         }
         if next < chars.len() && POSITION_WORDS.contains(&chars[next]) {
             return Some(value);
+        }
+    }
+    None
+}
+
+/// A RELATIVE position in the instruction: "最後一句", "前面那行".
+///
+/// These name a line by where it sits rather than by counting, and they are
+/// how people actually say it when they mean the line they just spoke. The
+/// count of lines is needed to resolve them, so they are read here and turned
+/// into a number by the caller.
+///
+/// 那 is optional in both: "最後一句" and "最後那句" are the same thing, and
+/// the user says whichever comes out.
+fn relative_position(instruction: &str, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    const LAST: [&str; 6] = ["最後一句", "最後那句", "最後一行", "最後那行", "最後一段", "最後那段"];
+    const FIRST: [&str; 6] = ["第一句", "第一行", "第一段", "最先那句", "最先那行", "最先那段"];
+    const PREVIOUS: [&str; 8] = [
+        "前面一句", "前面那句", "前面一行", "前面那行", "前面一段", "前面那段",
+        "上一句", "上一行",
+    ];
+    const NEXT: [&str; 6] = ["後面一句", "後面那句", "後面一行", "後面那行", "後面一段", "後面那段"];
+    for word in LAST.iter() {
+        if instruction.contains(word) {
+            return Some(count);
+        }
+    }
+    for word in FIRST.iter() {
+        if instruction.contains(word) {
+            return Some(1);
+        }
+    }
+    for word in PREVIOUS.iter() {
+        if instruction.contains(word) {
+            return Some(count.saturating_sub(1).max(1));
+        }
+    }
+    for word in NEXT.iter() {
+        if instruction.contains(word) {
+            return Some(2);
         }
     }
     None
@@ -1565,6 +1615,29 @@ fn one_line_instruction(instruction: &str, target: &EditTarget) -> String {
     const ENGLISH_VERBS: [&str; 3] = ["change", "replace", "to"];
     if instruction_removes(text) {
         return if has_cjk(text) { "刪掉這行".to_string() } else { "delete this line".to_string() };
+    }
+    // A TRANSFORMATION is not a replacement: the line has to be rewritten into a
+    // shorter or longer one, keeping what it says. Saying "replace this line
+    // with 短一點" asked for the line to BECOME 短一點, and that is what came
+    // back. The instruction is passed through instead, with the target made
+    // explicit, so the model rewrites rather than substitutes.
+    if is_transformation(text) {
+        return match target {
+            EditTarget::Position => {
+                if has_cjk(text) {
+                    format!("把這行{text}，內容保留")
+                } else {
+                    format!("{text} this line, keep what it says")
+                }
+            }
+            EditTarget::Content(word) => {
+                if has_cjk(text) {
+                    format!("把這行裡的「{word}」{text}，其他字保留")
+                } else {
+                    format!("{text} \"{word}\" in this line, keep the rest")
+                }
+            }
+        };
     }
     let value = CHINESE_VERBS
         .iter()
@@ -1841,9 +1914,20 @@ fn substitute_in_draft(draft: &[String], index: usize, word: &str, value: &str) 
 /// "把第二點改成禮拜五" carries 禮拜五; "把地點改成三樓會議室" carries 三樓會議室.
 /// The value is what sits after the change verb, and it is empty for a
 /// deletion -- there is no new value in "刪掉第三句".
+///
+/// A TRANSFORMATION carries no value: "第二句改短一點" asks for the line to be
+/// made shorter, and what follows the verb ("短一點") describes the change, not
+/// what the line should become. Reading it as a value replaced the whole line
+/// with "短一點", and the retained-content guard then called that not an edit
+/// and refused it -- so the instruction that named a line perfectly well did
+/// nothing. A transformation is the model's job: it has to rewrite the line,
+/// which is exactly what the model is for.
 fn replacement_value(instruction: &str) -> Option<String> {
     let text = instruction.trim();
     if instruction_removes(text) {
+        return None;
+    }
+    if is_transformation(text) {
         return None;
     }
     const CHINESE_VERBS: [&str; 5] = ["改成", "換成", "改為", "換", "改"];
@@ -1865,6 +1949,23 @@ fn replacement_value(instruction: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// True when the instruction asks for the line to be CHANGED rather than
+/// REPLACED by a value.
+///
+/// "改成" takes a value -- "改成禮拜五" -- and the program can put it in place
+/// exactly. "改短" / "改長" / "改多" / "改少" / "改小" / "改大" take a
+/// description of the change, and the line has to be rewritten into a shorter
+/// or longer one. "縮短" and "精簡" say the same thing with a different verb.
+///
+/// The difference is the verb: a transformation verb has the effect baked into
+/// it, so what follows it qualifies the effect rather than naming a value.
+fn is_transformation(instruction: &str) -> bool {
+    const TRANSFORMATIONS: [&str; 10] = [
+        "改短", "改長", "改多", "改少", "改小", "改大", "改簡", "改複", "縮短", "精簡",
+    ];
+    TRANSFORMATIONS.iter().any(|verb| instruction.contains(verb))
 }
 
 /// Put the original line's trailing punctuation back on the rewritten line.
@@ -2335,6 +2436,52 @@ mod tests {
         assert_eq!(content_words("把小林改成大衛"), vec!["小林"]);
         assert_eq!(content_words("把時程改成禮拜五"), vec!["時程"]);
         assert_eq!(content_words("把三點改成四點"), vec!["三點"]);
+    }
+
+    /// A relative position names a line by where it sits.
+    ///
+    /// "把最後一句改短一點" is how the instruction comes out of the microphone,
+    /// and the number parser cannot read it -- there is no numeral in it. It
+    /// needs the line count to be resolved, which is why it is read separately.
+    #[test]
+    fn a_relative_position_names_the_line_it_points_at() {
+        assert_eq!(relative_position("把最後一句改短一點", 3), Some(3));
+        assert_eq!(relative_position("把最後那句改短一點", 3), Some(3));
+        assert_eq!(relative_position("把前面一句刪掉", 3), Some(2));
+        assert_eq!(relative_position("把第一句改成大衛拜訪", 3), Some(1));
+        // And it lands on the right line through the locator.
+        let items = numbered_items("明天下午三點跟小林開會，討論第四季時程，地點還沒確定");
+        assert_eq!(
+            locate_edit_target("把最後一句改短一點", &items),
+            Some((2, EditTarget::Position))
+        );
+    }
+
+    /// A transformation carries no replacement value.
+    ///
+    /// "第二句改短一點" asks for the line to be made shorter. Read as a
+    /// replacement, the value is "短一點" and the line BECOMES 短一點 -- which
+    /// is not an edit of the line, and the content guard then refused the whole
+    /// instruction. The value has to be absent, so the line is rewritten
+    /// instead.
+    #[test]
+    fn a_transformation_carries_no_replacement_value() {
+        assert_eq!(replacement_value("第二句改短一點"), None);
+        assert_eq!(replacement_value("把最後一句改短一點"), None);
+        assert_eq!(replacement_value("把第二段精簡一點"), None);
+        // A replacement still carries its value.
+        assert_eq!(replacement_value("把第二點改成禮拜五"), Some("禮拜五".to_string()));
+        assert_eq!(replacement_value("把地點改成三樓會議室"), Some("三樓會議室".to_string()));
+    }
+
+    /// The model's instruction for a transformation asks it to rewrite, not to
+    /// substitute. "把這行完全改成短一點" is what the old wording produced, and
+    /// the model obeyed it.
+    #[test]
+    fn a_transformation_asks_for_a_rewrite() {
+        let built = one_line_instruction("第二句改短一點", &EditTarget::Position);
+        assert!(built.contains("改短一點"), "should keep the transformation: {built}");
+        assert!(!built.contains("完全改成"), "should not ask for a replacement: {built}");
     }
 
     /// The whole path for one instruction: the draft's items, the word, and the

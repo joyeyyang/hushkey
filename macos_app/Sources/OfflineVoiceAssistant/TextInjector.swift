@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import VoiceInputKit
 
 /// Inserts text into the focused field.
 /// Primary: place text on the pasteboard, post Cmd+V via CGEvent. Requires Accessibility permission.
@@ -147,12 +148,21 @@ enum TextInjector {
     /// the caret. Offsets are UTF-16 units, which is what an AX text range counts
     /// in, so `NSString` and not `String` does the searching.
     private static func locateInsertion(_ expected: String, in text: NSString, element: AXUIElement) -> NSRange? {
-        guard !expected.isEmpty, text.length > 0 else { return nil }
         let caret = rangeAttribute(element, kAXSelectedTextRangeAttribute as CFString)
         let limit = min(text.length, caret.map { $0.location + $0.length } ?? text.length)
-        guard limit > 0 else { return nil }
-        let found = text.range(of: expected, options: .backwards, range: NSRange(location: 0, length: limit))
-        return found.location == NSNotFound ? nil : found
+        return insertionRange(expected, in: text, limit: limit)
+    }
+
+    /// The search itself, with no Accessibility in it.
+    ///
+    /// The rule lives in the kit (`VoiceText.insertionRange`) because it is a
+    /// property of the text, not of this app: the last occurrence ending at or
+    /// before the caret is the one that was pasted there. What matters here is
+    /// that it is the wrong occurrence that is dangerous — the user edits one
+    /// sentence and a different one changes — so the search is in one place
+    /// that can be exercised on its own.
+    static func insertionRange(_ expected: String, in text: NSString, limit: Int) -> NSRange? {
+        VoiceText.insertionRange(of: expected, in: text, before: limit)
     }
 
     /// Selects `range`, and waits for the target app to agree before returning:
