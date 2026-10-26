@@ -46,6 +46,8 @@ struct Options {
     var isEdit: String?
     /// `--edit`: the instruction; the text it applies to arrives on stdin.
     var editInstruction: String?
+    /// `--summarize`: the transcript to summarise; it arrives on stdin.
+    var summarize = false
 }
 
 let usage = """
@@ -63,6 +65,7 @@ usage: voiceinput [options] <audio-file> [...]
   --no-polish             skip the AI cleanup pass entirely
   --is-edit <text>        print yes/no: does this line read as a spoken edit?
   --edit <instruction>    edit the text read from stdin (whole stream) and print it
+  --summarize             summarise the transcript read from stdin (meeting sections)
   --paste                 also paste the refined text at the cursor (needs Accessibility)
   --selftest              run a built-in check and print PASS/FAIL
   --help                  this text
@@ -123,6 +126,8 @@ func parseArguments(_ args: [String]) -> Options {
             opts.isEdit = value("--is-edit")
         case "--edit":
             opts.editInstruction = value("--edit")
+        case "--summarize":
+            opts.summarize = true
         case "--paste":
             opts.paste = true
         case "--selftest":
@@ -236,6 +241,45 @@ func transcribe(_ url: URL, engine: VoiceInputEngine, opts: Options) -> String {
     }
 }
 
+// MARK: - Summarize
+
+/// Summarises the transcript on stdin and prints the meeting sections.
+///
+/// The meeting path's second step, and the same one the app runs: a finished
+/// transcript in, the 摘要／待辦／決議 sections out. It is a SEPARATE step
+/// from the cleanup chain on purpose -- the cleanup asks for one tidy line,
+/// and a meeting transcript run through it comes back condensed and wrong
+/// about what was said.
+///
+/// The transcript is read whole from stdin, because a meeting transcript is
+/// several lines and a draft is one.
+///
+/// The script is normalised first (the recogniser emits Simplified, and the
+/// summary prompt follows the transcript's language), and the answer is
+/// normalised again for the same reason -- the model may echo Simplified even
+/// when asked not to.
+///
+/// A failure is reported as a failure, not printed as text: a script must not
+/// file an empty summary as if it were one.
+func runSummarize(config: VoiceInputConfig) -> Never {
+    let data = FileHandle.standardInput.readDataToEndOfFile()
+    guard let raw = String(data: data, encoding: .utf8) else {
+        fail("the transcript on stdin is not valid UTF-8", code: 1)
+    }
+    let transcript = VoiceText.toTraditional(
+        raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    guard !transcript.isEmpty else {
+        fail("the transcript on stdin is empty", code: 1)
+    }
+    let engine = makeEngine(config)
+    defer { engine.shutdown() }
+    guard let answer = try? engine.summarize(transcript), !answer.isEmpty else {
+        fail("could not summarise the transcript (no usable result)", code: 1)
+    }
+    print(VoiceText.toTraditional(answer))
+    exit(0)
+}
+
 // MARK: - Engine
 
 /// Builds the engine the way every path needs it: config validated, core
@@ -306,6 +350,10 @@ if let spoken = opts.isEdit {
 
 if let instruction = opts.editInstruction {
     runEdit(instruction: instruction, config: config)
+}
+
+if opts.summarize {
+    runSummarize(config: config)
 }
 
 guard !opts.files.isEmpty else {

@@ -57,6 +57,44 @@ step "cli self-test"
 ./macos_app/.build/release/voiceinput --selftest >/tmp/ovc-verify-cli.log 2>&1
 record "cli self-test" $?
 
+# The CLI's edit and summarise paths are the kit's, reached from the command
+# line. Both are checked with a real model call, because a probe that only
+# checked the argument handling would pass with a broken pipeline.
+step "cli edit"
+printf '明天下午三點跟小林開會，討論第四季時程，地點還沒確定' \
+    | ./macos_app/.build/release/voiceinput --edit "把小林改成大衛" \
+    >/tmp/ovc-verify-cli-edit.log 2>&1
+EDIT_STATUS=$?
+record "cli edit" $EDIT_STATUS
+if [ $EDIT_STATUS -eq 0 ]; then
+    # The edit has to land on the right line, not merely succeed.
+    if grep -q "明天下午三點跟大衛開會" /tmp/ovc-verify-cli-edit.log; then
+        printf 'PASS  cli edit landed on the right line\n'
+    else
+        printf 'FAIL  cli edit landed on the wrong line\n'
+        FAILED+=("cli edit target")
+    fi
+fi
+
+step "cli summarize"
+printf '明天下午三點跟小林開會討論第四季時程。小林說下週三之前會給客戶看初稿。我負責週五之前補上第二段的數字。' \
+    | ./macos_app/.build/release/voiceinput --summarize \
+    >/tmp/ovc-verify-cli-summary.log 2>&1
+SUMMARY_STATUS=$?
+record "cli summarize" $SUMMARY_STATUS
+if [ $SUMMARY_STATUS -eq 0 ]; then
+    # The three meeting sections have to be there, and the owner of an action
+    # must not be invented.
+    if grep -q "## 摘要" /tmp/ovc-verify-cli-summary.log \
+        && grep -q "## 決議" /tmp/ovc-verify-cli-summary.log \
+        && grep -q "## 待辦" /tmp/ovc-verify-cli-summary.log; then
+        printf 'PASS  cli summarize has the meeting sections\n'
+    else
+        printf 'FAIL  cli summarize is missing a meeting section\n'
+        FAILED+=("cli summarize sections")
+    fi
+fi
+
 step "offscreen ui self-test"
 rm -rf /tmp/ovc-verify-ui && mkdir -p /tmp/ovc-verify-ui
 for theme in paper night; do
