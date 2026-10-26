@@ -3,8 +3,19 @@ import UniformTypeIdentifiers
 
 @main
 struct OVCApp: App {
+    init() {
+        // Before any view exists, so a launch that never reaches one is still readable.
+        Diagnostics.emit()
+    }
+
     var body: some Scene {
-        WindowGroup { RootView() }
+        WindowGroup {
+            if Diagnostics.isSmokeRun {
+                SmokeView()
+            } else {
+                RootView()
+            }
+        }
     }
 }
 

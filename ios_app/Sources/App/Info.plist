@@ -12,6 +12,15 @@
     <key>CFBundleVersion</key><string>1</string>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>UILaunchScreen</key><dict/>
+    <!-- SwiftUI's App lifecycle still needs a scene to be declared. Without this
+         dictionary the app launches, connects no scene, and shows a white
+         screen with no crash and nothing in the log. Xcode's generated
+         Info.plist carries it (INFOPLIST_KEY_UIApplicationSceneManifest_Generation);
+         this one is hand-written, so it has to be here explicitly. -->
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+      <key>UIApplicationSupportsMultipleScenes</key><false/>
+    </dict>
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationPortrait</string></array>
     <key>NSMicrophoneUsageDescription</key>
