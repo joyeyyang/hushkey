@@ -38,6 +38,20 @@ enum Core {
     static func initialize(models: URL) throws {
         guard !initialized else { return }
         try check(Core_Initialize(models.path))
+        // The core ships two recognisers and prefers SenseVoice (240 MB) unless
+        // `OVC_ASR_MODEL` says otherwise. There is no shell on iOS, so the app
+        // states the choice itself -- but only when SenseVoice is genuinely absent,
+        // so an install that has it keeps the core's own preference.
+        let sense = models.appendingPathComponent("asr/model.int8.onnx")
+        let dolphin = models.appendingPathComponent("asr/dolphin/model.int8.onnx")
+        if !FileManager.default.fileExists(atPath: sense.path),
+           FileManager.default.fileExists(atPath: dolphin.path) {
+            setenv("OVC_ASR_MODEL", "dolphin", 1)
+        }
+        // `Core_Initialize` only points the engine at the model tree; nothing is
+        // loaded until an agent is named. On macOS the app loads "asr" the same
+        // way, and skipping it is why `ASR_Start` answered "model not loaded".
+        try check(Agent_Load("asr"))
         initialized = true
     }
 

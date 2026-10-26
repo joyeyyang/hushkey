@@ -6,12 +6,35 @@ struct OVCApp: App {
     init() {
         // Before any view exists, so a launch that never reaches one is still readable.
         Diagnostics.emit()
+
+        // `-OVC_AUDIO_FILE <path>` runs the whole pipeline over a file instead of
+        // the microphone. The simulator has no usable microphone, and everything
+        // after the sample buffer is the part worth testing.
+        if let path = Diagnostics.injectedAudio {
+            Task { @MainActor in
+                DictationController.shared.prewarm()
+                // Lets a text field take focus (and the keyboard appear) first.
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                DictationController.shared.runInjected(url: URL(fileURLWithPath: path))
+            }
+        } else if Diagnostics.startsRecording {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                DictationController.shared.start()
+            }
+        }
+    }
+
+    private static var isKeyboardProbe: Bool {
+        ProcessInfo.processInfo.arguments.contains("-OVC_KB_PROBE")
     }
 
     var body: some Scene {
         WindowGroup {
             if Diagnostics.isSmokeRun {
                 SmokeView()
+            } else if Self.isKeyboardProbe {
+                KeyboardProbeView()
             } else {
                 RootView()
             }
@@ -19,96 +42,8 @@ struct OVCApp: App {
     }
 }
 
-@MainActor
-final class Recorder: ObservableObject {
-    @Published var recording = false
-    @Published var text = ""
-    @Published var partial = ""
-    @Published var error: String?
-    @Published var busy = false
-
-    private let mic = MicCapture()
-    private var timer: Timer?
-    private let queue = DispatchQueue(label: "ovc.asr", qos: .userInitiated)
-
-    func start() {
-        guard !recording, !busy else { return }
-        error = nil
-        busy = true
-        queue.async {
-            do {
-                try Core.initialize(models: SharedStore.modelsDir)
-                try Core.start()
-                self.mic.onSamples = { Core.submit($0) }
-                try self.mic.start()
-                DispatchQueue.main.async {
-                    self.busy = false
-                    self.recording = true
-                    self.text = ""
-                    self.partial = ""
-                    self.startPolling()
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.busy = false
-                    self.error = error.localizedDescription
-                }
-            }
-        }
-    }
-
-    private func startPolling() {
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.queue.async {
-                let segments = Core.segments()
-                let open = Core.peek()
-                guard !segments.isEmpty || !open.isEmpty else { return }
-                DispatchQueue.main.async {
-                    for s in segments { self.text += s.text }
-                    self.partial = open
-                }
-            }
-        }
-    }
-
-    func stop() {
-        guard recording else { return }
-        timer?.invalidate()
-        timer = nil
-        recording = false
-        mic.stop()
-        busy = true
-        let accumulated = text
-        queue.async {
-            let final = (try? Core.stop()) ?? ""
-            let out: String
-            if final.isEmpty {
-                out = accumulated
-            } else if final.hasPrefix(accumulated) {
-                out = final
-            } else {
-                out = accumulated + final
-            }
-            DispatchQueue.main.async {
-                self.busy = false
-                self.partial = ""
-                self.text = out
-                if !out.isEmpty { SharedStore.put(out) }
-            }
-        }
-    }
-
-    func clear() {
-        text = ""
-        partial = ""
-        error = nil
-    }
-}
-
 struct RootView: View {
-    @StateObject private var recorder = Recorder()
+    @ObservedObject private var dictation = DictationController.shared
     @State private var modelsReady = SharedStore.hasModels
     @State private var importing = false
     @State private var copied = false
@@ -129,30 +64,55 @@ struct RootView: View {
         }
         .preferredColorScheme(.dark)
         .onOpenURL { url in
-            if url.host == "record" { recorder.start() }
+            // The keyboard's microphone button. Cold launch and re-entry both
+            // land here, and both should start recording immediately.
+            if url.host == "record", modelsReady { dictation.start() }
+        }
+        .onAppear {
+            guard modelsReady else { return }
+            dictation.prewarm()
+            // Audio from a run the system killed before it could publish.
+            dictation.recoverOrphan()
         }
     }
 
     // MARK: recorder
 
-    private var displayText: String {
-        recorder.text + recorder.partial
+    private var displayText: String { dictation.display }
+
+    private var statusWord: String {
+        switch dictation.phase {
+        case .recording: return "錄音中"
+        case .transcribing: return "辨識中"
+        case .refining: return "整理中"
+        case .done: return "完成"
+        case .failed: return "錯誤"
+        case .idle: return "待機"
+        }
+    }
+
+    private var statusColor: Color {
+        switch dictation.phase {
+        case .recording, .failed: return seal
+        case .done: return ink
+        default: return dim
+        }
     }
 
     private var recorderView: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             HStack(alignment: .firstTextBaseline) {
                 Text("聽寫").font(.system(size: 30, weight: .semibold, design: .serif))
                     .foregroundStyle(ink)
                 Spacer()
-                Text(recorder.recording ? "錄音中" : "待機")
+                Text(statusWord)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(recorder.recording ? seal : dim)
+                    .foregroundStyle(statusColor)
             }
             .padding(.top, 12)
 
             ScrollView {
-                Text(displayText.isEmpty ? "按下面的麥克風，說一句話。\n文字會出現在這裡，也會送到鍵盤。" : displayText)
+                Text(displayText.isEmpty ? emptyHint : displayText)
                     .font(.system(size: 20, design: .serif))
                     .foregroundStyle(displayText.isEmpty ? dim : ink)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -161,9 +121,22 @@ struct RootView: View {
             .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
             .frame(maxHeight: .infinity)
 
-            if let error = recorder.error {
-                Text(error).font(.footnote).foregroundStyle(seal)
+            if let error = dictation.error {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(seal)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if dictation.phase == .done {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.up.left")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("已送到鍵盤。點左上「◀ 上一個 App」回去，字會在游標出現。")
+                        .font(.system(size: 12))
+                }
+                .foregroundStyle(ink.opacity(0.85))
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             HStack(spacing: 12) {
@@ -179,41 +152,53 @@ struct RootView: View {
                 .disabled(displayText.isEmpty)
 
                 Button {
-                    recorder.clear()
+                    dictation.clear()
                 } label: {
                     Label("清除", systemImage: "xmark")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(QuietButton())
-                .disabled(displayText.isEmpty)
+                .disabled(displayText.isEmpty && dictation.phase == .idle)
             }
 
             Button {
-                recorder.recording ? recorder.stop() : recorder.start()
+                if dictation.isRecording {
+                    dictation.stop()
+                } else {
+                    dictation.start()
+                }
             } label: {
                 ZStack {
                     Circle()
-                        .fill(recorder.recording ? seal : Color.white.opacity(0.10))
+                        .fill(dictation.isRecording ? seal : Color.white.opacity(0.10))
                         .frame(width: 86, height: 86)
-                    if recorder.busy {
+                    if dictation.isBusy && !dictation.isRecording {
                         ProgressView().tint(ink)
                     } else {
-                        Image(systemName: recorder.recording ? "stop.fill" : "mic.fill")
+                        Image(systemName: dictation.isRecording ? "stop.fill" : "mic.fill")
                             .font(.system(size: 30, weight: .medium))
-                            .foregroundStyle(recorder.recording ? Color.white : ink)
+                            .foregroundStyle(dictation.isRecording ? Color.white : ink)
                     }
                 }
             }
-            .disabled(recorder.busy)
-            .padding(.bottom, 8)
+            .disabled(dictation.isBusy && !dictation.isRecording)
+            .padding(.bottom, 4)
 
-            Text("在 iPhone 上要這樣用：設定 › 一般 › 鍵盤 › 鍵盤 › 加入新的鍵盤 › 語音輸入，\n之後在任何輸入框切到它，按麥克風。")
+            Text("在 iPhone 上要這樣用：設定 › 一般 › 鍵盤 › 鍵盤 › 加入新的鍵盤 › 語音輸入，\n之後在任何輸入框切到它，按麥克風。停下來 1 秒會自動停止。")
                 .font(.system(size: 11))
                 .foregroundStyle(dim)
                 .multilineTextAlignment(.center)
                 .padding(.bottom, 6)
         }
         .padding(.horizontal, 20)
+    }
+
+    private var emptyHint: String {
+        switch dictation.phase {
+        case .recording: return "請開始說話。"
+        case .transcribing: return "辨識中…"
+        default: return "按下面的麥克風，說一句話。\n文字會出現在這裡，也會送到鍵盤。"
+        }
     }
 
     // MARK: models

@@ -19,7 +19,10 @@
             <key>IsASCIICapable</key><true/>
             <key>PrefersRightToLeft</key><false/>
             <key>PrimaryLanguage</key><string>zh-Hant</string>
-            <key>RequestsOpenAccess</key><false/>
+            <!-- Required for the App Group and for opening the app: without it the
+                 shared container is nil in the extension, so the keyboard can
+                 neither see a session nor reach the microphone's owner. -->
+            <key>RequestsOpenAccess</key><true/>
         </dict>
     </dict>
 </dict>

@@ -21,6 +21,25 @@ enum Diagnostics {
         ProcessInfo.processInfo.arguments.contains(smokeFlag)
     }
 
+    /// `-OVC_RECORD`: start a dictation from the microphone at launch, the same
+    /// path the keyboard's `ovc://record` takes. The simulator has no audio input,
+    /// which is exactly why it is worth exercising: the failure has to be a
+    /// sentence on screen, not a crash in the audio engine.
+    static var startsRecording: Bool {
+        ProcessInfo.processInfo.arguments.contains("-OVC_RECORD")
+    }
+
+    /// `-OVC_AUDIO_FILE <path>`: run the pipeline over a file instead of the
+    /// microphone. The simulator has no usable microphone, and this doubles as
+    /// the regression entry point -- a known sentence in, the same text out.
+    static var injectedAudio: String? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let index = args.firstIndex(of: "-OVC_AUDIO_FILE"),
+              args.index(after: index) < args.endIndex
+        else { return nil }
+        return args[args.index(after: index)]
+    }
+
     struct Line: Identifiable {
         let id = UUID()
         let label: String
