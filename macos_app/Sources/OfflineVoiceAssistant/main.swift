@@ -153,6 +153,7 @@ final class AppController {
         // The capsule's stop button ends the recording without the hotkey.
         hud.onStop = { [weak self] in self?.stopFromCapsule() }
         hud.onPause = { [weak self] in self?.togglePause() }
+        hud.onInsert = { [weak self] in self?.insertFromLiveWindow() }
 
         window.onResetPermission = { [weak self] in self?.resetAccessibilityPermission() }
         window.onImportAudio = { [weak self] url in self?.importAudioFile(url) }
@@ -713,7 +714,10 @@ final class AppController {
     /// otherwise label the transcript from the previous recording's state.
     private func wire(_ session: VoiceInputSession, labelled: Bool) {
         session.onLevel = { [weak self] level in self?.noteLevel(level) }
-        session.onPartial = { [weak self] text in self?.hud.setCount(text.count) }
+        session.onPartial = { [weak self] text in
+            self?.hud.setCount(text.count)
+            self?.hud.setPartial(text)
+        }
         session.onSegments = { [weak self] fresh in
             guard let self else { return }
             let segments = fresh.map(Self.transcriptSegment)
@@ -742,7 +746,7 @@ final class AppController {
         dictating = false
         stopSilenceWatch()
         setRecordingState()
-        hud.show(text: "轉錄中…")
+        hud.showStage("轉錄中…")
         endSession(status: "轉錄中…", labelled: false) { raw in
             self.deliver(raw)
         }
@@ -783,7 +787,7 @@ final class AppController {
         stopSilenceWatch()
         paused = false
         setRecordingState()
-        hud.show(text: "整理會議中…長會議需要幾分鐘")
+        hud.showStage("整理會議中…長會議需要幾分鐘")
         let eventTitle = CalendarNaming.recentlyEndedTitle()
         let startedAt = sessionStartedAt
         endSession(status: "錄音結束", labelled: true) { transcript in
@@ -1094,7 +1098,7 @@ final class AppController {
             return
         }
         let explicit = translateTarget == "en" || translateTarget == "zh"
-        hud.show(text: explicit ? "整理並翻譯中…" : "AI 整理中…")
+        hud.showStage(explicit ? "整理並翻譯中…" : "AI 整理中…")
         coreQueue.async {
             let polished = self.polish(text)
             DispatchQueue.main.async { self.finish(polished) }
@@ -1113,7 +1117,7 @@ final class AppController {
     /// than not pasting it.
     private func applyEdit(_ instruction: String, to previous: String) {
         ModelInstaller.log("voice edit: instruction \(instruction.count) chars, text \(previous.count) chars")
-        hud.show(text: "套用編輯中…")
+        hud.showStage("套用編輯中…")
         let config = passConfig()
         coreQueue.async {
             guard let edited = applyVoiceEdit(instruction, to: previous, config: config) else {
@@ -1206,6 +1210,25 @@ final class AppController {
             }
         } else {
             insertDirect(polished)
+        }
+    }
+
+    /// The transcript window's 貼上: deliver what is on screen, exactly as the
+    /// automatic path would.
+    ///
+    /// The window has to go first. It is the focused responder after a click on
+    /// its button, so a synthesized Cmd+V would paste into our own text view --
+    /// the same trap the edit card avoids by hiding before it commits.
+    private func insertFromLiveWindow() {
+        let text = hud.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            hud.flash("沒有可貼上的文字")
+            return
+        }
+        ModelInstaller.log("insert: from window, \(text.count) chars")
+        hud.hide()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            self?.insertDirect(text)
         }
     }
 

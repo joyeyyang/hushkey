@@ -62,6 +62,7 @@ final class DictationWindow: NSObject {
 
     enum Mode {
         case recording  // capsule: mic, level, count, stop -- plus the transcript
+        case processing // the same capsule after the mic closed: 辨識中… / 整理中…
         case display    // one line of status
         case result     // one line of finished text, with a check
         case edit       // editable, Enter submits
@@ -86,6 +87,10 @@ final class DictationWindow: NSObject {
     private var titleLabel: NSTextField!
     private var statusPill: StatusPill!
     private var copyButton: TextButton!
+    /// 貼上: the words on screen, into whatever field has the caret. Without it
+    /// the only way out of this window was 複製, which cannot reach a field that
+    /// does not accept a paste from the clipboard's owner.
+    private var pasteButton: TextButton!
     private var escapeHint: NSTextField!
     private var bodyCard: NSView!
     private var scrollView: NSScrollView!
@@ -111,6 +116,9 @@ final class DictationWindow: NSObject {
     /// happens once the transcript has been clicked for a selection: a global
     /// monitor never sees events delivered to this app.
     private var localEscMonitor: Any?
+
+    /// Called when 貼上 is clicked: put the visible transcript at the caret.
+    var onInsert: (() -> Void)?
 
     /// Called when the stop button is clicked.
     var onStop: (() -> Void)?
@@ -255,13 +263,20 @@ final class DictationWindow: NSObject {
         // non-key window waking the window instead of pressing itself. The stop
         // button next to it has always worked on the first click, and 複製 is the
         // control the transcript mostly exists for.
+        pasteButton = TextButton(title: "貼上")
+        pasteButton.toolTip = "把這段文字貼到游標所在的輸入框"
+        pasteButton.isEnabled = false
+        pasteButton.onClick = { [weak self] in self?.onInsert?() }
+        card.addSubview(pasteButton)
+
         copyButton = TextButton(title: "複製")
         copyButton.toolTip = "把目前看到的逐字稿放進剪貼簿"
         copyButton.isEnabled = false
         copyButton.onClick = { [weak self] in self?.copyTranscript() }
         card.addSubview(copyButton)
 
-        escapeHint = NSTextField(labelWithString: "Esc 關閉")
+        escapeHint = NSTextField(labelWithString: "Esc")
+escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         escapeHint.font = .systemFont(ofSize: 11)
         escapeHint.textColor = Self.inkSoft
         card.addSubview(escapeHint)
@@ -434,6 +449,15 @@ final class DictationWindow: NSObject {
 
     /// Offscreen render of the confirm-before-insert card. The editable body is
     /// a different surface from the transcript, and it has to survive the merge.
+    /// Offscreen render of the post-mic step (辨識中 / 整理中), which is the shape
+    /// the user asked to keep visible.
+    func snapshotProcessing(to url: URL, status: String, segments: [TranscriptSegment]) {
+        begin(title: "聽寫", status: status, show: false)
+        append(segments, showSpeaker: false)
+        showStage(status)
+        render(to: url)
+    }
+
     func snapshotEdit(to url: URL, text: String) {
         applyMode(.edit)
         textField.stringValue = text
@@ -585,8 +609,9 @@ final class DictationWindow: NSObject {
     private func applyMode(_ mode: Mode) {
         self.mode = mode
         let recording = mode == .recording
+        let processing = mode == .processing
         let editing = mode == .edit
-        let showingGlyph = recording || mode == .result
+        let showingGlyph = recording || processing || mode == .result
         // Folded is a recording-only shape: a dot cannot carry a status line, so
         // a finished result always expands back to the capsule.
         let folded = collapsed && recording
@@ -596,7 +621,10 @@ final class DictationWindow: NSObject {
         resize(to: currentShape(folded: folded))
         // The left slot is the 朱紅 mic while recording, a check for a result.
         micView.isHidden = !showingGlyph
-        micView.image = NSImage(systemSymbolName: recording ? "mic.fill" : "checkmark", accessibilityDescription: nil)
+        micView.image = NSImage(systemSymbolName: (recording || processing) ? "mic.fill" : "checkmark",
+                                accessibilityDescription: nil)
+        // 朱紅 while the mic is open, ink once it has closed: the same glyph says
+        // "still listening" or "no longer listening" without a second label.
         micView.contentTintColor = recording ? Self.seal : Self.ink
         divider.isHidden = !recording
         waveView.isHidden = !recording
@@ -707,8 +735,9 @@ final class DictationWindow: NSObject {
         let m = Self.margin
         let hidden = !showsHeader
         titleLabel.isHidden = hidden
-        statusPill.isHidden = hidden || mode != .recording
+        statusPill.isHidden = hidden || !(mode == .recording || mode == .processing)
         copyButton.isHidden = hidden
+        pasteButton.isHidden = hidden
         escapeHint.isHidden = hidden
         bodyCard.isHidden = !showsBody
         scrollView.isHidden = !showsBody
@@ -727,15 +756,21 @@ final class DictationWindow: NSObject {
         // Wide enough for 已複製, which the button swaps to after a copy, so its
         // frame never changes under the user's cursor.
         let copySize = copyButton.intrinsicContentSize
-        let copyWidth = max(copySize.width, 64)
+        let copyWidth = max(copySize.width, 56)
         let copyHeight = max(copySize.height, 22)
         copyButton.frame = NSRect(x: escapeHint.frame.minX - 12 - copyWidth,
                                   y: headerMidY - copyHeight / 2,
                                   width: copyWidth, height: copyHeight)
+        // 貼上 sits to its left, same box: the two verbs a finished transcript
+        // offers, and neither one should move when the other changes width.
+        let pasteWidth = max(pasteButton.intrinsicContentSize.width, 56)
+        pasteButton.frame = NSRect(x: copyButton.frame.minX - 10 - pasteWidth,
+                                   y: headerMidY - copyHeight / 2,
+                                   width: pasteWidth, height: copyHeight)
         // The pill's own constraints size its label to whatever is left inside
         // it, so the frame has to be the comfortable width or the state clips.
         let pillWidth = max(statusPill.fittingSize.width + 2, 56)
-        let pillX = copyButton.frame.minX - 12 - pillWidth
+        let pillX = pasteButton.frame.minX - 12 - pillWidth
         statusPill.frame = NSRect(x: pillX, y: headerMidY - 11, width: pillWidth, height: 22)
 
         let titleHeight = titleLabel.intrinsicContentSize.height
@@ -783,6 +818,13 @@ final class DictationWindow: NSObject {
             statusLabel.isHidden = false
             statusLabel.sizeToFit()
             micView.isHidden = (mode == .display)
+        case .processing:
+            // The mic has closed but the pipeline has not finished; the capsule
+            // stays on screen and says which step it is on -- in the pill when the
+            // transcript is up, in its own line when it is not.
+            statusLabel.stringValue = showsHeader ? "" : text
+            statusLabel.isHidden = showsHeader
+            statusLabel.sizeToFit()
         case .edit:
             textField.stringValue = text
         }
@@ -933,12 +975,32 @@ final class DictationWindow: NSObject {
 
     private func placeAndShow() {
         let defaults = UserDefaults.standard
-        let saved = defaults.object(forKey: "hud.originX") != nil
         var topLeft: NSPoint?
-        if saved {
-            let p = NSPoint(x: defaults.double(forKey: "hud.originX"), y: defaults.double(forKey: "hud.topY"))
-            // Only reuse it if it still lands on a screen (monitors change).
-            if NSScreen.screens.contains(where: { $0.frame.insetBy(dx: -40, dy: -40).contains(p) }) { topLeft = p }
+        if defaults.object(forKey: "hud.originX") != nil {
+            // The corner was saved under two different names across versions. A
+            // build that reads only the new one gets y = 0 for an install that
+            // still holds the old key, which places the window just below the
+            // bottom edge of the screen -- invisible, with no error anywhere. The
+            // window "disappearing" was exactly this.
+            let y: Double
+            if defaults.object(forKey: "hud.topY") != nil {
+                y = defaults.double(forKey: "hud.topY")
+            } else if defaults.object(forKey: "hud.originY") != nil {
+                y = defaults.double(forKey: "hud.originY")
+            } else {
+                y = .nan
+            }
+            let p = NSPoint(x: defaults.double(forKey: "hud.originX"), y: y)
+            // A corner is only reusable if the whole window it implies is on a
+            // screen; monitors change, and a point test cannot see a window that
+            // hangs off the bottom.
+            if !y.isNaN {
+                let frame = NSRect(x: p.x, y: p.y - panel.frame.height,
+                                   width: panel.frame.width, height: panel.frame.height)
+                if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) {
+                    topLeft = p
+                }
+            }
         }
         if topLeft == nil, let screen = NSScreen.main {
             // Default: top centre, just under the menu bar -- next to where the
@@ -1017,12 +1079,53 @@ final class DictationWindow: NSObject {
     func setStatus(_ status: String) {
         sessionStatus = status
         statusPill.set(text: status, kind: Self.pillKind(for: status))
-        guard mode == .display || mode == .result else { return }
-        statusLabel.stringValue = status
-        statusLabel.isHidden = false
+        switch mode {
+        case .display, .result, .processing:
+            statusLabel.stringValue = status
+            statusLabel.isHidden = false
+            statusLabel.sizeToFit()
+        case .recording, .processing:
+            // Before the first words there is no header for the pill to sit in, so
+            // the capsule's own line carries the step. Once the transcript gives
+            // the pill a home the capsule line goes away: one sentence, one place.
+            statusLabel.stringValue = showsHeader ? "" : status
+            statusLabel.isHidden = showsHeader
+            statusLabel.sizeToFit()
+        case .edit:
+            break
+        }
+        layoutContents()
+    }
+
+    /// A pipeline step after the mic has closed (辨識中 / 整理中 / 貼上中). The
+    /// capsule stays visible so the user can always see what the app is doing;
+    /// only the controls go quiet, so nothing looks pressable that is not.
+    func showStage(_ text: String) {
+        show(text: text, mode: .processing)
+    }
+
+    /// The words the recogniser is holding right now, before they become a
+    /// segment. Before the first line arrives the capsule has an empty slot; this
+    /// puts the live text there instead of leaving the user guessing whether it
+    /// heard anything. Once the card exists the segments speak for themselves.
+    func setPartial(_ text: String) {
+        guard mode == .recording, !showsHeader else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            // Not "empty": the step the session is on is still worth saying.
+            statusLabel.stringValue = sessionStatus
+            statusLabel.isHidden = false
+        } else {
+            // The slot is narrow; the tail is what is being said right now.
+            statusLabel.stringValue = String(trimmed.suffix(16))
+            statusLabel.isHidden = false
+        }
         statusLabel.sizeToFit()
         layoutContents()
     }
+
+    /// The words on screen, for 貼上.
+    var transcriptText: String { textView.string }
 
     /// Colour carries the state: green while it is working, quiet once it is
     /// done, red when the run failed. The caller only passes text.
@@ -1095,7 +1198,9 @@ final class DictationWindow: NSObject {
     /// The transcript is text the user may want elsewhere immediately; the button
     /// only makes sense once there is something to copy.
     private func refreshCopyAvailability() {
-        copyButton.isEnabled = !textView.string.isEmpty
+        let hasText = !textView.string.isEmpty
+        copyButton.isEnabled = hasText
+        pasteButton.isEnabled = hasText
     }
 
     /// Empties the card. The window keeps its size until the next measurement,

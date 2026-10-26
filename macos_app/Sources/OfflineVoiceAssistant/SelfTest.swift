@@ -228,7 +228,14 @@ enum SelfTest {
                 to: dir.appendingPathComponent("\(theme.id)-dictation-result.png"),
                 text: "下週三上線，其他頁面之後再排。"
             )
-            for shape in ["dictation-recording", "dictation-edit", "dictation-result"] {
+            // The step between the mic and the paste: the capsule has to stay,
+            // and say what it is doing.
+            window.snapshotProcessing(
+                to: dir.appendingPathComponent("\(theme.id)-dictation-processing.png"),
+                status: "整理中…",
+                segments: Array(dictationSegments.prefix(2))
+            )
+            for shape in ["dictation-recording", "dictation-edit", "dictation-result", "dictation-processing"] {
                 let url = dir.appendingPathComponent("\(theme.id)-\(shape).png")
                 if let data = try? Data(contentsOf: url), data.count > 3_000 {
                     print("ok \(theme.id) \(shape) \(data.count)B")
