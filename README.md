@@ -2,6 +2,8 @@
 
 Fully offline voice input for macOS: press **Option+Space**, speak, the transcript is pasted into the focused field.
 
+**`docs/PROJECT.md`** is the full picture — architecture, the C ABI, the design decisions and their measurements, and what is not done yet. The table below is the short version.
+
 ## Status
 
 | Area | Status |
@@ -34,6 +36,7 @@ Requires macOS 13+, Xcode 26, Rust, and the sherpa-onnx macOS arm64 shared libra
 scripts/download_models.sh   # optional for developers; the app downloads on first launch
 scripts/verify_models.sh
 scripts/build_macos.sh       # cargo test + swift build + .app + ad-hoc codesign
+scripts/verify.sh            # every check that needs no human judgement
 scripts/package_dmg.sh       # dist/OfflineVoiceAssistant.dmg
 ```
 
