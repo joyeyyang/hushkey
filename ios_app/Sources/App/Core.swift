@@ -1,0 +1,133 @@
+import AVFoundation
+import Foundation
+
+/// One decoded utterance from the core.
+struct Segment {
+    let text: String
+    let speaker: Int
+}
+
+enum CoreError: LocalizedError {
+    case failed(Int32, String)
+    var errorDescription: String? {
+        switch self {
+        case .failed(let code, let message):
+            return message.isEmpty ? "核心錯誤 \(code)" : message
+        }
+    }
+}
+
+/// The C ABI, reduced to what dictation needs.
+///
+/// `LLM_*` is deliberately absent: on macOS the model runs in a separate worker
+/// process, and iOS cannot fork one. The recogniser is the part that fits here;
+/// the cleanup pass needs an in-process path in the core first.
+enum Core {
+    private static var initialized = false
+
+    static func lastError() -> String {
+        guard let p = Core_GetLastError() else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
+
+    private static func check(_ rc: Int32) throws {
+        if rc != 0 { throw CoreError.failed(rc, lastError()) }
+    }
+
+    static func initialize(models: URL) throws {
+        guard !initialized else { return }
+        try check(Core_Initialize(models.path))
+        initialized = true
+    }
+
+    static func start() throws { try check(ASR_Start()) }
+
+    static func submit(_ samples: [Float]) {
+        _ = samples.withUnsafeBufferPointer {
+            ASR_SubmitAudio($0.baseAddress, $0.count, 16_000)
+        }
+    }
+
+    static func segments() -> [Segment] {
+        var out: UnsafeMutablePointer<CChar>?
+        guard ASR_TakeSegments(&out) == 0, let p = out else { return [] }
+        defer { Core_FreeString(p) }
+        let json = String(cString: p)
+        guard json != "[]", let data = json.data(using: .utf8) else { return [] }
+        struct Payload: Decodable { let text: String; let speaker: Int }
+        let payload = (try? JSONDecoder().decode([Payload].self, from: data)) ?? []
+        return payload.map { Segment(text: $0.text, speaker: $0.speaker) }
+    }
+
+    /// The words in the utterance that is still open. Cheap enough to poll.
+    static func peek() -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        guard ASR_Peek(&out) == 0, let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
+
+    static func stop() throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(ASR_Stop(&out))
+        guard let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
+}
+
+/// Microphone in, 16 kHz mono float32 out.
+final class MicCapture {
+    private let engine = AVAudioEngine()
+    private var converter: AVAudioConverter?
+    private let target = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false
+    )!
+
+    var onSamples: (([Float]) -> Void)?
+
+    func start() throws {
+        let session = AVAudioSession.sharedInstance()
+        try session.setCategory(.playAndRecord, mode: .measurement,
+                                options: [.duckOthers, .defaultToSpeaker])
+        try session.setActive(true, options: .notifyOthersOnDeactivation)
+
+        let input = engine.inputNode
+        let format = input.inputFormat(forBus: 0)
+        guard format.sampleRate > 0 else {
+            throw CoreError.failed(-1, "沒有可用的麥克風")
+        }
+        converter = AVAudioConverter(from: format, to: target)
+
+        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            guard let self, let converter = self.converter else { return }
+            let ratio = self.target.sampleRate / format.sampleRate
+            let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
+            guard let out = AVAudioPCMBuffer(pcmFormat: self.target, frameCapacity: capacity),
+                  let channel = out.floatChannelData else { return }
+            var error: NSError?
+            var supplied = false
+            let status = converter.convert(to: out, error: &error) { _, state in
+                if supplied {
+                    state.pointee = .noDataNow
+                    return nil
+                }
+                supplied = true
+                state.pointee = .haveData
+                return buffer
+            }
+            guard status != .error, error == nil else { return }
+            self.onSamples?(Array(UnsafeBufferPointer(start: channel[0], count: Int(out.frameLength))))
+        }
+
+        engine.prepare()
+        try engine.start()
+    }
+
+    func stop() {
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+}

@@ -1,0 +1,62 @@
+name: OfflineVoiceAssistant
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: "7S48J3H2N2"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+
+targets:
+  OfflineVoiceAssistant:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/App
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.offlinevoiceassistant.ios
+        PRODUCT_NAME: OfflineVoiceAssistant
+        INFOPLIST_FILE: Sources/App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/App/App.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/App/Bridging.h
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/../core_engine/include"]
+        OTHER_LDFLAGS:
+          - "-loffline_voice_core"
+          - "-lsherpa-onnx"
+          - "-lonnxruntime"
+          - "-lc++"
+          - "-framework"
+          - "Accelerate"
+          - "-framework"
+          - "CoreML"
+        LIBRARY_SEARCH_PATHS[sdk=iphoneos*]:
+          - "$(SRCROOT)/vendor/device"
+          - "$(SRCROOT)/../core_engine/vendor/ios/device/lib"
+        LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]:
+          - "$(SRCROOT)/vendor/sim"
+          - "$(SRCROOT)/../core_engine/vendor/ios/sim/lib"
+    dependencies:
+      - target: DictationKeyboard
+
+  DictationKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Sources/Keyboard
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.offlinevoiceassistant.ios.keyboard
+        INFOPLIST_FILE: Sources/Keyboard/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Sources/Keyboard/Keyboard.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      - sdk: UIKit.framework
