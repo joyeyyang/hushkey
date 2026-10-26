@@ -95,6 +95,25 @@ if [ $SUMMARY_STATUS -eq 0 ]; then
     fi
 fi
 
+# The edit probe measures the PRODUCT path -- the same call the app makes --
+# against the eleven spoken edits and their expected answers. Checking the raw
+# model instead would measure something the user never sees: the model's
+# answer is a numbered list, and the product's job is to find the named line
+# and put the draft's own shape back.
+step "voice edit probe (11 cases)"
+OVC_LLM_WORKER="$ROOT/core_engine/target/release/ovc-llm-worker" \
+    ./core_engine/target/release/examples/edit_batch tests/edit_expected.tsv \
+    >/tmp/ovc-verify-edit-batch.log 2>&1
+EDIT_BATCH_STATUS=$?
+record "voice edit probe" $EDIT_BATCH_STATUS
+if grep -qE "^=== 11/11 right$" /tmp/ovc-verify-edit-batch.log; then
+    printf 'PASS  voice edit probe landed on the right line in every case\n'
+else
+    printf 'FAIL  voice edit probe did not land on the right line in every case\n'
+    grep -E "verdict: WRONG|wanted:|^=== " /tmp/ovc-verify-edit-batch.log | head -8
+    FAILED+=("voice edit probe")
+fi
+
 step "offscreen ui self-test"
 rm -rf /tmp/ovc-verify-ui && mkdir -p /tmp/ovc-verify-ui
 for theme in paper night; do

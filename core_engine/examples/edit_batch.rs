@@ -6,8 +6,12 @@
 //! the two, the draft may contain spaces and commas. Each line prints the
 //! instruction, the draft, the raw answer, and whether the answer differs from
 //! the draft.
-
-use std::path::Path;
+//!
+//! The cases go through `state::edit_text` -- the path the app, the kit and
+//! the command line all use -- not straight to the model. The model's raw
+//! answer is a NUMBERED list; the product's job is to find the line the
+//! instruction names, change that line, and hand back the draft's own shape.
+//! Measuring the raw model measures something the user never sees.
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: edit_batch <cases-file>");
@@ -25,48 +29,70 @@ fn main() {
         std::process::exit(1);
     }
 
-    let cases: Vec<(String, String)> = body
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| {
-            let (instruction, draft) = l.split_once('\t')?;
-            Some((instruction.trim().to_string(), draft.trim().to_string()))
-        })
-        .collect();
+    // A case is `<instruction>\t<draft>` and, when the answer is known,
+    // `<instruction>\t<draft>\t<expected>`. The columns are split off the
+    // TABS, not on a whitespace boundary: the draft is Chinese prose and may
+    // contain spaces, and the expected answer may too.
+    let mut cases: Vec<(String, String, Option<String>)> = Vec::new();
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\t');
+        let Some(instruction) = parts.next() else { continue };
+        let Some(draft) = parts.next() else { continue };
+        cases.push((
+            instruction.trim().to_string(),
+            draft.trim().to_string(),
+            parts.next().map(|e| e.trim().to_string()),
+        ));
+    }
     if cases.is_empty() {
         eprintln!("no cases");
         std::process::exit(1);
     }
 
+    // The core has to know where the models are before it can hand the worker
+    // a path to one. This is the same call the app and the kit make at start.
+    // `dir` is already the models root; the model lives under its `llm/`.
+    if let Err(e) = offline_voice_core::state::set_models_dir(dir.clone()) {
+        eprintln!("could not set the models dir: {e:?}");
+        std::process::exit(1);
+    }
+
+    // The expected answer for each case, when the cases file names one. The
+    // file holds `<instruction>\t<draft>\t<expected>`; a two-column file has
+    // no expectation and only reports what came out.
     let mut changed = 0;
-    for (instruction, draft) in &cases {
-        let prompt = offline_voice_core::llm::edit_prompt(instruction, draft);
-        match offline_voice_core::llm::generate(&model, &prompt) {
+    let mut right = 0;
+    let mut checked = 0;
+    for (instruction, draft, expected) in &cases {
+        // The product path: the same call the app makes, through the worker.
+        match offline_voice_core::state::edit_text(draft, instruction) {
             Ok(answer) => {
-                // The answer comes back numbered; the draft does not. Strip the
-                // numbers and rejoin the way the draft was written before
-                // comparing, or every case would look "changed".
-                let stripped: Vec<&str> = answer
-                    .lines()
-                    .filter_map(|line| {
-                        let t = line.trim();
-                        let rest = t.split_once(". ").map(|(_, r)| r).unwrap_or(t);
-                        if rest.is_empty() {
-                            None
-                        } else {
-                            Some(rest)
-                        }
-                    })
-                    .collect();
-                let rejoined = stripped.join("");
-                let differs = rejoined.trim() != draft.trim();
+                // The answer is already the draft's own shape -- the product
+                // put the changed line back where it was and left the others
+                // alone. So a plain comparison is the right one here.
+                let differs = answer.trim() != draft.trim();
                 if differs {
                     changed += 1;
+                }
+                let mut verdict = if differs { "changed" } else { "UNCHANGED" };
+                if let Some(expected) = expected {
+                    checked += 1;
+                    if answer.trim() == expected {
+                        right += 1;
+                        verdict = "RIGHT";
+                    } else {
+                        verdict = "WRONG";
+                        println!("  wanted: {expected}");
+                    }
                 }
                 println!("--- {instruction}");
                 println!("  draft:  {draft}");
                 println!("  answer: {}", answer.trim().replace('\n', " | "));
                 println!("  changed: {}", if differs { "YES" } else { "no" });
+                println!("  verdict: {verdict}");
             }
             Err(e) => {
                 println!("--- {instruction}");
@@ -75,4 +101,7 @@ fn main() {
         }
     }
     println!("=== {}/{} changed", changed, cases.len());
+    if checked > 0 {
+        println!("=== {}/{} right", right, checked);
+    }
 }

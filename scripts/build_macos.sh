@@ -16,6 +16,10 @@ need cargo; need swift; need codesign; need install_name_tool
 echo "== core engine (release)"
 (cd "$ROOT/core_engine" && SHERPA_ONNX_DIR="$SHERPA_DIR" cargo build --release)
 
+# The edit probe is a verification tool, but it has to be built here or
+# scripts/verify.sh would run a stale one.
+(cd "$ROOT/core_engine" && SHERPA_ONNX_DIR="$SHERPA_DIR" cargo build --release --example edit_batch)
+
 echo "== core tests"
 (cd "$ROOT/core_engine" && SHERPA_ONNX_DIR="$SHERPA_DIR" DYLD_LIBRARY_PATH="$SHERPA_DIR/lib" cargo test --release)
 

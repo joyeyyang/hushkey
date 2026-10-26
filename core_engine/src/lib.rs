@@ -10,7 +10,7 @@ mod error;
 pub mod llm;
 mod memory;
 pub mod segmentation;
-mod state;
+pub mod state;
 mod vad;
 
 use std::ffi::{c_char, c_int, CStr, CString};
