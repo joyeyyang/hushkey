@@ -183,6 +183,26 @@ enum TextInjector {
     }
 
     private static func postCommandV() -> Bool {
+        // Two ways to paste, and the order matters.
+        //
+        // The responder chain first: it asks the focused control to paste
+        // directly. That is exact -- it cannot land in the wrong app -- and it
+        // is the only thing that works when the target is THIS app, because a
+        // CGEvent posted to the HID tap is delivered to the frontmost
+        // application and an application does not receive its own synthetic
+        // key events.
+        //
+        // The CGEvent second: it is how a paste reaches ANOTHER app, which is
+        // the normal case (the user is typing in some editor and the app
+        // pastes into it). The responder chain cannot do that -- it only
+        // reaches this app's own windows.
+        //
+        // So: the responder chain first (it is harmless when the target is
+        // another app, because this app has no focused control then), and the
+        // CGEvent as the fallback.
+        if NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) {
+            return true
+        }
         let vKey: CGKeyCode = 9 // kVK_ANSI_V
         guard let down = CGEvent(keyboardEventSource: nil, virtualKey: vKey, keyDown: true),
               let up = CGEvent(keyboardEventSource: nil, virtualKey: vKey, keyDown: false) else {

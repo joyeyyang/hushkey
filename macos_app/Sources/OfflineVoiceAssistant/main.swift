@@ -1519,7 +1519,14 @@ final class AppController {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+// The Accessibility check needs a window that can TAKE THE FOCUS, and an
+// accessory app cannot become the frontmost app -- so the posted Cmd+V would
+// go to whatever else is in front and the field under test would never
+// change. The policy is set here, before anything runs, rather than inside
+// the check: by the time the check runs, the app has already been launched as
+// an accessory and asking later is too late.
+let isAXSelfTest = ProcessInfo.processInfo.environment["OVC_SELFTEST_AX"] != nil
+app.setActivationPolicy(isAXSelfTest ? .regular : .accessory)
 
 // A scripted check for the export path: four formats, one synthetic transcript,
 // written to a temporary folder and read back. GUI-free on purpose, so it can run
@@ -1539,6 +1546,13 @@ if ProcessInfo.processInfo.environment["OVC_SELFTEST_EXPORT"] != nil {
 // maths a picture cannot show.
 if ProcessInfo.processInfo.environment["OVC_SELFTEST_THEMES"] != nil {
     SelfTest.runThemeSelfTest()
+}
+
+// The Accessibility half of the spoken edit, against a real text field in a
+// real window. This one needs a window server and Accessibility permission,
+// which is why it runs in the app rather than in the test target.
+if ProcessInfo.processInfo.environment["OVC_SELFTEST_AX"] != nil {
+    DispatchQueue.main.async { AXSelfTest.run() }
 }
 
 let controller = AppController()

@@ -87,6 +87,17 @@ else
     printf '\n(skipping the audio checks: no WAV at %s)\n' "$WAV"
 fi
 
+# The Accessibility check runs against the INSTALLED app, because the
+# Accessibility permission belongs to a bundle id with a signature and the
+# installed app is the one that has it. It also needs a window server.
+step "accessibility replacement (against a real text field)"
+if [ -x /Applications/OfflineVoiceAssistant.app/Contents/MacOS/OfflineVoiceAssistant ]; then
+    ./scripts/ax_check.sh >/tmp/ovc-verify-ax.log 2>&1
+    record "accessibility replacement" $?
+else
+    printf 'SKIP  accessibility replacement (the app is not installed)\n'
+fi
+
 printf '\n'
 if [ ${#FAILED[@]} -eq 0 ]; then
     printf 'ALL CHECKS PASSED\n'
