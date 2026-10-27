@@ -114,24 +114,23 @@ enum LLMPolicy {
         return record(to: candidate.name, reason: reason)
     }
 
-    /// Records a downgrade to the largest installed model smaller than the
-    /// preferred one. Returns false when there is nothing to downgrade to.
+    /// Records a downgrade to the largest installed model smaller than the one
+    /// that just failed. Returns false when there is nothing to downgrade to.
     @discardableResult
     static func recordDowngrade(reason: String) -> Bool {
-        guard let preferred = preferredInstalled, preferred.name == preferredName else { return false }
-        guard let smaller = installed.first(where: { $0.bytes < preferred.bytes }) else {
-            Diagnostics.log.error(
-                "llm model: \(preferred.name, privacy: .public) could not keep up, but no smaller model is installed — staying on it"
-            )
+        // Step down from the file that is actually in force, not from the
+        // preferred one. With three models installed (2B / 1.5B / 0.5B), always
+        // comparing against the 2B means the second failure picks the 1.5B again
+        // -- the same file that just overran -- and the log then claims nothing
+        // smaller is installed while the 0.5B sits right there.
+        let floor = activeName ?? preferredName
+        guard let current = installed.first(where: { $0.name == floor }) ?? preferredInstalled else {
+            Diagnostics.log.error("llm model: no installed model to step down from")
             return false
         }
-        // Already on the smallest one: the pass overran anyway, and there is
-        // nothing to move to. Recording it again would put "downgrade recorded"
-        // in the log on every launch, which reads as progress when it is the
-        // opposite -- the fallback does not fit either.
-        if recorded?.to == smaller.name {
+        guard let smaller = installed.first(where: { $0.name != current.name && $0.bytes < current.bytes }) else {
             Diagnostics.log.error(
-                "llm model: \(smaller.name, privacy: .public) also overran; nothing smaller is installed"
+                "llm model: \(current.name, privacy: .public) could not keep up, but no smaller model is installed — staying on it"
             )
             return false
         }

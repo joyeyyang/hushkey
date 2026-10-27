@@ -24,6 +24,10 @@ enum CoreError: LocalizedError {
 /// the cleanup pass needs an in-process path in the core first.
 enum Core {
     private static var initialized = false
+    /// One report per launch for each silent failure path: the poll runs four
+    /// times a second, so logging every rejected buffer would bury the log.
+    private static var didReportSubmitFailure = false
+    private static var didReportSegmentFailure = false
 
     static func lastError() -> String {
         guard let p = Core_GetLastError() else { return "" }
@@ -62,14 +66,34 @@ enum Core {
     static func start() throws { try check(ASR_Start()) }
 
     static func submit(_ samples: [Float]) {
-        _ = samples.withUnsafeBufferPointer {
+        let rc = samples.withUnsafeBufferPointer {
             ASR_SubmitAudio($0.baseAddress, $0.count, 16_000)
+        }
+        // Once, not per buffer: a rejected buffer means the recogniser is not in a
+        // state to accept audio, and the sentence will come back empty. Saying so
+        // here is what separates "the microphone was quiet" from "the engine
+        // refused the audio" -- otherwise both arrive as 沒有聽到聲音.
+        if rc != 0, !didReportSubmitFailure {
+            didReportSubmitFailure = true
+            Diagnostics.log.error(
+                "asr rejected audio: \(lastError(), privacy: .public)"
+            )
         }
     }
 
     static func segments() -> [Segment] {
         var out: UnsafeMutablePointer<CChar>?
-        guard ASR_TakeSegments(&out) == 0, let p = out else { return [] }
+        let rc = ASR_TakeSegments(&out)
+        if rc != 0 {
+            if !didReportSegmentFailure {
+                didReportSegmentFailure = true
+                Diagnostics.log.error(
+                    "asr segment fetch failed: \(lastError(), privacy: .public)"
+                )
+            }
+            return []
+        }
+        guard let p = out else { return [] }
         defer { Core_FreeString(p) }
         let json = String(cString: p)
         guard json != "[]", let data = json.data(using: .utf8) else { return [] }

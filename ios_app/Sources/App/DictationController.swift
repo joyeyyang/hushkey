@@ -69,6 +69,12 @@ final class DictationController: ObservableObject {
     /// The recogniser is loaded once per launch. `onAppear` can run twice, and a
     /// second `Core_Initialize` would reload a 100 MB model for nothing.
     private var prewarmed = false
+    /// True while `recoverOrphan` is running the previous launch's sentence.
+    private var recovering = false
+    /// A microphone tap that arrived during recovery. Last launch's sentence is
+    /// the only copy the user has of what they said, so the tap waits for it
+    /// rather than either dropping the sentence or ignoring the tap.
+    private var startAfterRecovery = false
 
     @discardableResult
     private func nextGeneration() -> Int {
@@ -98,14 +104,33 @@ final class DictationController: ObservableObject {
         }
     }
 
+    /// Mode 2 keeps the audio session up. Deactivating it closes the PiP window
+    /// the app is living inside, and Mode 2 then stops working without a word:
+    /// the setting still says "no app switch" while every microphone tap opens
+    /// the app. A failed dictation is not a reason to end the session -- the
+    /// window is a separate concern from the microphone.
+    private var keepsAudioSession: Bool {
+        SharedStore.mode == .pip || PiPController.shared.isLive
+    }
+
     /// Begins a dictation from the microphone. Safe to call when one is already
     /// running: the keyboard reopens the app on every microphone tap.
     func start() {
-        guard !isBusy else { return }
+        guard !isBusy else {
+            // A recovery of last launch's sentence is holding the pipeline. The
+            // tap outranks it, but dropping the recovery would throw away the
+            // only copy of something the user already said once, so it runs as
+            // soon as the queue frees (see `resumeIfQueued`).
+            if recovering { startAfterRecovery = true }
+            return
+        }
         let g = nextGeneration()
         reset()
         phase = .recording
         SharedStore.setPhase(.recording, detail: "錄音中…")
+        // The last dictation's live words are still on the shared key, and the
+        // keyboard draws them the moment the phase says "recording".
+        SharedStore.setPartial("")
 
         AVAudioApplication.requestRecordPermission { granted in
             DispatchQueue.main.async {
@@ -149,7 +174,7 @@ final class DictationController: ObservableObject {
             }
 
             do {
-                try mic.start(keepAlive: SharedStore.mode == .pip)
+                try mic.start(keepAlive: keepsAudioSession)
             } catch {
                 // The spool file exists as soon as it is created. Dropping the
                 // reference would leave it for `recoverOrphan` to find on every
@@ -177,7 +202,7 @@ final class DictationController: ObservableObject {
         pollTimer = nil
 
         mic?.onSamples = nil
-        mic?.stop(keepAlive: SharedStore.mode == .pip)
+        mic?.stop(keepAlive: keepsAudioSession)
         mic = nil
         gate = nil
 
@@ -303,6 +328,18 @@ final class DictationController: ObservableObject {
         SharedStore.publish(text, detail: detail)
         Diagnostics.log.notice("dictation done: \(text.count, privacy: .public) chars")
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+        finishRecovery()
+    }
+
+    /// Ends a `recoverOrphan` run, and starts the dictation a microphone tap
+    /// asked for while it was running.
+    private func finishRecovery() {
+        recovering = false
+        guard startAfterRecovery else { return }
+        startAfterRecovery = false
+        // Last launch's sentence is on its way to the keyboard, so the
+        // microphone is free for the sentence the user is saying now.
+        start()
     }
 
     func clear() {
@@ -314,6 +351,8 @@ final class DictationController: ObservableObject {
         nextGeneration()
         reset()
         phase = .idle
+        recovering = false
+        startAfterRecovery = false
         SharedStore.clear()
     }
 
@@ -325,7 +364,20 @@ final class DictationController: ObservableObject {
         refineTimer?.invalidate()
         refineTimer = nil
         skipRefine = false
-        orphanSource = nil
+        // The audio belongs to the dictation being replaced. Leaving it behind is
+        // how a sentence the user explicitly cleared comes back on the next launch:
+        // `recoverOrphan` cannot tell "the app was killed" from "the user said
+        // never mind", so it decodes the file and types it.
+        spool?.discard()
+        spool = nil
+        if let orphanSource {
+            try? FileManager.default.removeItem(at: orphanSource)
+            self.orphanSource = nil
+        }
+        // A background task that is never ended makes iOS kill the process when
+        // its time expires, and leaves `background` non-invalid so the *next*
+        // dictation gets no protection at all.
+        endBackground()
     }
 
     private func fail(_ message: String, g: Int? = nil) {
@@ -333,7 +385,7 @@ final class DictationController: ObservableObject {
         pollTimer?.invalidate()
         pollTimer = nil
         mic?.onSamples = nil
-        mic?.stop()
+        mic?.stop(keepAlive: keepsAudioSession)
         mic = nil
         gate = nil
         spool?.discard()
@@ -358,6 +410,7 @@ final class DictationController: ObservableObject {
         // a second `start` while a session is open, so without this the next
         // dictation fails the same way and only a relaunch clears it.
         work.async { _ = try? Core.stop() }
+        finishRecovery()
     }
 
     // MARK: live words
@@ -391,13 +444,18 @@ final class DictationController: ObservableObject {
             // nothing. In particular a sentence still waiting on the cleanup pass
             // goes out exactly as it was heard.
             DispatchQueue.main.async {
-                guard let self, g == self.generation else { return }
+                guard let self else { return }
+                // Hand the task back before anything else. An expired task that is
+                // never ended is what iOS kills the app for, and leaving it open
+                // would also block the next dictation from getting any background
+                // time at all -- which is the one thing that path needs.
+                self.endBackground()
+                guard g == self.generation else { return }
                 if let raw = self.pendingRaw {
                     self.publish(raw, detail: "已辨識 · 未整理", g: g)
                 } else if !self.transcript.isEmpty {
                     self.publish(self.transcript, detail: "已辨識", g: g)
                 }
-                self.endBackground()
             }
         }
     }
@@ -500,10 +558,20 @@ final class DictationController: ObservableObject {
         AudioSpool.prune()
         let orphans = AudioSpool.orphans()
         guard let newest = orphans.last else { return }
-        for stale in orphans.dropLast() {
-            try? FileManager.default.removeItem(at: stale)
+        // The older spools are deliberately left where they are. They used to be
+        // deleted here, but the recovery writes another spool into this same
+        // directory -- so being killed a second time made the half-fed copy the
+        // newest, and the next launch would have deleted the complete original
+        // along with it. A spool is 3.8 MB at most, `prune` bounds how many
+        // survive, and the next launch recovers the next one.
+        if orphans.count > 1 {
+            Diagnostics.log.notice(
+                "recovering spool \(newest.lastPathComponent, privacy: .public); \(orphans.count - 1) older one(s) kept for the next launch"
+            )
+        } else {
+            Diagnostics.log.notice("recovering spool \(newest.lastPathComponent, privacy: .public)")
         }
-        Diagnostics.log.notice("recovering spool \(newest.lastPathComponent, privacy: .public)")
+        recovering = true
         // Straight to the keyboard, no cleanup pass. Whatever killed the app last
         // time happened with a sentence already decoded, so this path spends its
         // one shot on delivering rather than on polishing.
@@ -593,14 +661,20 @@ final class DictationController: ObservableObject {
 
     // MARK: pieces
 
-    /// `ASR_Stop` returns the whole session, while `transcript` already holds the
-    /// utterances closed before it. They usually overlap; keep the longer one.
-    private static func merge(_ accumulated: String, _ final: String) -> String {
-        if final.isEmpty { return accumulated }
-        if accumulated.isEmpty { return final }
-        if final.hasPrefix(accumulated) { return final }
-        if accumulated.hasPrefix(final) { return accumulated }
-        return accumulated + final
+    /// `ASR_Stop` returns the whole session; `accumulated` is that same session
+    /// as this side built it, one closed utterance at a time.
+    ///
+    /// They are the same words, but not the same string: the core joins
+    /// utterances with `join_speech`, which inserts a space at a boundary that
+    /// is not Chinese-to-Chinese, while this side simply concatenates. So
+    /// "中文Notion" and "中文 Notion" are the same sentence spelled differently,
+    /// and neither is a prefix of the other -- the old code then did
+    /// `accumulated + final` and every dictation containing an English word was
+    /// typed twice ("開會用 Notion 記錄開會用 Notion 記錄"). `final` covers every
+    /// utterance, so it is the one to keep; `accumulated` only matters when the
+    /// core returned nothing.
+    static func merge(_ accumulated: String, _ final: String) -> String {
+        final.isEmpty ? accumulated : final
     }
 }
 

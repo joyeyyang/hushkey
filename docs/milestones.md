@@ -17,6 +17,10 @@
 | M5 真機安裝與模型 | `[~]` | 需要插線＋付費帳號開 App Group |
 | M6 真機實測 | `[ ]` | 全部，只有真機能量 |
 
+2026-10-27 已跑完 plan／review／debug 三輪複查；review 的 12 項見附錄 A，
+debug 的 7 項見附錄 B。文件裡的「佐證」只寫真的跑過的，量不到的一律標成
+「待真機」或「程式碼層」，不寫「應該可以」。
+
 
 ---
 
@@ -85,7 +89,38 @@ iOS 不行。這一步是讓同一份 C ABI 在 iOS 上也能用。
 - [x] 注入音檔後，文字真的出現在**游標位置**（`textDocumentProxy.insertText`）
 
 **佐證**：commit `1eb241e`；注入 `say -v Meijia` 合成音 → 鍵盤落在 TextEditor
-游標處 27 字。真麥克風路徑（`-OVC_RECORD`）也驗過靜音自動停止 + publish。
+游標處 27 字。真麥克風路徑（`-OVC_RECORD`）在**上一輪**驗過靜音自動停止 + publish，
+本輪沒有重跑（見下方五步表第 1 列的邊界）。
+
+**序號是單調的（第二輪複查修掉，2026-10-27 21:49–21:59）**：`publish` 的序號原本由
+已發布的那一筆 +1 推算，而 `clear()` 會刪掉那一筆，於是清除後序號從 1 重數；
+鍵盤已經插過第 3 句、`consumedSeq = 3`，接下來的新句子在序號爬回 3 之前全部被當成
+「插過了」，**連續數句不落字、畫面上沒有任何解釋**。序號改成獨立計數器 `s.seq`，
+`clear()` 不碰它（也不碰 `consumedSeq`），而下一號取 `max(s.seq, published.seq) + 1`
+——後者涵蓋升級：舊安裝沒有 `s.seq`，`consumedSeq` 卻可能已經是 6。實測：
+
+```
+（清除後）s.seq = 5 | consumedSeq = 3 | published.seq = 無
+（新的一句）s.seq = 6 | published.seq = 6          ← 沒有回退
+（鍵盤插字）consumedSeq = 6                        ← 只插一次，截圖 d3-insert-after-clear.png
+（升級模擬：刪掉 s.seq、published.seq = 6、consumedSeq = 6）
+（新的一句）s.seq = 7 | published.seq = 7
+（鍵盤插字）consumedSeq = 7                        ← 截圖 d4-upgrade-insert.png
+```
+
+**整句重複的規則也直接驗了**：`-OVC_MERGE_PROBE` 把「核心的 `join_speech` 會補空白、
+這一側直接串接」這個組合餵給 `merge()`：
+
+```
+merge: 開會用 Notion 記錄        ← 舊版會變成「開會用Notion記錄開會用 Notion 記錄」
+merge: 今天下午三點要開會        ← 中文對中文，兩邊字串相同
+merge: 只有核心的話              ← 這一側是空的
+merge: 只有這一邊                ← 核心回空字串
+```
+
+這條規則只能用探針驗，不能用音檔驗：模擬器上的 Dolphin 會把英文與數字正規化成
+中文（連 `-OVC_ASR_LANGUAGE=en` 都沒輸出），所以「中文＋英文專有名詞」這個觸發條件
+在音檔路徑上重現不出來。
 
 **佐證的邊界（要說清楚）**：這裡的 TextEditor 是**本 App 自己的** `-OVC_KB_PROBE`
 測試畫面，也就是「這個鍵盤擴充在同一台裝置上把字插進一個文字欄位」。
@@ -146,10 +181,19 @@ dictation done: 23 chars                        ← 22 秒（含解碼），這�
 三件事同時被證明：預設是 2B、跑不動會**自動**降級、降級**有紀錄**且**跨啟動有效**。
 降級在 UI 上也看得見（模型頁顯示「AI 整理已降級」與原因，並有「重新嘗試大模型」）。
 
+**但第一行只能讀到「請求的是 2B」**：`llm=wanted … · installed …` 是
+`LLMPolicy.apply()` 在把選擇講出來，它證明偏好與檔案都在，**不證明 2B 真的載入並作答**
+（那次整理逾時，`Core.lastModelName()` 的回報路徑根本沒走到）。真正的「誰作答」證據是
+`LLM_LastModelName`，而它只有整理**成功**時才會被讀，所以模擬器這一輪拿不到。
+「2B 在這台機器上跑起來了」這件事要等真機（M6）。
+
 **量到的另一件事**：0.5B 在**這台**機器上不穩定——同一個測試音跑兩次，
 一次 22 秒完成整理、一次超過 25 秒。所以「降級之後就一定過」是錯的；
 如果再逾時，log 會改說 `qwen2.5-0.5b… also overran; nothing smaller is installed`，
-不會再記一筆看起來像進展的降級。
+不會再記一筆看起來像進展的降級。第二輪複查補了一個相關漏洞：降級的起點原本固定是
+「偏好的那個模型」，所以裝了 2B／1.5B／0.5B 三顆時，第二次失敗會再選一次 1.5B
+（就是剛剛超時的那顆），log 還會說「沒有更小的模型」而 0.5B 明明就在旁邊。
+現在起點是**實際生效的**模型（`activeName ?? preferredName`），可以一路 2B → 1.5B → 0.5B。
 
 **這份佐證的但書（不能拿它推論真機）**：上面的 2B 逾時是模擬器上的結果，
 而模擬器 slice 的 LLM 是**強制 CPU、`gpu_layers=0`**（`target_abi="sim"`，
@@ -174,6 +218,29 @@ dictation done: 27 chars
 `r2-insert.png`）。順帶看到原始輸出長什麼樣：「今天下午下午三點…」——ASR 的重複詞
 只有整理階段會修掉，而這條路刻意跳過整理。
 
+**補辨識的三條邊界（第二輪複查後改的，都是實測）**：
+
+1. **等 1.5 秒才開始。** 從鍵盤按麥克風的冷啟動是「先開 App、再走 `onOpenURL` 開始錄音」，
+   補辨識若搶在前面，會先占住麥克風二十幾秒，使用者對著一個「其實還沒開始」的錄音講話。
+   現在啟動後 1.5 秒、且只在仍為 `.idle` 時才補。（上表那次 log 沒有這個延遲，因為它
+   是 `-OVC_CLEAR` 測試啟動，`onOpenURL` 不會來，延遲只影響麥克風路徑。）
+2. **不再刪掉其他比較舊的 spool。** 補辨識自己也會寫一份 spool；被砍第二次的話，
+   半途那份變成「最新」，於是下一次啟動會把完整的原檔連同它一起刪掉——「不會掉字」
+   在這裡反而變成掉字。現在保留舊的，`prune` 負責上限，下一次啟動補下一份。
+3. **補辨識途中按清除，是真的取消。** 實測（`-OVC_CLEAR` 在 3 秒後觸發，故意讓它撞上
+   進行中的補辨識）：
+
+```
+recovering spool cafe0002-orphan.wav
+dictation injected: cafe0002-orphan.wav
+dictation done: 27 chars
+clear requested at launch            ← 清除晚了一步，這句已經發布
+（結果）s.phase = idle · s.published 不存在 · s.seq = 5 · spool 目錄空
+```
+
+清除把剛發布的那句拿走、把 spool 目錄清空，序號**沒有**回退（4 → 5）。
+之後重開 App，`recovering spool` 出現 **0 次**——清掉的句子不會自己回來。
+
 
 ---
 
@@ -184,13 +251,14 @@ dictation done: 27 chars
 麥克風只在說話時開，鍵盤用 Darwin 通知觸發，全程不離開原本的 App。
 
 **完成定義**
-- [x] `PiPController`（`AVPictureInPictureVideoCallViewController` + `AVSampleBufferDisplayLayer`）
-- [x] `UIBackgroundModes: audio`，PiP 期間音訊 session 保持活著
-- [x] 鍵盤用 Darwin 通知觸發錄音（Mode 2）；`ovc://record` 保留為**退路**——
+- [~] `PiPController`（`AVPictureInPictureVideoCallViewController` + `AVSampleBufferDisplayLayer`）
+      ——程式完成；模擬器連 `isPictureInPictureSupported()` 都是 false，**執行期沒被走過**
+- [x] `UIBackgroundModes: audio`（`Info.plist` 內含 `audio`，可直接查證）
+- [~] 鍵盤用 Darwin 通知觸發錄音（Mode 2）；`ovc://record` 保留為**退路**——
       通知沒有回執，所以送出後 1.5 秒內沒看到 `.recording` 就改回開 App，
-      不讓「選了 Mode 2 但小窗沒活著」變成按了沒反應的鍵
-- [x] 鍵盤即時字幕在 PiP 模式下也更新
-- [x] App 內有開關：Mode 1（預設）/ Mode 2
+      不讓「選了 Mode 2 但小窗沒活著」變成按了沒反應的鍵（程式完成，未在真機上走過）
+- [~] 鍵盤即時字幕在 PiP 模式下也更新（同一條輪詢路徑，PiP 模式本身未驗）
+- [x] App 內有開關：Mode 1（預設）/ Mode 2（截圖可見，平面、無膠囊）
 - [~] 模擬器能驗多少驗多少；PiP 小窗行為標記「待真機」
       （模擬器已驗到的只有「不支援 → 誠實退回 Mode 1」，見下）
 
@@ -211,8 +279,24 @@ pip: unsupported on this device; falling back to Mode 1
 零跳轉落字，只能在真機驗（M6）。**
 
 **這一步的設計要點**：Mode 2 不信任「使用者選了」這個事實，而是信任
-`SharedStore.pipLive`（PiP delegate 寫入）。PiP 沒真的起來時，鍵盤按麥克風仍走
+`SharedStore.pipAlive`（PiP 心跳）。PiP 沒真的起來時，鍵盤按麥克風仍走
 `ovc://record`，不會變成一個沒有反應的按鈕。
+
+**心跳而不是旗標**：`pipLive` 只在 PiP delegate 裡寫 `true`，但 delegate 不會在
+「行程被砍」時執行，於是它會永遠停在 `true`，鍵盤就一再把麥克風點擊吞掉。現在 App 每秒
+蓋一次章（`pipLive` + `pipLiveAt`），鍵盤只在章還新鮮時才相信它。新鮮度從 8 秒放寬到
+**20 秒**：主執行緒在匯入模型時可以卡好幾秒，而誤判的代價是「使用者被強迫跳 App 一次」，
+比多等幾秒更糟。實測（模擬器，先手動把 `pipLive` 寫成 1、`pipLiveAt` 寫成遠古時間）：
+
+```
+（啟動前）pipLive = 0 → 手動寫成 1
+pip probe: requested at launch
+pip: start requested
+pip: unsupported on this device; falling back to Mode 1
+（啟動後）pipLive = 0
+```
+
+也就是「旗標留在 1」這種殘留狀態在啟動時會被清掉，之後由心跳決定——不是由上一次執行決定。
 
 
 ---
@@ -225,6 +309,11 @@ pip: unsupported on this device; falling back to Mode 1
 **完成定義**
 - [x] App 啟動時**自動建立** `models/asr/dolphin/` 與 `models/llm/`
 - [x] 模型頁顯示兩個模型各自狀態（辨識必要／AI 整理選用）
+- [x] 「模型已安裝」的判斷**與核心真正會載入的檔案一致**：SenseVoice 是
+      `asr/model.int8.onnx`（或 `model.onnx`）＋`asr/tokens.txt`，Dolphin 是
+      `asr/dolphin/model.int8.onnx`＋同層 `tokens.txt`。原本是寬鬆的「有 `.onnx`
+      也有 `tokens.txt` 就算」，結果一個核心拒絕的資料夾會被顯示成「已安裝」，
+      錯誤延後到第一次聽寫才爆——而那正是 M5 這個畫面要避免的事
 - [x] 支援「檔案或資料夾」匯入（`.gguf` → `llm/`；`.onnx` → `asr/`，
       但來源路徑含 `dolphin` 就進 `asr/dolphin/`；`tokens.txt` 跟隨已安裝的那一個）
 - [x] `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`，
@@ -232,6 +321,11 @@ pip: unsupported on this device; falling back to Mode 1
 - [x] 模型同時支援 App Group 與 App Documents 兩個位置（只有 App 讀模型）
 - [ ] 真機上完成一次「安裝 App → 放模型 → 鍵盤啟用 → 落字」全流程
 - [ ] App Group 能力在開發者後台註冊（免費帳號不支援，需要付費帳號）
+
+**匯入的分類規則**（唯一沒被真機驗過的部分是「拖進來的路徑長什麼樣」）：
+`.gguf` 一律進 `llm/`；`.onnx` 看**來源路徑**有沒有 `dolphin` 決定進 `asr/` 還是
+`asr/dolphin/`；`tokens.txt` 不自己選資料夾，跟著「已經有模型的那一個」——
+Dolphin 與 SenseVoice 的 token 表不同，跟著錯的那個會讓辨識在載入時才失敗。
 
 **最後兩項需要使用者配合**（插線、開發者帳號），其餘是程式工作。
 
@@ -283,11 +377,11 @@ M5 的程式部分（模型安裝）可以與 M3/M4 平行做，但**真機驗�
 | 4 | 鍵盤在**不可見**時也 `insertPending()`，而且 `markConsumed()` 無條件執行 → 字沒進欄位卻被標記「已用完」，**永久遺失** | `guard view.window != nil`；插入後帶序號 `markConsumed(seq)` | 截圖 `r2-insert.png`；重開為 0 字 |
 | 5 | `SharedStore` 每個操作都「讀整個 session → 改一格 → 寫回」，兩個行程互撞 → 最壞情況是 phase 被寫回 `.done`，**整次聽寫的即時字幕凍結** | 拆成一欄一 key；`publish` 的 text＋序號合成**單一原子寫入** | 錄音中即時字幕正常；`s.published` 與 `s.consumedSeq` 分開可查 |
 | 6 | `publish` 沒有身分，同一段結果被兩條路徑各發布一次 → **同一句插兩次**（就是舊紀錄裡的 46 字） | 序號 + 鍵盤記錄插過的序號 + `publishedGeneration` | 27 字一次，重開 0 字 |
-| 7 | `pipLive` 只在 delegate 裡清，App 被砍就永遠留 `true` → Mode 2 的麥克風變成**按了沒反應** | 改成心跳（每秒蓋章、8 秒新鮮度）＋啟動時歸零＋送出請求 1.5 秒無回應就退回開 App | log 可見啟動後 `pipLive = 0` |
+| 7 | `pipLive` 只在 delegate 裡清，App 被砍就永遠留 `true` → Mode 2 的麥克風變成**按了沒反應** | 改成心跳（每秒蓋章、新鮮度 20 秒）＋啟動時歸零＋送出請求 1.5 秒無回應就退回開 App | 把 `pipLive` 手動寫成 1 再啟動 → `pipLive = 0`，log 見 `pip: unsupported → falling back to Mode 1` |
 | 8 | PiP 啟動失敗後 `pip` 沒清，之後 `start()` 永遠早退 → 選了 Mode 2 卻什麼都不會發生 | 失敗／關窗都釋放 controller，再選就重試 | 程式碼層 |
 | 9 | ⇧ 走訪 `view.subviews` 找按鍵，層級錯一層 → **按 shift 畫面完全沒反應**（輸入卻變大寫） | 建鍵時存進 `letterKeys`，直接改那批按鈕 | 程式碼層（觸控未自動化） |
 | 10 | 程式被砍時 WAV 標頭沒寫完，補辨識讀到 0 格 → 「不會掉字」只是口號 | 讀不到長度就改讀 `data` chunk | log：`spool had no usable header; read the data chunk directly` → `dictation done: 27 chars` |
-| 11 | 0.5B 也逾時時仍記一筆「已降級」→ log 看起來像有進展 | 已在最小模型就明說 `also overran; nothing smaller is installed` | 程式碼層 |
+| 11 | 0.5B 也逾時時仍記一筆「已降級」→ log 看起來像有進展 | 已在最小模型就明說「沒有更小的」 | 程式碼層（第二輪把措辭與起點都改了，見附錄 B #7） |
 | 12 | `onAppear` 可能跑兩次 → 重複載入 100 MB 辨識模型 | `prewarmed` 旗標 | log 只剩一則 `recogniser ready` |
 
 **刻意沒修的（寫下來，不是忘了）**
@@ -303,6 +397,54 @@ M5 的程式部分（模型安裝）可以與 M3/M4 平行做，但**真機驗�
 
 ---
 
+## 附錄 B：第二輪複查（debug 子代理）之後修掉的東西（2026-10-27）
+
+第一輪修完不代表修對。這一輪請子代理**專門找「還是會壞」的地方**（跨行程可見性、
+序號、generation 守衛、生命週期、音訊 session、FFI），每一項都要指出「什麼情況下會壞、
+使用者看到什麼」。以下是它找到且已修的路徑，全部在模擬器上重跑過。
+
+| # | 缺陷（原本會怎樣） | 修法 | 驗證 |
+|---|---|---|---|
+| 1 | 核心的 `join_speech` 在「非中文對中文」的邊界補一個空白，這一側直接串接；兩邊字串互為非前綴，舊 `merge` 就 `accumulated + final` → **含英文專有名詞的整句被講兩次**（「開會用 Notion 記錄開會用 Notion 記錄」） | `merge` 改成以核心回傳的完整轉錄為準（它涵蓋所有片段），這一側只在核心回空字串時才有作用 | `-OVC_MERGE_PROBE`：4 組全對，重複消失 |
+| 2 | `reset()` 沒碰 spool：在錄音／整理中按清除，音檔留在 `spool/`，下次啟動被當 orphan 補辨識 → **使用者明確清掉的句子自己回來** | `reset()` 內 `spool?.discard()`、刪掉 `orphanSource`、`endBackground()` | 清除後 spool 目錄空、`s.published` 消失、重開 `recovering spool` 出現 **0 次**；「錄音中清除」這條路徑靠程式碼（`reset` 是兩條路徑共用的出口） |
+| 3 | 背景到期 handler 先比對 generation 才 `endBackground()`；不符時**背景任務永遠不結束**，iOS 到期直接砍行程，而且下一次聽寫拿不到任何背景時間 | 先 `endBackground()` 再比對 | 程式碼層（路徑順序可讀） |
+| 4 | `publish` 的序號由「已發布那筆 +1」推算，`clear()` 刪掉那筆 → 序號從 1 重數，鍵盤已插到第 3 句時，新句子在序號爬回 3 之前**全部不落字** | 序號搬到獨立鍵 `s.seq`，單調遞增；`clear()` 不重置它，也不重置 `consumedSeq`；取 `max(s.seq, published.seq) + 1`，順便涵蓋「舊安裝沒有這個 key」的升級路徑 | 清除後 `s.seq` 4→5、新句 5→6、鍵盤插一次（`d3-insert-after-clear.png`）；升級模擬（刪掉 `s.seq`、`published.seq=6`、`consumedSeq=6`）→ 新句 `s.seq=7`、`consumedSeq` 6→7（`d4-upgrade-insert.png`） |
+| 5 | 麥克風停止／失敗一律 `keepAlive: false`，在 Mode 2 下等於關掉音訊 session → **一次失敗就把 PiP 小窗拆了**，之後每次按麥克風都跳 App | 三處（`attach`／`stop`／`fail`）改用 `keepsAudioSession`（`mode == .pip \|\| PiPController.shared.isLive`） | 程式碼層；PiP 本身待真機 |
+| 6 | 補辨識與麥克風互搶：冷啟動時補辨識先跑，占住麥克風二十幾秒，使用者對著一場「其實還沒開始」的錄音講話 | 延後 1.5 秒才補＋`recovering`／`startAfterRecovery`／`finishRecovery()`：麥克風點擊不搶，等補辨識交付完立刻接上 | 見 M3 的三條邊界 |
+| 7 | 降級起點固定是「偏好的模型」→ 裝 2B／1.5B／0.5B 時，第二次失敗又選回剛剛超時的 1.5B，log 還說「沒有更小的」 | 起點改成實際生效的模型（`activeName ?? preferredName`），可 2B → 1.5B → 0.5B | 程式碼層（Swift 這一側沒有測試目標；`cargo test` 測的是 Rust 的降級選擇） |
+
+**順手採納的建議**
+
+- 「已安裝」的判斷收緊成核心真正會載入的檔案配對（見 M5）。
+- `Core.submit` / `Core.segments` 失敗各記**一次** log（輪詢每秒 4 次，不能每次都記）；
+  否則「麥克風沒收到聲音」與「引擎拒絕這段音訊」在畫面上長得一樣。
+- 啟動時把殘留的 `.recording/.transcribing/.refining` 復位成 `.idle`
+  （detail 寫「上次的聽寫沒有完成」），否則鍵盤會顯示一顆永遠不會結束的停止鍵。
+- 新的一次聽寫開始前清掉 `partial`，否則上一次的即時字幕會在新的錄音頭上出現。
+- `recoverOrphan` 不再刪掉較舊的 orphan（見 M3 邊界 2）。
+- `pipFreshness` 8 → 20 秒（見 M4）。
+
+**這一輪的實測（模擬器 iPhone 17 / iOS 26.0）**
+
+| 項目 | 結果 |
+|---|---|
+| `cargo test` | 88 passed / 0 failed |
+| 模擬器建置 | `BUILD SUCCEEDED` |
+| 真機建置（`generic/platform=iOS`） | `BUILD SUCCEEDED`（`allowBluetooth` 兩個 deprecation warning，既有） |
+| 注入 `probe3.wav`（整理關） | `dictation done: 27 chars`，`s.seq` 6、`published.seq` 6 |
+| 鍵盤插入 | 27 字一次，`consumedSeq` 3 → 6 |
+| 清除 | `s.phase = idle`、`s.published` 消失、`s.seq` 5、spool 空，重開 0 次回收 |
+| 清除後再聽寫 | 仍然落字（27 字一次），序號沒回退 |
+| 升級模擬（沒有 `s.seq`，`published.seq = 6`） | 新句 `s.seq = 7`，鍵盤插一次、`consumedSeq` 7（`d4-upgrade-insert.png`） |
+| `-OVC_MERGE_PROBE` | 4 組全對 |
+
+**仍然刻意沒修的**：附錄 A 那三項（逾時不可取消、單槽交接、鍵盤效能）不變。
+另外這一輪新增一項誠實記錄：**模擬器上的 Dolphin 會把英文與數字正規化成中文**
+（`-OVC_ASR_LANGUAGE=en` 也不給輸出），所以「中英混排」只能靠 `merge` 探針驗規則，
+不能用音檔驗整條路徑；真機的辨識結果要等 M6。
+
+---
+
 ## 附錄：最基礎五步的實測紀錄（2026-10-27）
 
 要求是「先做最基礎版，而且真的能用」。以下五步都在模擬器 iPhone 17
@@ -310,15 +452,17 @@ M5 的程式部分（模型安裝）可以與 M3/M4 平行做，但**真機驗�
 
 | 步 | 動作 | 佐證 | 邊界 |
 |---|---|---|---|
-| 1 | 按麥克風 → 錄到音 | `-OVC_RECORD` 走真麥克風路徑（AVAudioEngine → `AudioSpool`），先前已驗 | **本次未重跑**：本次改用注入音檔，不經過麥克風 |
+| 1 | 按麥克風 → 錄到音 | `-OVC_RECORD` 走真麥克風路徑（AVAudioEngine → `AudioSpool`），**上一輪**驗過靜音自動停止＋publish | 本輪**未重跑**：本輪改用注入音檔，不經過麥克風路徑 |
 | 2 | ASR 出字 | log：`recogniser ready` → `dictation done: 23 chars`（整理過）／27 chars（原文） | 注入檔，非現場收音 |
 | 3 | 文字出現在畫面 | 截圖 `m3-trad-28s.png`：畫面顯示「今天下午三点要跟王经理开会，讨论下个季度的预算」 | 輸出是**簡體**，見下方已知缺陷 |
-| 4 | 可複製、可清除 | 截圖：`複製` / `清除` 兩鍵在文字下方，狀態為「完成」 | 按鍵在畫面上，實際剪貼簿內容未逐一截圖 |
-| 5 | 鍵盤把字插進**游標位置** | 截圖 `r2-insert.png`：KB probe 的 TextEditor 出現 **27 字**，鍵盤上方同步顯示同一句 | TextEditor 是**本 App 的測試畫面**，不等於第三方 App；第三方在 M6 |
+| 4 | 可複製、可清除 | 截圖：`複製` / `清除` 兩鍵在文字下方，狀態為「完成」；按清除後 `s.phase = idle`、`s.published` 消失、spool 空、重開 0 次回收 | 剪貼簿內容未逐一截圖；鍵盤畫面在清除後是 0 字（`d2-after-clear.png`） |
+| 5 | 鍵盤把字插進**游標位置** | 截圖 `d1-insert.png` / `d3-insert-after-clear.png`：KB probe 的 TextEditor 出現 **27 字**，鍵盤上方同步顯示同一句 | TextEditor 是**本 App 的測試畫面**，不等於第三方 App；第三方在 M6 |
 
-第 5 步這次是乾淨的一次插入（27 字，不是 46）——舊版 `publish` 會把 `consumed`
+第 5 步是乾淨的一次插入（27 字，不是 46）——舊版 `publish` 會把 `consumed`
 重設，同一句有機會被插兩次；現在每次發布帶自己的序號，鍵盤記下自己插過的序號，
 所以「同一句」不可能再插第二次（重開 App 再進 probe 畫面是 0 字，已驗）。
+序號另外改成單調計數器，所以「清除之後的新句子」也不會被舊的 `consumedSeq` 擋掉
+（本輪實測：清除後再聽寫 → 27 字一次，見 M2 佐證）。
 
 **已知缺陷（寫下來，不假裝沒有）**：上面第 3 步的字是**簡體**。ASR（Dolphin）
 在台灣口音上輸出簡體，而**被降級到的 0.5B** 沒把字轉成繁體——即使提示詞要求、範例也示範了。
@@ -352,4 +496,18 @@ xcodebuild -project OfflineVoiceAssistant.xcodeproj -scheme OfflineVoiceAssistan
 xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios -OVC_KB_PROBE -OVC_AUDIO_FILE <wav>
 xcrun simctl spawn <sim> log show --last 2m \
   --predicate 'subsystem == "com.example.offlinevoiceassistant.ios"' --style compact
+
+# 規則層探針（不需要音檔）
+xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios -OVC_MERGE_PROBE
+# 清除路徑（3 秒後觸發真正的「清除」動作）
+xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios -OVC_CLEAR
+# Push（模擬器不支援，會看到退回 Mode 1 的 log）
+xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios -OVC_PIP_PROBE
+```
+
+讀 App Group 的狀態要用 `defaults`，不要直接讀 plist——`cfprefsd` 會給你舊快取：
+
+```bash
+G=~/Library/Developer/CoreSimulator/Devices/<sim>/data/Containers/Shared/AppGroup/<group>
+xcrun simctl spawn <sim> defaults read "$G/Library/Preferences/group.com.example.offlinevoiceassistant"
 ```

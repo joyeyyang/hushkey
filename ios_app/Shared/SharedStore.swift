@@ -143,14 +143,20 @@ enum SharedStore {
     /// one thing M5 exists to prevent.
     static func hasModels(at root: URL) -> Bool {
         let manager = FileManager.default
-        func ready(_ dir: URL) -> Bool {
-            let names = (try? manager.contentsOfDirectory(atPath: dir.path)) ?? []
-            let hasModel = names.contains { $0.hasSuffix(".onnx") }
-            let hasTokens = names.contains("tokens.txt")
-            return hasModel && hasTokens
+        func exists(_ relative: String) -> Bool {
+            manager.fileExists(atPath: root.appendingPathComponent(relative).path)
         }
-        return ready(root.appendingPathComponent("asr", isDirectory: true))
-            || ready(root.appendingPathComponent("asr/dolphin", isDirectory: true))
+        // Exactly the pairs the core will load (`state.rs`): SenseVoice is
+        // `model.int8.onnx` or `model.onnx` with `tokens.txt` beside it, Dolphin
+        // is `dolphin/model.int8.onnx` with its own `tokens.txt`. A looser test
+        // here -- "any .onnx plus a tokens.txt" -- made the model screen say
+        // 已安裝 for a folder the core rejects, and the rejection then surfaced at
+        // the first dictation instead of on the screen whose job this is.
+        let sense = (exists("asr/model.int8.onnx") || exists("asr/model.onnx"))
+            && exists("asr/tokens.txt")
+        let dolphin = exists("asr/dolphin/model.int8.onnx")
+            && exists("asr/dolphin/tokens.txt")
+        return sense || dolphin
     }
 
     static var hasModels: Bool { hasModels(at: modelsRoot) }
@@ -182,6 +188,9 @@ enum SharedStore {
         static let detail = "s.detail"
         static let published = "s.published"
         static let consumedSeq = "s.consumedSeq"
+        /// Monotonic publish counter, separate from the published blob so
+        /// `clear()` cannot rewind it.
+        static let seq = "s.seq"
         /// The old single-blob key, removed on `clear()` so an upgraded install
         /// does not keep a stale duplicate for ever.
         static let legacy = "session"
@@ -242,10 +251,24 @@ enum SharedStore {
             // honest end of it rather than pretending the queue exists.
             NSLog("ovc publish: overwriting an unconsumed transcript (%d chars)", lost.count)
         }
-        let next = Published(seq: previous.seq + 1, text: text, detail: detail ?? "已整理完成")
+        // The counter lives on its own key and is never reset. Deriving the next
+        // sequence from the published blob meant `clear()` -- which deletes it --
+        // restarted numbering at 1, so a keyboard that had already typed
+        // sequence 3 went on ignoring new sentences until the count climbed back
+        // past it: three dictations vanishing with nothing on screen to explain
+        // it. A monotonic counter cannot go backwards, so `seq > consumedSeq`
+        // stays a true statement about time.
+        //
+        // `max` with the published sequence covers the upgrade: an install from
+        // before this key existed has `s.consumedSeq = 3` and no `s.seq`, and
+        // starting that one at 1 would reintroduce the very bug on the first
+        // launch after the update.
+        let seq = max(defaults.integer(forKey: Key.seq), previous.seq) + 1
+        let next = Published(seq: seq, text: text, detail: detail ?? "已整理完成")
         if let data = try? JSONEncoder().encode(next) {
             defaults.set(data, forKey: Key.published)
         }
+        defaults.set(seq, forKey: Key.seq)
         defaults.set(Phase.done.rawValue, forKey: Key.phase)
         defaults.set(next.detail ?? "", forKey: Key.detail)
         post()
@@ -277,7 +300,9 @@ enum SharedStore {
         defaults.removeObject(forKey: Key.partial)
         defaults.removeObject(forKey: Key.published)
         defaults.removeObject(forKey: Key.legacy)
-        defaults.set(0, forKey: Key.consumedSeq)
+        // Deliberately not touching `s.seq` or `s.consumedSeq`: both only ever
+        // move forward, and resetting either is what would make a sequence
+        // number mean two different sentences.
         post()
     }
 
@@ -339,10 +364,12 @@ enum SharedStore {
         }
     }
 
-    /// How long a PiP stamp stays believable. The app refreshes it every two
-    /// seconds, so this is three missed beats -- long enough for a slow main
-    /// thread, short enough that a killed app stops swallowing microphone taps.
-    private static let pipFreshness: Double = 8
+    /// How long a PiP stamp stays believable. The app refreshes it every second,
+    /// so this is a long grace period rather than a race: a main thread busy with
+    /// a model import can stall for several seconds, and a keyboard that declares
+    /// the window dead then forces an app switch the user did not need. A killed
+    /// app still stops swallowing microphone taps within twenty seconds.
+    private static let pipFreshness: Double = 20
 
     static func stampPiP() {
         // Also asserts the flag: a fresh stamp is a live window, and writing both

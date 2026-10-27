@@ -23,6 +23,27 @@ struct OVCApp: App {
                 DictationController.shared.start()
             }
         }
+
+        // `-OVC_MERGE_PROBE`: the overlapping-transcript rule, over the exact
+        // pair that produced a doubled sentence -- the two sides of the pipeline
+        // spell the same words differently when a boundary is not Chinese to
+        // Chinese (the core inserts a space, this side concatenates), and the old
+        // code appended them. A dictation cannot reproduce it on this recogniser,
+        // which normalises English and digits to Chinese, so the rule is checked
+        // directly rather than through audio that will not exercise it.
+        if ProcessInfo.processInfo.arguments.contains("-OVC_MERGE_PROBE") {
+            let pairs = [
+                ("開會用Notion記錄", "開會用 Notion 記錄"),
+                ("今天下午三點要開會", "今天下午三點要開會"),
+                ("", "只有核心的話"),
+                ("只有這一邊", ""),
+            ]
+            for (accumulated, final) in pairs {
+                Diagnostics.log.notice(
+                    "merge: \(DictationController.merge(accumulated, final), privacy: .public)"
+                )
+            }
+        }
     }
 
     private static var isKeyboardProbe: Bool {
@@ -110,9 +131,36 @@ struct RootView: View {
                 DispatchQueue.main.async { startPiP() }
             }
             guard modelsReady else { return }
+            // The screen's own 清除 button, reachable from a launch flag because a
+            // simulator cannot be tapped from a script. It exercises the real
+            // action, which is what makes the check worth running.
+            if ProcessInfo.processInfo.arguments.contains("-OVC_CLEAR") {
+                // Three seconds, not immediately: with a spool left by a killed
+                // run, recovery has started by then, which is the case worth
+                // testing -- 清除 during recovery must stop it rather than let the
+                // sentence arrive anyway.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    Diagnostics.log.notice("clear requested at launch")
+                    dictation.clear()
+                }
+            }
+            // A phase left behind by a process the system killed reads as a
+            // dictation still in progress, and the keyboard then shows a stop
+            // button for something that will never finish.
+            let left = SharedStore.current().phase
+            if left == .recording || left == .transcribing || left == .refining {
+                SharedStore.setPhase(.idle, detail: "上次的聽寫沒有完成")
+            }
             dictation.prewarm()
-            // Audio from a run the system killed before it could publish.
-            dictation.recoverOrphan()
+            // Audio from a run the system killed before it could publish. Waiting
+            // one and a half seconds is deliberate: a cold launch from the
+            // keyboard's microphone arrives through `onOpenURL` right after this,
+            // and recovering first would take the microphone for twenty seconds
+            // while the user talks into a dictation that never started.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [dictation] in
+                guard dictation.phase == .idle else { return }
+                dictation.recoverOrphan()
+            }
         }
     }
 
