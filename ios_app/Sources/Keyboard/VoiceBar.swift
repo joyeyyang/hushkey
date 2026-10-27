@@ -17,8 +17,6 @@ final class VoiceBar: UIView {
 
     var onMic: (() -> Void)?
     var onCopy: (() -> Void)?
-    var onPaste: (() -> Void)?
-
     private let ink = UIColor(red: 0.93, green: 0.90, blue: 0.86, alpha: 1)
     private let seal = UIColor(red: 0.76, green: 0.27, blue: 0.18, alpha: 1)
     private let dim = UIColor(red: 0.58, green: 0.55, blue: 0.51, alpha: 1)
@@ -26,7 +24,6 @@ final class VoiceBar: UIView {
     private let micButton = UIButton(type: .system)
     private let statusLabel = UILabel()
     private let copyButton = UIButton(type: .system)
-    private let pasteButton = UIButton(type: .system)
     private let spinner = UIActivityIndicatorView(style: .medium)
 
     private var look: Look = .idle
@@ -77,10 +74,11 @@ final class VoiceBar: UIView {
 
         configure(copyButton, symbol: "doc.on.doc", label: "複製")
         copyButton.addTarget(self, action: #selector(copyTapped), for: .touchUpInside)
-        configure(pasteButton, symbol: "text.insert", label: "插入")
-        pasteButton.addTarget(self, action: #selector(pasteTapped), for: .touchUpInside)
-
-        [micButton, statusLabel, copyButton, pasteButton].forEach(row.addArrangedSubview)
+        // Three controls, and no fourth: the microphone, the live status line and
+        // copy is what the desktop bar has, and it is all this row should be. A
+        // separate "insert" button would be the same text going in a second time --
+        // the insertion already happens by itself when a transcript arrives.
+        [micButton, statusLabel, copyButton].forEach(row.addArrangedSubview)
 
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -166,14 +164,11 @@ final class VoiceBar: UIView {
 
         let textAlpha: CGFloat = hasText ? 1 : 0.35
         copyButton.isEnabled = hasText
-        pasteButton.isEnabled = hasText
         copyButton.alpha = textAlpha
-        pasteButton.alpha = textAlpha
     }
 
     // MARK: actions
 
     @objc private func micTapped() { onMic?() }
     @objc private func copyTapped() { onCopy?() }
-    @objc private func pasteTapped() { onPaste?() }
 }

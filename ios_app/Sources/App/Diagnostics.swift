@@ -85,10 +85,13 @@ enum Diagnostics {
         // user's behalf, so every launch states it rather than leaving the reason
         // buried in the launch that recorded it.
         let llm = LLMPolicy.recorded
+        // Requested and installed are printed separately on purpose: with only a
+        // small model on the device the old single line read "preferred ·
+        // qwen2.5-0.5b…", which claims a preference that is not installed.
         lines.append(Line(
             label: "llm",
-            value: llm.map { "\($0.from) → \($0.to) · \($0.reason)" }
-                ?? "preferred · \(LLMPolicy.preferredInstalled?.name ?? "none installed")",
+            value: llm.map { "wanted \($0.from) · using \($0.to) · \($0.reason)" }
+                ?? "wanted \(LLMPolicy.preferredName) · installed \(LLMPolicy.preferredInstalled?.name ?? "none")",
             ok: SharedStore.hasLLM
         ))
 

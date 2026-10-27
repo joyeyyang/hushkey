@@ -81,6 +81,11 @@ struct RootView: View {
             if url.host == "record", modelsReady { dictation.start() }
         }
         .onAppear {
+            // A launch is proof that no PiP window from a previous run survived:
+            // the delegate that clears this flag never runs in a process the
+            // system kills, and a stale `true` is what turns the keyboard's
+            // microphone into a button that records nothing.
+            SharedStore.pipLive = false
             // Before any check: the model screen's whole point is to be a place
             // the user can put something, so the folders exist first and the
             // status is recomputed from what is actually on disk.
@@ -467,6 +472,39 @@ struct RootView: View {
     /// loose files. The extension is the only reliable classifier for the loose
     /// ones, so it decides -- a `.gguf` filed under `asr/` would simply never be
     /// found again.
+    /// Which recogniser folder a loose file belongs in.
+    ///
+    /// The extension alone cannot answer this, and guessing wrong is not a
+    /// cosmetic mistake: a Dolphin model dropped into `asr/` is loaded as
+    /// SenseVoice (and vice versa), which fails at the first dictation with a
+    /// message about the model rather than about the folder. Two facts decide it,
+    /// and both come from how these two models are actually distributed:
+    ///
+    /// * Dolphin always ships inside a folder named `dolphin/`, so a file whose
+    ///   source path says dolphin is one.
+    /// * SenseVoice is two files directly under `asr/`, and `model.int8.onnx` is
+    ///   its name. Nothing else is claimed, so an unrecognised `.onnx` goes to
+    ///   `asr/` -- the recogniser the core prefers.
+    ///
+    /// A `tokens.txt` picked on its own follows whichever recogniser is already
+    /// installed, so repairing a half-installed one does not create the other.
+    private func recogniserDir(for url: URL, under dest: URL) -> URL {
+        let parent = url.deletingLastPathComponent().lastPathComponent.lowercased()
+        let name = url.lastPathComponent.lowercased()
+        let dolphin = dest.appendingPathComponent("asr/dolphin", isDirectory: true)
+        let sense = dest.appendingPathComponent("asr", isDirectory: true)
+
+        if parent.contains("dolphin") { return dolphin }
+        if name == "tokens.txt" || name.hasSuffix(".json") {
+            let manager = FileManager.default
+            let dolphinModel = manager.fileExists(atPath: dolphin.appendingPathComponent("model.int8.onnx").path)
+            let senseModel = manager.fileExists(atPath: sense.appendingPathComponent("model.int8.onnx").path)
+            if dolphinModel && !senseModel { return dolphin }
+            return sense
+        }
+        return sense
+    }
+
     private func importModels(from urls: [URL]) {
         let dest = SharedStore.modelsDir
         DispatchQueue.global(qos: .userInitiated).async {
@@ -489,7 +527,8 @@ struct RootView: View {
                     case "gguf":
                         copy(url, dest.appendingPathComponent("llm").appendingPathComponent(url.lastPathComponent))
                     case "onnx", "txt", "json":
-                        copy(url, dest.appendingPathComponent("asr/dolphin").appendingPathComponent(url.lastPathComponent))
+                        let target = recogniserDir(for: url, under: dest)
+                        copy(url, target.appendingPathComponent(url.lastPathComponent))
                     default:
                         break
                     }

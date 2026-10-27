@@ -80,6 +80,11 @@ int32_t LLM_Summarize(const char *transcript, char **out_summary);
 int32_t LLM_RefineText(const char *text, char **out_text);
 int32_t LLM_RefineTextWithKeywords(const char *text, const char *keywords_hint, char **out_text);
 int32_t LLM_RefineTextWithKeywordsStages(const char *text, const char *keywords_hint, uint32_t stages, char **out_text);
+/* The .gguf that answered the most recent LLM task, or "" when none has run.
+ * A downgrade is invisible in the answer -- the core retries with a smaller model
+ * and returns its text -- so this is how a caller learns which one actually
+ * served the request. Free the result with Core_FreeString. */
+int32_t LLM_LastModelName(char **out_name);
 /* Translates text into `target` ("en" or "zh") and writes it to *out_text. */
 int32_t LLM_Translate(const char *text, const char *target, char **out_text);
 /* Applies a spoken edit instruction ("把第二點改成禮拜五") to an existing text and

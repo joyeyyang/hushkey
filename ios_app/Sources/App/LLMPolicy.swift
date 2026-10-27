@@ -85,8 +85,10 @@ enum LLMPolicy {
 
     /// Hands the engine a downgraded model, if one was recorded.
     ///
-    /// Called once, before the core is initialised. `OVC_LLM_MODEL` is read when
-    /// an LLM task starts, so this only has to land before the first dictation.
+    /// Called once, from `Core.initialize`. It runs *after* `Core_Initialize`
+    /// (that call only points the engine at the model tree) and before the first
+    /// LLM task, which is when `OVC_LLM_MODEL` is actually read -- so the
+    /// ordering that matters is "before the first dictation", not "before init".
     static func apply() {
         guard let name = activeName else { return }
         setenv("OVC_LLM_MODEL", name, 1)
@@ -120,6 +122,16 @@ enum LLMPolicy {
         guard let smaller = installed.first(where: { $0.bytes < preferred.bytes }) else {
             Diagnostics.log.error(
                 "llm model: \(preferred.name, privacy: .public) could not keep up, but no smaller model is installed — staying on it"
+            )
+            return false
+        }
+        // Already on the smallest one: the pass overran anyway, and there is
+        // nothing to move to. Recording it again would put "downgrade recorded"
+        // in the log on every launch, which reads as progress when it is the
+        // opposite -- the fallback does not fit either.
+        if recorded?.to == smaller.name {
+            Diagnostics.log.error(
+                "llm model: \(smaller.name, privacy: .public) also overran; nothing smaller is installed"
             )
             return false
         }

@@ -41,8 +41,25 @@ enum SharedStore {
         var text: String?
         /// One short line for the keyboard to show ("辨識中…", or a failure).
         var detail: String?
-        var updatedAt: Double = 0
-        var consumed: Bool = false
+        /// Increments on every publish. The keyboard records the sequence it
+        /// typed, so the same sentence cannot be typed twice -- and so a
+        /// publish is idempotent across the two processes without a lock.
+        var seq: Int = 0
+        /// The last sequence the keyboard actually inserted.
+        var consumedSeq: Int = 0
+        var consumed: Bool { seq <= consumedSeq }
+    }
+
+    /// What `publish` writes, as one value.
+    ///
+    /// Text and sequence travel together on purpose: two separate keys could be
+    /// read half-updated by the keyboard, and the failure that produces -- new
+    /// text with the old sequence -- is silently *no insertion at all*. One key
+    /// is one atomic write, so that state cannot exist.
+    private struct Published: Codable {
+        var seq: Int
+        var text: String
+        var detail: String?
     }
 
     // MARK: locations
@@ -117,11 +134,23 @@ enum SharedStore {
 
     /// Either recogniser the core can drive: SenseVoice directly under `asr/`,
     /// or Dolphin in its own folder.
+    ///
+    /// The token table is part of the test, not an extra: the core requires
+    /// `<model>` **and** `tokens.txt` side by side (`state.rs`), so a folder with
+    /// only the `.onnx` in it makes `Agent_Load("asr")` fail at the first
+    /// dictation. Counting that as "installed" would send the user into the
+    /// recorder with a model screen that had nothing more to say, which is the
+    /// one thing M5 exists to prevent.
     static func hasModels(at root: URL) -> Bool {
         let manager = FileManager.default
-        let sense = root.appendingPathComponent("asr/model.int8.onnx")
-        let dolphin = root.appendingPathComponent("asr/dolphin/model.int8.onnx")
-        return manager.fileExists(atPath: sense.path) || manager.fileExists(atPath: dolphin.path)
+        func ready(_ dir: URL) -> Bool {
+            let names = (try? manager.contentsOfDirectory(atPath: dir.path)) ?? []
+            let hasModel = names.contains { $0.hasSuffix(".onnx") }
+            let hasTokens = names.contains("tokens.txt")
+            return hasModel && hasTokens
+        }
+        return ready(root.appendingPathComponent("asr", isDirectory: true))
+            || ready(root.appendingPathComponent("asr/dolphin", isDirectory: true))
     }
 
     static var hasModels: Bool { hasModels(at: modelsRoot) }
@@ -138,74 +167,118 @@ enum SharedStore {
 
     // MARK: session
 
-    private static let key = "session"
+    /// One key per field, and no read-modify-write across keys.
+    ///
+    /// All of this was a single JSON blob, which meant every writer -- both
+    /// processes -- had to read the whole session, change one field and write it
+    /// back. Two writes interleaved and the later one resurrects the earlier
+    /// one's stale fields; the visible failure was a keyboard that stopped
+    /// receiving live words because a `markConsumed` write had put the phase back
+    /// to `.done`. Splitting the fields removes the shared mutable state instead
+    /// of racing over it.
+    private enum Key {
+        static let phase = "s.phase"
+        static let partial = "s.partial"
+        static let detail = "s.detail"
+        static let published = "s.published"
+        static let consumedSeq = "s.consumedSeq"
+        /// The old single-blob key, removed on `clear()` so an upgraded install
+        /// does not keep a stale duplicate for ever.
+        static let legacy = "session"
+    }
 
     static func current() -> Session {
-        guard let data = defaults?.data(forKey: key),
-              let session = try? JSONDecoder().decode(Session.self, from: data)
-        else { return Session() }
+        guard let defaults else { return Session() }
+        var session = Session()
+        session.phase = defaults.string(forKey: Key.phase)
+            .flatMap(Phase.init(rawValue:)) ?? .idle
+        session.partial = defaults.string(forKey: Key.partial) ?? ""
+        if let data = defaults.data(forKey: Key.published),
+           let published = try? JSONDecoder().decode(Published.self, from: data) {
+            session.text = published.text
+            session.detail = published.detail ?? defaults.string(forKey: Key.detail)
+            session.seq = published.seq
+        } else {
+            session.detail = defaults.string(forKey: Key.detail)
+        }
+        session.consumedSeq = defaults.integer(forKey: Key.consumedSeq)
         return session
     }
 
-    static func save(_ session: Session) {
-        var copy = session
-        copy.updatedAt = Date().timeIntervalSince1970
-        if let data = try? JSONEncoder().encode(copy) {
-            defaults?.set(data, forKey: key)
-        }
+    /// Moves the phase without touching the published text, which is what a
+    /// status update is. In particular it does **not** clear `text`: a sentence
+    /// can be published before the keyboard gets a chance to type it, and a
+    /// second dictation starting must not be what destroys the first one.
+    static func setPhase(_ phase: Phase, detail: String? = nil) {
+        guard let defaults else { post(); return }
+        defaults.set(phase.rawValue, forKey: Key.phase)
+        if let detail { defaults.set(detail, forKey: Key.detail) }
+        else { defaults.removeObject(forKey: Key.detail) }
         post()
     }
 
-    /// Moves the phase without touching the text, which is what a status update is.
-    static func setPhase(_ phase: Phase, detail: String? = nil) {
-        var session = current()
-        session.phase = phase
-        session.detail = detail
-        if phase != .done { session.text = nil }
-        session.consumed = false
-        save(session)
-    }
-
-    /// Live words while recording. Separate from `setPhase` because this runs
-    /// several times a second and must not reset the text or the consumed flag.
+    /// Live words while recording. Separate key from everything else: this runs
+    /// four times a second and must not touch the phase or the published text.
     static func setPartial(_ text: String) {
-        var session = current()
-        guard session.phase == .recording else { return }
-        guard session.partial != text else { return }
-        session.partial = text
-        save(session)
+        guard let defaults else { return }
+        if phaseNow() != .recording { return }
+        guard defaults.string(forKey: Key.partial) != text else { return }
+        defaults.set(text, forKey: Key.partial)
+        post()
     }
 
-    /// Publishes the finished text. `consumed` starts false so the keyboard types
-    /// it exactly once, and only after it actually reached the cursor.
+    private static func phaseNow() -> Phase {
+        defaults?.string(forKey: Key.phase).flatMap(Phase.init(rawValue:)) ?? .idle
+    }
+
+    /// Publishes the finished text. One atomic write carrying its own sequence,
+    /// so the keyboard can tell "the same sentence again" from "a new one".
     static func publish(_ text: String, detail: String? = nil) {
-        var session = Session()
-        session.phase = .done
-        session.text = text
-        session.detail = detail ?? "已整理完成"
-        session.consumed = false
-        save(session)
+        guard let defaults else { post(); return }
+        let previous = current()
+        if !previous.consumed, let lost = previous.text, !lost.isEmpty {
+            // A second sentence landed before the keyboard typed the first. The
+            // handoff is a single slot by design; saying so in the log is the
+            // honest end of it rather than pretending the queue exists.
+            NSLog("ovc publish: overwriting an unconsumed transcript (%d chars)", lost.count)
+        }
+        let next = Published(seq: previous.seq + 1, text: text, detail: detail ?? "已整理完成")
+        if let data = try? JSONEncoder().encode(next) {
+            defaults.set(data, forKey: Key.published)
+        }
+        defaults.set(Phase.done.rawValue, forKey: Key.phase)
+        defaults.set(next.detail ?? "", forKey: Key.detail)
+        post()
     }
 
-    /// Text the keyboard has not typed yet, if any.
-    static func pendingText() -> String? {
+    /// Text the keyboard has not typed yet, with the sequence that identifies it.
+    static func pending() -> (text: String, seq: Int)? {
         let session = current()
-        guard session.phase == .done, !session.consumed,
-              let text = session.text, !text.isEmpty
-        else { return nil }
-        return text
+        guard !session.consumed, let text = session.text, !text.isEmpty else { return nil }
+        return (text, session.seq)
     }
 
-    /// Called after `insertText` succeeded. Writing this before inserting is how
-    /// a handoff gets lost silently, so the order matters.
-    static func markConsumed() {
-        var session = current()
-        session.consumed = true
-        save(session)
+    static func pendingText() -> String? { pending()?.text }
+
+    /// Called after `insertText` succeeded. Writes one integer, so it cannot
+    /// clobber anything the app wrote in the meantime. Writing this before
+    /// inserting is how a handoff gets lost silently, so the order matters.
+    static func markConsumed(_ seq: Int? = nil) {
+        guard let defaults else { return }
+        let value = seq ?? current().seq
+        defaults.set(value, forKey: Key.consumedSeq)
+        post()
     }
 
     static func clear() {
-        save(Session())
+        guard let defaults else { post(); return }
+        defaults.set(Phase.idle.rawValue, forKey: Key.phase)
+        defaults.removeObject(forKey: Key.detail)
+        defaults.removeObject(forKey: Key.partial)
+        defaults.removeObject(forKey: Key.published)
+        defaults.removeObject(forKey: Key.legacy)
+        defaults.set(0, forKey: Key.consumedSeq)
+        post()
     }
 
     // MARK: settings
@@ -252,9 +325,39 @@ enum SharedStore {
     /// The keyboard cannot see the app, so a mode that was chosen but is not
     /// running has to be distinguishable from one that is -- otherwise Mode 2
     /// turns the microphone button into a no-op on a device that refused PiP.
+    ///
+    /// A flag alone was not enough: it is written by delegate callbacks, and a
+    /// process the system kills never runs them, so a dead app left `true`
+    /// behind for ever and the microphone button became exactly the dead button
+    /// this check exists to prevent. The app now stamps `pipLiveAt` while the
+    /// window is up and the keyboard only trusts a recent stamp.
     static var pipLive: Bool {
         get { defaults?.bool(forKey: "pipLive") ?? false }
-        set { defaults?.set(newValue, forKey: "pipLive") }
+        set {
+            defaults?.set(newValue, forKey: "pipLive")
+            if newValue { stampPiP() } else { defaults?.removeObject(forKey: "pipLiveAt") }
+        }
+    }
+
+    /// How long a PiP stamp stays believable. The app refreshes it every two
+    /// seconds, so this is three missed beats -- long enough for a slow main
+    /// thread, short enough that a killed app stops swallowing microphone taps.
+    private static let pipFreshness: Double = 8
+
+    static func stampPiP() {
+        // Also asserts the flag: a fresh stamp is a live window, and writing both
+        // means the app restarting its own heartbeat repairs a flag that was
+        // cleared by a launch while the window was still up.
+        defaults?.set(true, forKey: "pipLive")
+        defaults?.set(Date().timeIntervalSince1970, forKey: "pipLiveAt")
+    }
+
+    /// `pipLive` and recently stamped. This is what the keyboard must ask.
+    static var pipAlive: Bool {
+        guard pipLive, let at = defaults?.object(forKey: "pipLiveAt") as? Double else {
+            return false
+        }
+        return Date().timeIntervalSince1970 - at < pipFreshness
     }
 
     // MARK: notification

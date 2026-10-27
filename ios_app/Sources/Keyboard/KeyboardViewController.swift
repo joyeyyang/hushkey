@@ -19,6 +19,10 @@ final class KeyboardViewController: UIInputViewController {
     private var refreshTimer: Timer?
     /// The last text this keyboard saw, so ⧉ still works after it was inserted.
     private var lastText = ""
+    /// The letter keys, kept so ⇧ can retitle them. Walking `view.subviews` for
+    /// them never worked: it reaches the keyboard's stack views, one level above
+    /// the buttons, so shift changed what would be typed but nothing on screen.
+    private var letterKeys: [UIButton] = []
 
     private let ink = UIColor(red: 0.93, green: 0.90, blue: 0.86, alpha: 1)
 
@@ -75,7 +79,11 @@ final class KeyboardViewController: UIInputViewController {
 
         if let ready = session.text, !ready.isEmpty { lastText = ready }
 
-        bar.apply(phase: session.phase, text: text, needsSwitch: true)
+        bar.apply(
+            phase: session.phase,
+            text: text,
+            needsSwitch: !(SharedStore.mode == .pip && SharedStore.pipAlive)
+        )
 
         if SharedStore.sharedContainer == nil {
             bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
@@ -85,12 +93,19 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     /// Types the app's result exactly once, at the cursor.
+    ///
+    /// Only while the keyboard is on screen: `textDocumentProxy` is meaningless
+    /// when it is not, and `insertText` reports nothing, so consuming the
+    /// obligation off screen would mark the sentence typed while it went
+    /// nowhere. The Darwin notification refreshes off screen too, which is how
+    /// this used to happen.
     private func insertPending() {
-        guard let text = SharedStore.pendingText() else { return }
-        textDocumentProxy.insertText(text)
-        SharedStore.markConsumed()
-        lastText = text
-        bar.apply(phase: .done, text: "已插入 \(text.count) 字", needsSwitch: true)
+        guard view.window != nil else { return }
+        guard let pending = SharedStore.pending() else { return }
+        textDocumentProxy.insertText(pending.text)
+        SharedStore.markConsumed(pending.seq)
+        lastText = pending.text
+        bar.apply(phase: .done, text: "已插入 \(pending.text.count) 字", needsSwitch: true)
     }
 
     // MARK: ui
@@ -103,10 +118,6 @@ final class KeyboardViewController: UIInputViewController {
             guard let self, !self.lastText.isEmpty else { return }
             UIPasteboard.general.string = self.lastText
             self.bar.showNotice("已複製 \(self.lastText.count) 字")
-        }
-        bar.onPaste = { [weak self] in
-            guard let self, !self.lastText.isEmpty else { return }
-            self.textDocumentProxy.insertText(self.lastText)
         }
         view.addSubview(bar)
 
@@ -138,7 +149,9 @@ final class KeyboardViewController: UIInputViewController {
             line.spacing = 5
             line.distribution = .fillEqually
             for ch in row {
-                line.addArrangedSubview(key(String(ch), action: #selector(typeKey(_:))))
+                let button = key(String(ch), action: #selector(typeKey(_:)))
+                letterKeys.append(button)
+                line.addArrangedSubview(button)
             }
             if row == rows[2] {
                 line.insertArrangedSubview(key("⌫", action: #selector(backspace)), at: 0)
@@ -180,13 +193,33 @@ final class KeyboardViewController: UIInputViewController {
         }
         // Mode 2: the app is already alive inside its PiP window, so asking it to
         // record needs no app switch -- and switching is the one thing this mode
-        // exists to avoid. `pipLive` is the guard: a mode that was chosen but is
-        // not running would otherwise make this button do nothing at all.
-        if SharedStore.mode == .pip, SharedStore.pipLive {
+        // exists to avoid. `pipAlive` is the guard: a mode that was chosen but is
+        // not running would otherwise make this button do nothing at all, and a
+        // killed app leaves its flags behind.
+        if SharedStore.mode == .pip, SharedStore.pipAlive {
             SharedStore.requestRecording()
             bar.showNotice("錄音中…")
+            confirmOrFallBack()
             return
         }
+        openApp()
+    }
+
+    /// A Darwin notification has no acknowledgement, so the request is checked:
+    /// if the app did not move to `.recording` within a beat, it is not listening
+    /// and the tap falls back to opening it. Otherwise a live-but-stuck app makes
+    /// the microphone a button that shows "錄音中…" and records nothing.
+    private func confirmOrFallBack() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            guard SharedStore.current().phase != .recording else { return }
+            SharedStore.pipLive = false
+            self.bar.showNotice("小窗沒有回應，改為開啟 App")
+            self.openApp()
+        }
+    }
+
+    private func openApp() {
         guard let url = URL(string: "ovc://record") else { return }
         extensionContext?.open(url) { [weak self] ok in
             guard !ok else { return }
@@ -207,11 +240,9 @@ final class KeyboardViewController: UIInputViewController {
 
     private func setShift(_ on: Bool) {
         shifted = on
-        for case let line as UIStackView in view.subviews.compactMap({ $0 as? UIStackView }) {
-            for case let button as UIButton in line.arrangedSubviews {
-                guard let t = button.title(for: .normal), t.count == 1, t != "⇧" else { continue }
-                button.setTitle(on ? t.uppercased() : t.lowercased(), for: .normal)
-            }
+        for button in letterKeys {
+            guard let title = button.title(for: .normal) else { continue }
+            button.setTitle(on ? title.uppercased() : title.lowercased(), for: .normal)
         }
     }
 

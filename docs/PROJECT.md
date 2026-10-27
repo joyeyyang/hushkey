@@ -1,7 +1,8 @@
 # 專案總覽
 
 > 對應 commit `747b3f8`。程式碼 18,590 行（Rust 3,9xx＋Swift 14,6xx）。
-> 這份是入口文件；決策的來龍去脈在 `docs/todo.md`，選型在 `docs/model-choice.md`。
+> 這份是入口文件；決策的來龍去脈在 `docs/todo.md`，選型在 `docs/model-choice.md`，
+> iOS 版的階段與完成定義在 `docs/milestones.md`（M0–M6，附實測 log 與重跑指令）。
 
 ## 1. 這是什麼
 
@@ -92,6 +93,13 @@ Kit 是這個專案的產品目標之一：「把整套語音輸入方式打包�
 每次呼叫後記憶體還給 OS。
 
 代價：每個工作階段要重新載入模型（16–34 秒／三段摘要）。
+
+**iOS 沒有這個選項**：行程不能 fork。所以 iOS 的 `run_task` 走 `run_in_process`，
+LLM 與 ASR 同行程，靠 `gpu_layers` 與逾時保底（25 秒，低於 iOS 約 30 秒的背景時間）
+控制風險。兩層降級——同一執行內重試（`llm_fallback_path`）與跨啟動記憶
+（`LLMPolicy` 寫 App Group，下次 `Core.initialize` 時 `setenv`）——**macOS 也適用**，
+只是 macOS 的降級訊息只寫 stderr，App 不顯示。細節與實測見
+`docs/milestones.md` 的 M3。
 
 ### 5.2 ASR 用 Dolphin base int8
 
@@ -259,4 +267,5 @@ accessibility replacement
 | 台語（Minnan） | 模型支援 `zh-MINNAN`，沒有人用耳朵聽過 |
 | 簽章／公證 | 只做 ad-hoc 簽章 |
 | 資料刪除 UI | 未實作（錄音狀態指示器有） |
-| iOS / Android | 只有設計筆記 |
+| iOS | 程式與模擬器實測到 M4（M0–M3 完成、M4/M5 部分），進度與完成定義見 `docs/milestones.md`；M6 全項待真機 |
+| Android | 只有設計筆記 |

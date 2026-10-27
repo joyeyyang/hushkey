@@ -35,6 +35,9 @@ final class PiPController: NSObject {
     private var layer: AVSampleBufferDisplayLayer?
     private var repaint: Timer?
     private var anchor: UIView?
+    /// The last string drawn, so a 1 fps repaint does not rebuild an identical
+    /// frame sixty times a minute.
+    private var lastRendered: String?
 
     /// True while the system is actually showing the window. The keyboard asks
     /// this over the group (`PiPLive`) before trusting Mode 2: a mode that was
@@ -48,8 +51,26 @@ final class PiPController: NSObject {
             Diagnostics.log.error("pip: unsupported on this device; Mode 2 unavailable")
             return
         }
-        guard pip == nil else { return }
         anchor = host
+        // Already configured but not up (the window was closed, or the first
+        // attempt failed): ask again instead of returning. Returning here meant
+        // that after one failed start, choosing Mode 2 again did nothing for the
+        // rest of the launch.
+        if let existing = pip {
+            if existing.isPictureInPictureActive {
+                Diagnostics.log.notice("pip: already live")
+            } else {
+                Diagnostics.log.notice("pip: retrying a start that did not take")
+                if existing.isPictureInPicturePossible {
+                    existing.startPictureInPicture()
+                } else {
+                    Diagnostics.log.error("pip: still not possible; will not start until this app is backgrounded")
+                }
+                startRepaint()
+                SharedStore.pipLive = isLive
+            }
+            return
+        }
 
         let session = AVAudioSession.sharedInstance()
         do {
@@ -108,24 +129,54 @@ final class PiPController: NSObject {
         layer = nil
         callViewController = nil
         anchor = nil
+        lastRendered = nil
         isLive = false
         SharedStore.pipLive = false
         Diagnostics.log.notice("pip: stopped")
     }
 
+    /// Drops the controller after the system took the window away.
+    ///
+    /// Without this, `pip` stayed non-nil after a failure or a user-closed
+    /// window, and every later `start()` early-returned on it: Mode 2 then looked
+    /// selected and produced nothing, with no message to explain it.
+    private func releaseWindow() {
+        isLive = false
+        SharedStore.pipLive = false
+        repaint?.invalidate()
+        repaint = nil
+        pip = nil
+        layer?.flushAndRemoveImage()
+        layer = nil
+        callViewController = nil
+        lastRendered = nil
+    }
+
     /// Repaints the window with whatever the recogniser has heard so far, so the
     /// small window is the live caption rather than a static picture.
     fileprivate func refreshCaption() {
-        let phase = SharedStore.current().phase
+        // The heartbeat: the keyboard only trusts Mode 2 for a few seconds after
+        // this stamp, so a process that dies without running its delegate does
+        // not leave a "live" flag behind. One write a second, on the same timer
+        // that already runs.
+        if isLive { SharedStore.stampPiP() }
+        let session = SharedStore.current()
         let text: String
-        switch phase {
-        case .recording: text = "錄音中…"
+        switch session.phase {
+        case .recording:
+            // The window is the live caption, so it shows the words rather than
+            // the word "recording": it is already repainting once a second, and
+            // three static characters waste the only place the user can see the
+            // recogniser working while staying in the other app.
+            text = session.partial.isEmpty ? "錄音中…" : String(session.partial.suffix(60))
         case .transcribing: text = "辨識中…"
         case .refining: text = "整理中…"
         case .done, .failed, .idle:
-            let heard = SharedStore.current().text ?? ""
+            let heard = session.text ?? ""
             text = heard.isEmpty ? "準備好了" : String(heard.suffix(60))
         }
+        guard text != lastRendered else { return }
+        lastRendered = text
         render(text: text)
     }
 
@@ -218,8 +269,7 @@ extension PiPController: AVPictureInPictureControllerDelegate {
         _ controller: AVPictureInPictureController
     ) {
         MainActor.assumeIsolated {
-            isLive = false
-            SharedStore.pipLive = false
+            releaseWindow()
             Diagnostics.log.notice("pip: window closed")
         }
     }
@@ -229,8 +279,7 @@ extension PiPController: AVPictureInPictureControllerDelegate {
         failedToStartPictureInPictureWithError error: Error
     ) {
         MainActor.assumeIsolated {
-            isLive = false
-            SharedStore.pipLive = false
+            releaseWindow()
             // The usual causes, and the difference matters to whoever is reading
             // the log: no background mode, no audio session, or the simulator.
             Diagnostics.log.error("pip: failed to start: \(error.localizedDescription, privacy: .public)")
