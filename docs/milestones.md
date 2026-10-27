@@ -575,7 +575,8 @@ E. 把內容不是音訊的檔案當成最新 orphan：`dictation failed: 讀不
 
 **這一輪的實測（模擬器 iPhone 17 / iOS 26.0，`cargo test` 88 項全綠）**
 
-A. 注入 `probe13.wav` → `dictation done: 27 chars`、`s.seq` 24、spool 空（回歸）。
+A. 注入 `probe13.wav` → `dictation done: 27 chars`、`s.seq` 24、spool 空；改完 `unclaim`
+的錯誤處理後再用最終建置跑一次 `probe15.wav` → 同樣 27 字、`s.seq` 27、spool 空。
 
 B. `-OVC_CLEAR` ＋ `-OVC_AFTER_CLEAR`，並預先放一份死 `.claimed` 與一份較舊的完整 orphan：
 
