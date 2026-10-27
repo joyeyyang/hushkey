@@ -33,8 +33,21 @@ enum Diagnostics {
     /// microphone. The simulator has no usable microphone, and this doubles as
     /// the regression entry point -- a known sentence in, the same text out.
     static var injectedAudio: String? {
+        path(after: "-OVC_AUDIO_FILE")
+    }
+
+    /// `-OVC_AFTER_CLEAR <path>`, together with `-OVC_CLEAR`: dictate again in the
+    /// same process, a few seconds after the clear. That is the sequence a user
+    /// performs (清除, then the keyboard's microphone) and the only way to see
+    /// whether the cancelled run left the recogniser session open -- a relaunch
+    /// would hide it, because the session lives in this process.
+    static var audioAfterClear: String? {
+        path(after: "-OVC_AFTER_CLEAR")
+    }
+
+    private static func path(after flag: String) -> String? {
         let args = ProcessInfo.processInfo.arguments
-        guard let index = args.firstIndex(of: "-OVC_AUDIO_FILE"),
+        guard let index = args.firstIndex(of: flag),
               args.index(after: index) < args.endIndex
         else { return nil }
         return args[args.index(after: index)]

@@ -142,6 +142,15 @@ struct RootView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                     Diagnostics.log.notice("clear requested at launch")
                     dictation.clear()
+                    // The user's next move after 清除 is another dictation in the
+                    // same process. A cancelled recovery that left the recogniser
+                    // session open only shows up here.
+                    if let path = Diagnostics.audioAfterClear {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                            Diagnostics.log.notice("dictation requested after clear")
+                            dictation.runInjected(url: URL(fileURLWithPath: path))
+                        }
+                    }
                 }
             }
             // A phase left behind by a process the system killed reads as a

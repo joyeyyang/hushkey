@@ -148,6 +148,23 @@ final class AudioSpool {
         claimed().map(\.0)
     }
 
+    /// Puts a claim back in the recovery queue.
+    ///
+    /// Used when the dictation failed for a reason that has nothing to do with the
+    /// audio -- the engine refused to start, say. The sentence is still the only
+    /// copy of what the user said, so the next launch gets another try at it.
+    static func unclaim(_ url: URL) {
+        let wav = url.deletingPathExtension().appendingPathExtension("wav")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        do {
+            try FileManager.default.moveItem(at: url, to: wav)
+        } catch {
+            Diagnostics.log.error(
+                "spool unclaim failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
     private static func claimed() -> [(URL, Date)] {
         dated(suffix: ".claimed")
     }

@@ -51,6 +51,10 @@ final class DictationController: ObservableObject {
     /// A spool file inherited from a killed run. Removed once its words are
     /// published, so a second crash does not lose the sentence.
     private var orphanSource: URL?
+    /// Whether `runInjected` got as far as reading the audio. A failure after
+    /// this point is about the audio, not about the engine, and that distinction
+    /// decides whether a claimed spool is retried or dropped.
+    private var injectedAudioReady = false
     /// Set when the audio came back from disk after the system killed the app.
     /// That sentence has already cost the user one attempt, so it is published as
     /// heard rather than risking the slow path again.
@@ -349,10 +353,20 @@ final class DictationController: ObservableObject {
 
     func clear() {
         let wasBusy = isBusy
+        let wasRecording = phase == .recording
         // `stop()` hands the tail of the recording to the decode, which belongs
         // to this generation. Bumping after it, so that decode is discarded
         // instead of publishing the sentence the user just cleared.
         if wasBusy { stop() }
+        // `stop()` only exists for a live microphone. A recovery (or an injected
+        // run) is already transcribing, so it returns without closing the
+        // recogniser session -- and Rust refuses the next `start` with "ASR
+        // session already active", which shows up as a failed first tap after
+        // every cancelled recovery. Queued on the same serial queue, so it lands
+        // before any dictation the user starts next.
+        if wasBusy, !wasRecording {
+            work.async { _ = try? Core.stop() }
+        }
         nextGeneration()
         reset()
         phase = .idle
@@ -369,6 +383,7 @@ final class DictationController: ObservableObject {
         refineTimer?.invalidate()
         refineTimer = nil
         skipRefine = false
+        injectedAudioReady = false
         // The audio belongs to the dictation being replaced. Leaving it behind is
         // how a sentence the user explicitly cleared comes back on the next launch:
         // `recoverOrphan` cannot tell "the app was killed" from "the user said
@@ -405,10 +420,18 @@ final class DictationController: ObservableObject {
         spool?.discard()
         spool = nil
         if let orphanSource {
-            // The file is the only copy of that sentence, but a spool that cannot
-            // be decoded will fail identically on every future launch. Keeping it
-            // turns one bad file into a permanent failure at startup.
-            try? FileManager.default.removeItem(at: orphanSource)
+            // A `.claimed` file is one recovery picked up. When the failure came
+            // before the audio was even read, it was the engine refusing to start
+            // (bad models, a session the last run left open) -- nothing to do with
+            // this file, so it goes back into the queue for the next launch instead
+            // of being thrown away with the fault. Once the audio has been read,
+            // the failure is about the audio: decoding it again would fail the same
+            // way and block the older spools behind it.
+            if orphanSource.pathExtension == "claimed", !injectedAudioReady {
+                AudioSpool.unclaim(orphanSource)
+            } else {
+                try? FileManager.default.removeItem(at: orphanSource)
+            }
             self.orphanSource = nil
         }
         pendingRaw = nil
@@ -500,6 +523,15 @@ final class DictationController: ObservableObject {
         let announcing: SharedStore.Phase = recovering ? .transcribing : .recording
         phase = announcing
         SharedStore.setPhase(announcing, detail: recovering ? "補回上次的錄音…" : "錄音中…")
+        // Set before anything can fail, not after the file has been read: this file
+        // is the only copy of that sentence, and every exit (`publish`, `fail`,
+        // `reset`) finds it through this property. Assigned late, an engine that
+        // refused to start left a claimed file nobody would ever look at again, and
+        // each launch consumed one more spool.
+        if url.deletingLastPathComponent().standardizedFileURL
+            == AudioSpool.directory.standardizedFileURL {
+            orphanSource = url
+        }
         Diagnostics.log.notice("dictation injected: \(url.lastPathComponent, privacy: .public)")
 
         work.async {
@@ -515,27 +547,25 @@ final class DictationController: ObservableObject {
             do {
                 samples = try Self.readMono16k(url)
             } catch {
-                Self.discardIfSpool(url)
+                Self.discardIfUnreadable(url)
                 DispatchQueue.main.async { self.fail("讀不到測試音：\(error.localizedDescription)", g: g) }
                 return
             }
             guard !samples.isEmpty else {
-                Self.discardIfSpool(url)
+                Self.removeSpool(url)
                 DispatchQueue.main.async { self.fail("測試音是空的", g: g) }
                 return
             }
-
-            // Consumed once the words reach the keyboard, not here: until then the
-            // file is the only copy of that sentence. `orphanSource` carries it to
-            // `publish`.
-            if url.deletingLastPathComponent().standardizedFileURL
-                == AudioSpool.directory.standardizedFileURL {
-                DispatchQueue.main.async { self.orphanSource = url }
-            }
+            DispatchQueue.main.async { self.injectedAudioReady = true }
 
             // Written through the same spool as live audio, so the disk path is
             // exercised too -- a bug there would otherwise only show on a phone.
-            let spool = try? AudioSpool()
+            // A recovery does not need one: its audio is already the file it is
+            // decoding, and a second copy of the same sentence becomes "the newest
+            // orphan" the moment the process is killed mid-decode -- so the next
+            // launch would decode a truncated copy and treat the complete file as
+            // abandoned.
+            let spool = self.recovering ? nil : try? AudioSpool()
             var index = 0
             let chunk = 1_600  // 100 ms
             while index < samples.count {
@@ -581,15 +611,20 @@ final class DictationController: ObservableObject {
         // stale sentence in the same launch.
         guard !didRecoverOrphan else { return }
         didRecoverOrphan = true
-        AudioSpool.prune()
+        // Reported before pruning: `prune` deletes the oldest files first and the
+        // claims are the oldest things that never go away, so pruning first would
+        // silently remove the very files this line exists to mention.
         let abandoned = AudioSpool.abandonedClaims()
         if !abandoned.isEmpty {
-            // A recovery that was itself killed. Nothing will decode these, so say
-            // so once instead of leaving a file that looks pending for ever.
+            // A recovery that was itself killed, or one whose publish never came
+            // back. Either way nothing will decode these. The wording stops short
+            // of "not delivered": a claim is also left behind when the app died
+            // between publishing and deleting it, and that sentence did arrive.
             Diagnostics.log.error(
-                "recovery abandoned \(abandoned.count) claimed spool(s); those sentences were not delivered"
+                "recovery left \(abandoned.count) claimed spool(s); they will not be retried"
             )
         }
+        AudioSpool.prune()
         let orphans = AudioSpool.orphans()
         guard let newest = orphans.last else { return }
         // The older spools are left alone. They used to be deleted here, but the
@@ -621,17 +656,28 @@ final class DictationController: ObservableObject {
         runInjected(url: claimed, detail: "補回上次的錄音", skipRefine: true)
     }
 
-    /// Removes a spool that cannot be turned into text.
+    /// Removes a spool that cannot even be opened.
     ///
-    /// A file that fails to decode fails identically on every launch, and it is
-    /// the newest orphan, so recovery would pick it again and again while the
-    /// older, complete spool behind it never got a turn. Only spools are removed
-    /// here -- never a file the user pointed the test flag at.
-    private static func discardIfSpool(_ url: URL) {
-        guard url.deletingLastPathComponent().standardizedFileURL
-            == AudioSpool.directory.standardizedFileURL
-        else { return }
+    /// A file that fails to open fails identically on every launch, and it is the
+    /// newest orphan, so recovery would pick it again and again while the older,
+    /// complete spool behind it never got a turn. A *conversion* failure is not
+    /// that: it can be transient, and deleting the file would throw the sentence
+    /// away. Only spools are touched -- never a file the test flag pointed at.
+    private static func discardIfUnreadable(_ url: URL) {
+        guard isSpool(url), (try? AVAudioFile(forReading: url)) == nil else { return }
         try? FileManager.default.removeItem(at: url)
+    }
+
+    /// An empty file decodes to nothing on every launch, so it goes -- otherwise
+    /// it stays the newest orphan and blocks the ones behind it.
+    private static func removeSpool(_ url: URL) {
+        guard isSpool(url) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private static func isSpool(_ url: URL) -> Bool {
+        url.deletingLastPathComponent().standardizedFileURL
+            == AudioSpool.directory.standardizedFileURL
     }
 
     /// Any WAV/CAF/M4A at any rate, as 16 kHz mono float32.

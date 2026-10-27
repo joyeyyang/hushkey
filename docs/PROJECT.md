@@ -267,5 +267,5 @@ accessibility replacement
 | 台語（Minnan） | 模型支援 `zh-MINNAN`，沒有人用耳朵聽過 |
 | 簽章／公證 | 只做 ad-hoc 簽章 |
 | 資料刪除 UI | 未實作（錄音狀態指示器有） |
-| iOS | 程式與模擬器實測到 M4（M0–M3 完成、M4/M5 部分），已完成 plan／review／debug 三輪複查；進度與完成定義見 `docs/milestones.md`（附錄 A/B 是兩輪修掉的東西）；M6 全項待真機 |
+| iOS | 程式與模擬器實測到 M4（M0–M3 完成、M4/M5 部分），已完成 plan／review／debug 四輪複查；進度與完成定義見 `docs/milestones.md`（附錄 A–D 是四輪修掉的東西）；M6 全項待真機 |
 | Android | 只有設計筆記 |

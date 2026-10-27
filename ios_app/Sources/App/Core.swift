@@ -48,16 +48,27 @@ enum Core {
         LLMPolicy.apply()
         // The core ships two recognisers and prefers SenseVoice (240 MB) unless
         // `OVC_ASR_MODEL` says otherwise. There is no shell on iOS, so the app
-        // states the choice itself -- but only when SenseVoice is genuinely absent,
-        // so an install that has it keeps the core's own preference. "Absent" means
-        // neither quantisation: `state.rs` accepts `model.int8.onnx` or
-        // `model.onnx`, and testing only the int8 one sent an fp32 install down the
-        // Dolphin path while the model screen said SenseVoice was installed.
+        // states the choice itself -- but only when SenseVoice is genuinely
+        // unusable, so an install that has it keeps the core's own preference.
+        //
+        // "Usable" is the exact pair `state.rs` loads: `model.int8.onnx` or
+        // `model.onnx` *with* `tokens.txt` beside it. Testing only the int8 file
+        // sent an fp32 install down the Dolphin path; testing the model without
+        // the tokens would select a folder that fails at load time -- with nothing
+        // small enough left to retry.
+        let manager = FileManager.default
         let sense = ["asr/model.int8.onnx", "asr/model.onnx"].contains {
-            FileManager.default.fileExists(atPath: models.appendingPathComponent($0).path)
+            manager.fileExists(atPath: models.appendingPathComponent($0).path)
         }
+        let senseTokens = manager.fileExists(
+            atPath: models.appendingPathComponent("asr/tokens.txt").path
+        )
         let dolphin = models.appendingPathComponent("asr/dolphin/model.int8.onnx")
-        if !sense, FileManager.default.fileExists(atPath: dolphin.path) {
+        // Selecting a SenseVoice folder that is missing its tokens would fail at
+        // load time, so a Dolphin install that is complete wins over one that is
+        // not. Checked here as well as in `hasModels`, which draws the same
+        // conclusion on the model screen.
+        if !(sense && senseTokens), manager.fileExists(atPath: dolphin.path) {
             setenv("OVC_ASR_MODEL", "dolphin", 1)
         }
         // `Core_Initialize` only points the engine at the model tree; nothing is
