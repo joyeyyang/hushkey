@@ -78,7 +78,7 @@ final class VoiceBar: UIView {
         row.spacing = 12
         column.addArrangedSubview(row)
 
-        configure(globeButton, symbol: "globe", label: "下一個鍵盤", size: 22)
+        configure(globeButton, symbol: "globe", label: "下一個鍵盤", size: 18)
         globeButton.addTarget(self, action: #selector(nextTapped), for: .touchUpInside)
         row.addArrangedSubview(globeButton)
 
@@ -86,11 +86,11 @@ final class VoiceBar: UIView {
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         row.addArrangedSubview(spacer)
 
-        configure(copyButton, symbol: "doc.on.doc", label: "複製", size: 21)
+        configure(copyButton, symbol: "doc.on.doc", label: "複製", size: 25)
         copyButton.addTarget(self, action: #selector(copyTapped), for: .touchUpInside)
         row.addArrangedSubview(copyButton)
 
-        configure(pauseButton, symbol: "pause.fill", label: "暫停", size: 21)
+        configure(pauseButton, symbol: "pause.fill", label: "暫停", size: 25)
         pauseButton.addTarget(self, action: #selector(pauseTapped), for: .touchUpInside)
         row.addArrangedSubview(pauseButton)
 
@@ -204,7 +204,7 @@ final class VoiceBar: UIView {
 
         // Pause exists only while there is something to pause. Drawn anyway (dim)
         // so the row does not reflow under the user's thumb when recording starts.
-        let pauseConfig = UIImage.SymbolConfiguration(pointSize: 21, weight: .regular)
+        let pauseConfig = UIImage.SymbolConfiguration(pointSize: 25, weight: .regular)
         pauseButton.setImage(
             UIImage(systemName: recording && paused ? "play.fill" : "pause.fill",
                     withConfiguration: pauseConfig),

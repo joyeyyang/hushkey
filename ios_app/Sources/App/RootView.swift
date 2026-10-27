@@ -15,6 +15,13 @@ struct RootView: View {
     @ObservedObject private var dictation = DictationController.shared
     @State private var modelsReady = SharedStore.hasModels
     @State private var tab = 0
+    /// `prepare` runs once per launch, whoever asks for it first.
+    ///
+    /// It is attached to two views (the screen and the model page), because either
+    /// can be the first thing that appears. Without this, a launch with no models
+    /// installed ran it twice, and the second pass rescheduled the `-OVC_CLEAR`
+    /// probe's timers.
+    @State private var prepared = false
 
     private let titles = ["轉錄", "歷史", "關鍵字", "模型", "設定"]
 
@@ -99,6 +106,8 @@ struct RootView: View {
     /// Also reachable twice: `onAppear` fires again when the model sheet closes,
     /// and re-running the recovery would deliver last launch's sentence twice.
     private func prepare() {
+        guard !prepared else { return }
+        prepared = true
         // A launch is proof that no PiP window from a previous run survived: the
         // delegate that clears this flag never runs in a process the system kills,
         // and a stale `true` is what turns the keyboard's microphone into a button

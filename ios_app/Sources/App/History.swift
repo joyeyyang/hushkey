@@ -71,10 +71,14 @@ enum History {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         var list = all()
-        // The same sentence twice in a row is the same dictation replayed (a
-        // recovery, a re-run): keeping both makes 全部清空 the only way to tidy up.
+        // The same sentence twice *within seconds* is the same dictation published
+        // twice -- a recovery that ran after the text had already been handed over.
+        // Five seconds, not a minute: saying "好" twice in a row is something people
+        // do, and a window that eats it is worse than a duplicate. The pipeline
+        // already prevents a double publish per dictation (`publishedGeneration`),
+        // so this is the second line of defence, not the first.
         if let first = list.first, first.text == trimmed,
-           abs(first.date.timeIntervalSinceNow) < 60 {
+           abs(first.date.timeIntervalSinceNow) < 5 {
             return
         }
         list.insert(
