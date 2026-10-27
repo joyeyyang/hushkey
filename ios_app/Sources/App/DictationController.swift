@@ -51,6 +51,13 @@ final class DictationController: ObservableObject {
     /// A spool file inherited from a killed run. Removed once its words are
     /// published, so a second crash does not lose the sentence.
     private var orphanSource: URL?
+    /// Whether that file is a `*.claimed` one.
+    ///
+    /// Kept as state rather than read off the extension: `recoverOrphan` calls
+    /// `runInjected` with a plain `.wav` when `claim` fails, and that file is just
+    /// as much the only copy of the sentence. Asking the extension made a claim
+    /// failure look like "not ours" and let `fail()` delete it.
+    private var orphanWasClaimed = false
     /// Whether `runInjected` got as far as reading the audio. A failure after
     /// this point is about the audio, not about the engine, and that distinction
     /// decides whether a claimed spool is retried or dropped.
@@ -384,6 +391,7 @@ final class DictationController: ObservableObject {
         refineTimer = nil
         skipRefine = false
         injectedAudioReady = false
+        orphanWasClaimed = false
         // The audio belongs to the dictation being replaced. Leaving it behind is
         // how a sentence the user explicitly cleared comes back on the next launch:
         // `recoverOrphan` cannot tell "the app was killed" from "the user said
@@ -420,19 +428,25 @@ final class DictationController: ObservableObject {
         spool?.discard()
         spool = nil
         if let orphanSource {
-            // A `.claimed` file is one recovery picked up. When the failure came
-            // before the audio was even read, it was the engine refusing to start
-            // (bad models, a session the last run left open) -- nothing to do with
-            // this file, so it goes back into the queue for the next launch instead
-            // of being thrown away with the fault. Once the audio has been read,
-            // the failure is about the audio: decoding it again would fail the same
-            // way and block the older spools behind it.
-            if orphanSource.pathExtension == "claimed", !injectedAudioReady {
-                AudioSpool.unclaim(orphanSource)
+            // When the failure came before the audio was even read, it was the
+            // engine refusing to start (bad models, a session the last run left
+            // open) -- nothing to do with this file, so the sentence goes back into
+            // the queue for the next launch instead of being thrown away with the
+            // fault. A claimed file has to be renamed back to be picked up again; a
+            // plain `.wav` is already in the queue, so it is simply left alone. That
+            // second case matters: `claim` can fail, and then the file handed here
+            // is a `.wav` -- deleting it would throw the sentence away for a rename
+            // that never happened.
+            if !injectedAudioReady {
+                if orphanWasClaimed { AudioSpool.unclaim(orphanSource) }
             } else {
+                // The audio was read, so this failure is about the audio: decoding
+                // it again would fail the same way and block the older spools
+                // behind it.
                 try? FileManager.default.removeItem(at: orphanSource)
             }
             self.orphanSource = nil
+            self.orphanWasClaimed = false
         }
         pendingRaw = nil
         refineTimer?.invalidate()
@@ -531,9 +545,14 @@ final class DictationController: ObservableObject {
         if url.deletingLastPathComponent().standardizedFileURL
             == AudioSpool.directory.standardizedFileURL {
             orphanSource = url
+            orphanWasClaimed = url.pathExtension == "claimed"
         }
         Diagnostics.log.notice("dictation injected: \(url.lastPathComponent, privacy: .public)")
 
+        // Read once, before leaving the main actor: `clear()` can flip these while
+        // the block below is still feeding audio, and a stale read is the difference
+        // between "write a second spool" and "do not".
+        let isRecovery = recovering
         work.async {
             do {
                 try Core.initialize(models: SharedStore.modelsRoot)
@@ -548,12 +567,16 @@ final class DictationController: ObservableObject {
                 samples = try Self.readMono16k(url)
             } catch {
                 Self.discardIfUnreadable(url)
-                DispatchQueue.main.async { self.fail("讀不到測試音：\(error.localizedDescription)", g: g) }
+                let what = isRecovery ? "上次的錄音" : "測試音"
+                DispatchQueue.main.async {
+                    self.fail("讀不到\(what)：\(error.localizedDescription)", g: g)
+                }
                 return
             }
             guard !samples.isEmpty else {
                 Self.removeSpool(url)
-                DispatchQueue.main.async { self.fail("測試音是空的", g: g) }
+                let what = isRecovery ? "上次的錄音" : "測試音"
+                DispatchQueue.main.async { self.fail("\(what)是空的", g: g) }
                 return
             }
             DispatchQueue.main.async { self.injectedAudioReady = true }
@@ -565,7 +588,7 @@ final class DictationController: ObservableObject {
             // orphan" the moment the process is killed mid-decode -- so the next
             // launch would decode a truncated copy and treat the complete file as
             // abandoned.
-            let spool = self.recovering ? nil : try? AudioSpool()
+            let spool = isRecovery ? nil : try? AudioSpool()
             var index = 0
             let chunk = 1_600  // 100 ms
             while index < samples.count {
@@ -665,6 +688,10 @@ final class DictationController: ObservableObject {
     /// away. Only spools are touched -- never a file the test flag pointed at.
     private static func discardIfUnreadable(_ url: URL) {
         guard isSpool(url), (try? AVAudioFile(forReading: url)) == nil else { return }
+        // A killed process never closes the file, so the header can be short while
+        // the data chunk is complete -- `readMono16k` recovers those. If the salvage
+        // path can still turn this into samples, it is not an unreadable file.
+        if let salvaged = salvageRawWAV(url), !salvaged.isEmpty { return }
         try? FileManager.default.removeItem(at: url)
     }
 

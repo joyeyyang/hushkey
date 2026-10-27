@@ -64,11 +64,15 @@ enum Core {
             atPath: models.appendingPathComponent("asr/tokens.txt").path
         )
         let dolphin = models.appendingPathComponent("asr/dolphin/model.int8.onnx")
+        let dolphinTokens = manager.fileExists(
+            atPath: models.appendingPathComponent("asr/dolphin/tokens.txt").path
+        )
         // Selecting a SenseVoice folder that is missing its tokens would fail at
         // load time, so a Dolphin install that is complete wins over one that is
-        // not. Checked here as well as in `hasModels`, which draws the same
-        // conclusion on the model screen.
-        if !(sense && senseTokens), manager.fileExists(atPath: dolphin.path) {
+        // not. The Dolphin model is held to the same pair as the one above, because
+        // `hasModels` and `state.rs` both do -- a model-only test here would point
+        // the engine at a folder the other two call incomplete.
+        if !(sense && senseTokens), manager.fileExists(atPath: dolphin.path), dolphinTokens {
             setenv("OVC_ASR_MODEL", "dolphin", 1)
         }
         // `Core_Initialize` only points the engine at the model tree; nothing is

@@ -162,6 +162,22 @@ final class AudioSpool {
             Diagnostics.log.error(
                 "spool unclaim failed: \(error.localizedDescription, privacy: .public)"
             )
+            return
+        }
+        // A rename keeps the old modification date, and `orphans()` only looks at
+        // files between 3 and 600 seconds old. Without this, a sentence put back
+        // after a long outage is never picked up again -- it is neither "queued"
+        // nor reported, it just ages out and `prune` deletes it. The stamp says
+        // "this became available now", which is the truth.
+        do {
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date()], ofItemAtPath: wav.path
+            )
+        } catch {
+            // It is back in the queue either way; only its age is wrong.
+            Diagnostics.log.error(
+                "spool restamp failed: \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 

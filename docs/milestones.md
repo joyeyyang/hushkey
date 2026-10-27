@@ -17,10 +17,11 @@
 | M5 真機安裝與模型 | `[~]` | 需要插線＋付費帳號開 App Group |
 | M6 真機實測 | `[ ]` | 全部，只有真機能量 |
 
-2026-10-27 已跑完 plan／review／debug 四輪複查：review 的 12 項見附錄 A，
+2026-10-27 已跑完 plan／review／debug 五輪複查：review 的 12 項見附錄 A，
 debug 的 7 項見附錄 B，第三輪回頭審「前兩輪修得對不對」找到的 9 項見附錄 C，
-第四輪審第三輪的修法又改了 10 項見附錄 D。文件裡的「佐證」只寫真的跑過的，
-量不到的一律標成「待真機」或「程式碼層」，不寫「應該可以」。
+第四輪審第三輪的修法又改了 10 項見附錄 D，第五輪審第四輪的修法再改 6 項見附錄 E。
+文件裡的「佐證」只寫真的跑過的，量不到的一律標成「待真機」或「程式碼層」，
+不寫「應該可以」。
 
 
 ---
@@ -475,7 +476,7 @@ M5 的程式部分（模型安裝）可以與 M3/M4 平行做，但**真機驗�
 
 | # | 缺陷（原本會怎樣） | 修法 | 驗證 |
 |---|---|---|---|
-| 1 | 保留舊 orphan 之後，同一句會被插兩次：第一次被砍留下完整的 A → 補辨識寫了 B 又被砍 → 下次補 B 並發布 → 再一次啟動撿到 A **再發布一次** | 補辨識前先把選中的檔案 `claim`（改名成 `*.claimed`，`orphans()` 不再看它）。代價是「補辨識本身被砍第二次」時那句話不會交付，所以下次啟動會**明確記錄**一行 `claimed spool(s)`（第四輪把措辭改成 `recovery left N claimed spool(s); they will not be retried`，見附錄 D） | 植兩個 orphan、2.2 秒砍掉補辨識 → 日誌 `recovery abandoned 1 claimed spool(s)`，下一次只補較舊那一份，**沒有重複句** |
+| 1 | 保留舊 orphan 之後，同一句會被插兩次：第一次被砍留下完整的 A → 補辨識寫了 B 又被砍 → 下次補 B 並發布 → 再一次啟動撿到 A **再發布一次** | 補辨識前先把選中的檔案 `claim`（改名成 `*.claimed`，`orphans()` 不再看它）。代價是「補辨識本身被砍第二次」時那句話不會交付，所以下次啟動會**明確記錄**一行 `claimed spool(s)`（第四輪把措辭改成 `recovery left N claimed spool(s); they will not be retried`，見附錄 D） | 植兩個 orphan、2.2 秒砍掉補辨識 → 日誌 `recovery abandoned 1 claimed spool(s)`（當時的字串，第四輪改成 `recovery left …`，見附錄 D 第 8 列），下一次只補較舊那一份，**沒有重複句** |
 | 2 | 補辨識期間對外宣稱 `.recording`：鍵盤顯示「錄音中…」、麥克風卻沒開，使用者說的話完全沒被錄，而且鍵盤的 1.5 秒退路不會啟動（它只認「不是 `.recording`」） | 補辨識改用 `.transcribing`＋「補回上次的錄音…」，`runInjected` 的內部比對也跟著用同一個 phase | 啟動後 2 秒讀共享狀態：`s.phase = transcribing`、`s.detail = 辨識中…`（`runInjected` 先寫「補回上次的錄音…」，`decode()` 緊接著覆寫成「辨識中…」，讀到的是後者） |
 | 3 | `publish` 先刪音檔、後寫共享狀態：中間掛掉就**音檔與文字都沒有** | 先 `SharedStore.publish`，再刪 spool／orphan（代價是兩行之間被砍會重複一次，見本節末） | 程式碼層（順序） |
 | 4 | `mic.start` 已經啟用音訊 session 才在 `engine.start()` 拋錯；此時 `self.mic` 還是 nil，`fail()` 的 `mic?.stop()` 不會收拾 | `fail()` 記住「有沒有 microphone」，沒有的話自己 `setActive(false)`（PiP 模式跳過） | 程式碼層 |
@@ -548,10 +549,61 @@ D. 砍在補辨識的解碼途中（8 秒）：spool 目錄沒有出現半成品
 E. 把內容不是音訊的檔案當成最新 orphan：`dictation failed: 讀不到測試音…`、該檔被刪，
 下一次啟動補回較舊的那份（不會每次啟動都撞同一個壞檔）。
 
-**四輪下來的結論**：能在這台機器上重現的都修了並留了 log；不能重現的（PiP、麥克風失敗、
+**五輪下來的結論**：能在這台機器上重現的都修了並留了 log；不能重現的（PiP、麥克風失敗、
 引擎啟動失敗、`pipLive` 新鮮度、2B 速度）都標成「程式碼層」或「待真機」，沒有寫成已驗證。
 
 ---
+
+## 附錄 E：第五輪複查（審第四輪的修法）之後改掉的東西（2026-10-27）
+
+第四輪修掉「認領的音檔會被吃掉」，第五輪只看那個修法。找到的兩條必修都是**第四輪自己帶進來的**：
+一條把「不是認領的檔案」誤判成別人的、直接刪掉；一條讓「退回佇列」在十分鐘後失效。
+
+| # | 缺陷（原本會怎樣） | 修法 | 驗證 |
+|---|---|---|---|
+| 1 | `fail()` 用**副檔名**判斷「這是我們認領的檔」。`claim` 失敗時 `recoverOrphan` 拿的是原始 `.wav`，此時引擎啟動失敗 → 走 `else` 直接刪掉，**正是這輪要救的那句話被刪**（修正前反而不會刪，因為 `orphanSource` 當時是 nil） | 改成記狀態：`orphanWasClaimed` 在 `runInjected` 同步設定，`fail()` 對「還沒讀到音檔」的一律不刪（認領過的 `unclaim` 回 `.wav`，本來就是 `.wav` 的留在原地） | 程式碼層（模擬器造不出引擎啟動失敗，見下方說明） |
+| 2 | `unclaim` 用 `moveItem` 改名，**mtime 不變**。`orphans()` 只收 3–600 秒的檔，所以「退回佇列」只保證十分鐘；引擎壞更久或使用者隔天才開，那句既不補也不再被提起，最後被 `prune` 刪掉 | `unclaim` 改名後把 mtime 蓋成現在（「它現在才變成可用」是事實） | 見下方 C 組：15 分鐘前的檔案**不會**被補；`touch` 成現在後立刻補回 27 字 |
+| 3 | `discardIfUnreadable` 只看「`AVAudioFile` 開不開得起來」，開不起來就刪——但被砍的 spool 可能標頭短、資料完整（`salvageRawWAV` 救得回來） | 刪之前先試 `salvageRawWAV`，救得回樣本就不刪 | 程式碼層 |
+| 4 | 補辨識失敗時，使用者看到「讀不到**測試音**」「**測試音**是空的」——那句話不是測試音 | 依 `isRecovery` 換成「上次的錄音」 | 程式碼層（模擬器的壞檔案例仍是測試音路徑） |
+| 5 | `Core.initialize` 對 Dolphin 只驗 model 不驗 `tokens.txt`，與 `hasModels`、`state.rs` 的「成對」不一致 | 兩者都要求成對 | 程式碼層（無使用者可見差異，兩條路最後都是同一個載入失敗） |
+| 6 | `runInjected` 在 `work` 佇列上直接讀 `@MainActor` 的 `recovering`；`clear()` 可在餵音途中改它，於是白建一份 spool 再丟掉，Swift 6 嚴格併發也會擋 | 進 `work.async` 之前先抓成 `let isRecovery` | 程式碼層 |
+
+**另一件被指出、但選擇保留的（這次寫進文件，不再只是「知道就好」）**：清除時 `reset()` 會刪掉
+**正在補辨識的那份 `.claimed`**，也就是「清除 = 連上一句已經在補的句子一起丟」。這與 `fail()`
+刻意保留 `.claimed` 的立場相反，但兩者面對的意圖不同：`fail()` 是「不要因為不相干的錯誤弄丟」，
+`clear()` 是「使用者說不要這一點了」。下方 B 組的 log 正好看到這個行為。
+
+**這一輪的實測（模擬器 iPhone 17 / iOS 26.0，`cargo test` 88 項全綠）**
+
+A. 注入 `probe13.wav` → `dictation done: 27 chars`、`s.seq` 24、spool 空（回歸）。
+
+B. `-OVC_CLEAR` ＋ `-OVC_AFTER_CLEAR`，並預先放一份死 `.claimed` 與一份較舊的完整 orphan：
+
+```
+recovery left 1 claimed spool(s); they will not be retried
+recovering spool bbbb0026-long.wav; 1 older one(s) kept
+dictation injected: bbbb0026-long.claimed
+clear requested at launch            ← 落在補辨識途中
+dictation requested after clear
+dictation injected: probe14.wav
+dictation done: 27 chars             ← 沒有 ASR session already active
+（spool 結尾：aaaa0025-old.wav、cccc0027-dead.claimed —— 死檔留著、較舊的完整 orphan 還在）
+```
+
+C. `orphans()` 的 600 秒窗口（第 2 列的前提）：
+
+```
+C1  15 分鐘前的 dddd0028-stale.wav → 沒有任何 recovering 這行，檔案留在 spool
+C2  touch 成現在 → recovering spool dddd0028-stale.wav → dictation done: 27 chars
+```
+
+**第 1 列只能算程式碼層，原因照實寫**：想用「把 ASR 模型 `chmod 000`（檔案還在、但讀不到）」
+製造引擎啟動失敗，`hasModels` 仍回 true，但 App 在模型載入階段就**直接消失**——沒有 crash
+report、日誌停在 `llm model:` 那一行，連補辨識都還沒開始。所以這條分支沒有可重現的觀測，
+只有「`fail()` 讀的是狀態不是副檔名」這個程式碼事實。要真的驗，得等真機上出現一次載入失敗。
+
+---
+
 
 ## 附錄：最基礎五步的實測紀錄（2026-10-27）
 
@@ -610,8 +662,9 @@ xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios -OVC_MERGE_PROBE
 # 清除路徑（2 秒後觸發真正的「清除」動作）
 xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios -OVC_CLEAR
 # 清除後在同一行程再聽寫（看取消有沒有留下沒關的 ASR session）
+# 音檔要給絕對路徑：相對路徑會被解析成 /，探針就靜默不跑了
 xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios \
-  -OVC_CLEAR -OVC_AFTER_CLEAR <wav>
+  -OVC_CLEAR -OVC_AFTER_CLEAR /abs/path/to.wav
 # Push（模擬器不支援，會看到退回 Mode 1 的 log）
 xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios -OVC_PIP_PROBE
 ```
