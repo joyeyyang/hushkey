@@ -16,6 +16,7 @@ models/rag/
 models/embedding/
 models/.cache/
 ios_app/build/
+ios_app/build-device/
 ios_app/vendor/
 ios_app/OfflineVoiceAssistant.xcodeproj/
 ios_app/*.xcworkspace/

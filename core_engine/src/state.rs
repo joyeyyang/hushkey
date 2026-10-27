@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -458,7 +458,7 @@ pub fn refine_text_with_keywords_stages(text: &str, keywords_hint: &str, stages:
         2 => "refine-two-stage",
         _ => "refine",
     };
-    run_worker(&worker_path()?, task, &model, text, keywords_hint)
+    run_task(task, &model, text, keywords_hint)
 }
 
 /// Filename of the LLM inside `llm/`. `OVC_LLM_MODEL` overrides it so another
@@ -469,16 +469,46 @@ const DEFAULT_LLM_FILE: &str = "Qwen3.5-2B-Q4_K_M.gguf";
 /// still has a working model.
 const LEGACY_LLM_FILE: &str = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
 
+/// The filename `OVC_LLM_MODEL` asks for, or the default when the value cannot be
+/// one.
+///
+/// The value is joined onto `<models>/llm/`, so anything able to walk out of that
+/// directory has to be refused BEFORE the join. `file_name() == Some(v)` is the
+/// test that covers all of it: it refuses separators, absolute paths, `..`, and
+/// the bare `.` that the previous `!contains('/') && !contains("..")` let through.
+/// That one was not a security hole -- `.` still resolved inside `llm/` -- but it
+/// handed a DIRECTORY to llama.cpp: `Path::exists()` is true for a directory, so
+/// the engine skipped the legacy fallback, passed `<models>/llm/.` to the worker,
+/// and the user got a model-load failure naming nothing they could act on.
+fn llm_file_name(raw: Option<&str>) -> String {
+    let chosen = match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => v,
+        None => return DEFAULT_LLM_FILE.to_string(),
+    };
+    if is_pure_file_name(chosen) {
+        chosen.to_string()
+    } else {
+        DEFAULT_LLM_FILE.to_string()
+    }
+}
+
+/// Whether `value` can be one component of a path.
+///
+/// A NUL cannot survive in an environment variable, but it can reach this from a
+/// caller that builds the name itself, and every path API refuses it further
+/// down with a less obvious error.
+fn is_pure_file_name(value: &str) -> bool {
+    !value.contains('\0')
+        && !value.contains('/')
+        && Path::new(value).file_name().is_some_and(|name| name == value)
+}
+
 fn llm_model_path() -> Result<PathBuf> {
     let dir = lock()
         .models_dir
         .clone()
         .ok_or_else(|| EngineError::new(ErrorCode::InvalidState, "Core_Initialize has not been called"))?;
-    let chosen = std::env::var("OVC_LLM_MODEL")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty() && !v.contains('/') && !v.contains(".."))
-        .unwrap_or_else(|| DEFAULT_LLM_FILE.to_string());
+    let chosen = llm_file_name(std::env::var("OVC_LLM_MODEL").ok().as_deref());
     let model = dir.join("llm").join(&chosen);
     if model.exists() {
         file_len(&model)?;
@@ -486,11 +516,71 @@ fn llm_model_path() -> Result<PathBuf> {
     }
     let legacy = dir.join("llm").join(LEGACY_LLM_FILE);
     if legacy.exists() {
+        // Falling back is deliberate: an install that has not downloaded the new
+        // default yet keeps working. Staying SILENT was not -- the user picked a
+        // model, got answers from another one, and nothing anywhere said so. The
+        // line is greppable and goes out on the same stderr the worker and the
+        // `voiceinput` CLI already report on, so "the 4B answer looks like the
+        // 1.5B one" can be settled from a log instead of guessed at. (A
+        // Finder-launched app does not redirect the engine's stderr into ova.log
+        // yet; that is the app's side, not this decision's.)
+        eprintln!(
+            "llm model fallback: requested={chosen} not found, using legacy {LEGACY_LLM_FILE}"
+        );
         file_len(&legacy)?;
         return Ok(legacy);
     }
-    file_len(&model)?;
-    Ok(model)
+    // Neither known name is there. An install can hold a model under a different
+    // name -- the iOS app lets one be imported by hand, and the model manager
+    // names downloads after whatever it fetched -- so the directory itself is the
+    // last resort. Without this, a phone holding a perfectly good 0.5B answered
+    // "no model" and the user had nothing to act on.
+    if let Some(found) = biggest_gguf(&dir.join("llm")) {
+        eprintln!(
+            "llm model fallback: requested={chosen} and legacy {LEGACY_LLM_FILE} missing, using {}",
+            found.file_name().unwrap_or_default().to_string_lossy()
+        );
+        file_len(&found)?;
+        return Ok(found);
+    }
+    // Neither file is there. The requested name alone reads as "the path is
+    // wrong"; naming the legacy probe says the install has no LLM at all, which
+    // is the actionable difference.
+    match file_len(&model) {
+        Err(e) => Err(EngineError::new(
+            e.code,
+            format!(
+                "{} (requested={chosen}, legacy {LEGACY_LLM_FILE} is missing too)",
+                e.msg
+            ),
+        )),
+        // Appeared between the probe and here; the file is usable, so use it.
+        Ok(_) => Ok(model),
+    }
+}
+
+/// The largest `.gguf` in `dir`.
+///
+/// Largest rather than first: a directory can hold a leftover from an earlier
+/// download, and a byte comparison picks the model someone actually meant to
+/// install. A quantised 0.5B and a 2B differ by an order of magnitude, so this
+/// never has to guess between two plausible candidates.
+fn biggest_gguf(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("gguf") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        if best.as_ref().map_or(true, |(size, _)| meta.len() > *size) {
+            best = Some((meta.len(), path));
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
 /// Structured meeting summary: 摘要 / 決議 / 待辦.
@@ -512,7 +602,6 @@ fn llm_model_path() -> Result<PathBuf> {
 pub fn summarize_text(transcript: &str) -> Result<String> {
     use crate::{SECTION_ACTIONS, SECTION_DECISIONS, SECTION_SUMMARY};
     let model = llm_model_path()?;
-    let worker = worker_path()?;
     let chunks = crate::chunking::split_text(transcript, SUMMARY_CHUNK_CHARS, SUMMARY_OVERLAP_CHARS);
     if chunks.is_empty() {
         return Err(EngineError::new(ErrorCode::InvalidArg, "transcript is empty"));
@@ -523,14 +612,14 @@ pub fn summarize_text(transcript: &str) -> Result<String> {
     } else {
         let mut notes = Vec::with_capacity(chunks.len());
         for chunk in &chunks {
-            notes.push(run_worker(&worker, "summary", &model, chunk, SECTION_SUMMARY)?);
+            notes.push(run_task("summary", &model, chunk, SECTION_SUMMARY)?);
         }
         notes.join("\n")
     };
-    let summary = run_worker(&worker, "summary", &model, &source, SECTION_SUMMARY)?;
-    let actions = section_or_empty(&run_worker(&worker, "summary", &model, &source, SECTION_ACTIONS)?);
-    let decisions = drop_void_lines(&section_or_empty(&run_worker(
-        &worker, "summary", &model, &source, SECTION_DECISIONS,
+    let summary = run_task("summary", &model, &source, SECTION_SUMMARY)?;
+    let actions = section_or_empty(&run_task("summary", &model, &source, SECTION_ACTIONS)?);
+    let decisions = drop_void_lines(&section_or_empty(&run_task(
+        "summary", &model, &source, SECTION_DECISIONS,
     )?));
     // Each section then has to survive the facts it can be checked against: an
     // owner has to be someone the transcript addresses, a 決議 clause may not name
@@ -614,6 +703,11 @@ fn strip_invented_owners(actions: &str, transcript: &str) -> String {
     if actions == "（無）" || actions.trim().is_empty() {
         return actions.to_string();
     }
+    // Folded once for the whole list, not once per line inside `owner_is_backed`:
+    // the fold does not depend on the line, and the transcript is the largest
+    // string on this path (a meeting runs to thousands of characters), so the
+    // per-line copy made the cost grow with the number of action items.
+    let folded_transcript = transcript.to_lowercase();
     let mut kept: Vec<String> = Vec::new();
     for line in actions.lines() {
         let trimmed = line.trim();
@@ -621,7 +715,7 @@ fn strip_invented_owners(actions: &str, transcript: &str) -> String {
             continue;
         }
         match split_owner(trimmed) {
-            Some((owner, task)) if !owner_is_backed(owner, transcript) => {
+            Some((owner, task)) if !owner_is_backed_in(owner, transcript, &folded_transcript) => {
                 // Keep the bullet so the section still reads as a list.
                 if trimmed.starts_with(['-', '*']) {
                     kept.push(format!("- {task}"));
@@ -650,8 +744,16 @@ const OWNER_CUES_CJK: [&str; 20] = [
 const OWNER_CUES_EN: [&str; 6] = ["will", "please", "could", "can", "should", "'ll"];
 
 /// Whether the transcript supports `owner` as a person it addresses or tasks.
-fn owner_is_backed(owner: &str, transcript: &str) -> bool {
-    let haystack = transcript.to_lowercase();
+///
+/// `folded` is `transcript.to_lowercase()`, supplied by the caller so a whole
+/// action list shares one fold: the fold does not depend on the line, and the
+/// transcript is the largest string on this path.
+///
+/// The window is still cut out of `transcript`, not out of `folded`: the offsets
+/// come from searching the folded copy, and the two agree byte for byte for every
+/// script this app handles. Passing both keeps that behaviour exactly as it was.
+fn owner_is_backed_in(owner: &str, transcript: &str, folded: &str) -> bool {
+    let haystack = folded;
     let needle = owner.to_lowercase();
     if needle.is_empty() {
         return false;
@@ -680,16 +782,21 @@ fn owner_is_backed(owner: &str, transcript: &str) -> bool {
     false
 }
 
-/// Whether `text` names `owner`. A short Latin owner is matched on word
+/// Whether a clause names `owner`. A short Latin owner is matched on word
 /// boundaries so that the owner "I" does not match every English sentence that
 /// contains an "i"; CJK has no such ambiguity.
-fn names_owner(text: &str, owner: &str) -> bool {
+///
+/// `folded` is `clause.to_lowercase()`, supplied by the caller: the summary path
+/// asks the same clause about every owner on the list, and the fold does not
+/// depend on the owner. The Latin test reads `owner`, never the folded text, so
+/// this is a hoist and nothing else.
+fn names_owner_in(folded: &str, owner: &str) -> bool {
     let owner_is_latin = owner.chars().all(|c| c.is_ascii_alphabetic());
-    if !owner_is_latin {
-        return text.to_lowercase().contains(&owner.to_lowercase());
-    }
-    let haystack = text.to_lowercase();
     let needle = owner.to_lowercase();
+    if !owner_is_latin {
+        return folded.contains(&needle);
+    }
+    let haystack = folded;
     let bytes = haystack.as_bytes();
     let mut from = 0;
     while let Some(found) = haystack[from..].find(&needle) {
@@ -758,8 +865,9 @@ fn strip_owner_clauses(decisions: &str, actions: &str) -> String {
 /// because a third-person verb marks neither "Marcus calls the vendor" nor
 /// "Sarah retires in March", and the measured English cases are assignments.
 fn names_an_owner(clause: &str, owners: &[String]) -> bool {
+    let folded = clause.to_lowercase();
     owners.iter().any(|owner| {
-        names_owner(clause, owner) && (!crate::llm::has_cjk(clause) || looks_like_a_task(clause))
+        names_owner_in(&folded, owner) && (!crate::llm::has_cjk(clause) || looks_like_a_task(clause))
     })
 }
 
@@ -912,12 +1020,24 @@ fn split_owner(line: &str) -> Option<(&str, &str)> {
 /// direction: the line restating the clause, or the clause being the line's
 /// content said shorter -- "行銷活動暫緩" against "暫緩行銷活動，等產品穩定再說" is
 /// the same decision twice, and neither direction alone catches both.
-fn restates(line: &[String], clause: &[String], line_text: &str, clause_text: &str) -> bool {
+///
+/// `clause_set` is the same bigrams as `clause`, indexed for membership. The
+/// overlap test asks "does the clause contain this gram" once per line gram, and
+/// `Vec::contains` answers it by scanning, so the pair of loops was quadratic in
+/// two lengths that both grow with the answer. The set is built once per clause by
+/// the caller and cannot disagree with `clause`: it is built from that Vec.
+fn restates(
+    line: &[String],
+    clause: &[String],
+    clause_set: &HashSet<&str>,
+    line_text: &str,
+    clause_text: &str,
+) -> bool {
     const RESTATED: f32 = 0.60;
     if line.is_empty() || clause.is_empty() {
         return false;
     }
-    let shared = line.iter().filter(|gram| clause.contains(*gram)).count();
+    let shared = line.iter().filter(|gram| clause_set.contains(gram.as_str())).count();
     if (shared as f32) / (line.len() as f32) >= RESTATED {
         return true;
     }
@@ -997,9 +1117,17 @@ fn drop_ownerless_restatements(actions: &str, decisions: &str) -> String {
     if actions.trim().is_empty() || actions == "（無）" {
         return actions.to_string();
     }
-    let clauses: Vec<(Vec<String>, String)> = split_clauses(decisions)
-        .into_iter()
-        .map(|(clause, _)| (gram_set(&clause), clause))
+    let clauses = split_clauses(decisions);
+    // Both views of every clause are built once, here, and then reused for every
+    // action line: the clause side of the comparison does not depend on the line,
+    // so folding and splitting it per line was the same work done N times. `grams`
+    // keeps duplicates because the overlap ratio divides by its length, and the set
+    // is what makes each line's membership test O(1); both come from the same
+    // `gram_set` call, so they cannot disagree.
+    let clause_grams: Vec<Vec<String>> = clauses.iter().map(|(clause, _)| gram_set(clause)).collect();
+    let clause_sets: Vec<HashSet<&str>> = clause_grams
+        .iter()
+        .map(|grams| grams.iter().map(String::as_str).collect())
         .collect();
     let kept: Vec<&str> = actions
         .lines()
@@ -1012,8 +1140,8 @@ fn drop_ownerless_restatements(actions: &str, decisions: &str) -> String {
                 return true;
             }
             let grams = gram_set(trimmed);
-            !clauses.iter().any(|(clause_grams, clause_text)| {
-                restates(&grams, clause_grams, trimmed, clause_text)
+            !(0..clauses.len()).any(|i| {
+                restates(&grams, &clause_grams[i], &clause_sets[i], trimmed, &clauses[i].0)
             })
         })
         .collect();
@@ -1034,9 +1162,14 @@ fn has_owner(line: &str) -> bool {
 /// folded to lower case first, so shared words still count. `is_alphanumeric`
 /// covers CJK ideographs (they are Alphabetic) but not CJK punctuation, which is
 /// what separates 上線 from the ：and ，around it.
+///
+/// The fold still runs on the whole string, not per character: `str::to_lowercase`
+/// maps some characters to more than one (`İ` becomes "i̇"), and filtering the
+/// folded text is what decides those. Only the intermediate `cleaned` String is
+/// gone -- the characters are collected straight out of the fold.
 fn gram_set(text: &str) -> Vec<String> {
-    let cleaned: String = text.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
-    let chars: Vec<char> = cleaned.chars().collect();
+    let folded = text.to_lowercase();
+    let chars: Vec<char> = folded.chars().filter(|c| c.is_alphanumeric()).collect();
     if chars.len() < 2 {
         return chars.iter().map(|c| c.to_string()).collect();
     }
@@ -1051,7 +1184,7 @@ fn gram_set(text: &str) -> Vec<String> {
 /// half-translated. `target` is "en" or "zh".
 pub fn translate_text(text: &str, target: &str) -> Result<String> {
     let model = llm_model_path()?;
-    run_worker(&worker_path()?, "translate", &model, text, target)
+    run_task("translate", &model, text, target)
 }
 
 /// Apply a dictated edit instruction to text the app already produced.
@@ -1069,15 +1202,179 @@ pub fn translate_text(text: &str, target: &str) -> Result<String> {
 /// `instruction` is the spoken instruction ("把第二點改成禮拜五下午兩點").
 pub fn edit_text(text: &str, instruction: &str) -> Result<String> {
     let model = llm_model_path()?;
-    run_worker(&worker_path()?, "edit", &model, text, instruction)
+    run_task("edit", &model, text, instruction)
 }
 
 /// Map chunk size in characters and the overlap between adjacent chunks.
 const SUMMARY_CHUNK_CHARS: usize = 600;
 const SUMMARY_OVERLAP_CHARS: usize = 20;
 
+/// Runs one LLM task, wherever the weights are able to live.
+///
+/// On macOS they live in a separate worker process: it loads the model, answers
+/// one request, and exits, so the weights and their Metal buffers go back to the
+/// OS instead of sitting in the parent's peak RSS. iOS cannot spawn a process at
+/// all, so the same task runs inside this one and the weights are dropped when
+/// the call returns.
+///
+/// The branch is compiled, not tested at runtime: on iOS there is no worker to be
+/// missing, and reporting one would be a lie dressed up as a diagnosable error.
+/// The file that answered the most recent LLM task.
+///
+/// A downgrade is invisible in the answer itself -- a 0.5B sentence reads like a
+/// 2B one -- so the caller cannot tell from the text whether the preferred model
+/// ran. This records it, and `LLM_LastModelName` hands it over. The iOS app uses
+/// it to remember a failure across launches instead of paying for it again on
+/// every dictation; on macOS it is only diagnostic.
+static LAST_MODEL: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn last_llm_model() -> Option<String> {
+    LAST_MODEL.lock().ok().and_then(|slot| slot.clone())
+}
+
+fn record_served_model(model: &Path) {
+    if let Ok(mut slot) = LAST_MODEL.lock() {
+        *slot = Some(file_label(model));
+    }
+}
+
+fn run_task(task: &str, model: &Path, text: &str, instruction: &str) -> Result<String> {
+    match run_task_once(task, model, text, instruction) {
+        Ok(out) => {
+            record_served_model(model);
+            Ok(out)
+        }
+        Err(first) => {
+            // The preferred model is what the manifest ships, and it is what runs
+            // unless it cannot. A phone that is short on memory, or a Metal path
+            // that never returns, fails here rather than at install time -- so the
+            // fallback has to live at the call, and it has to say out loud that it
+            // happened. A silent downgrade would make a 0.5B answer look like a
+            // 2B one, which is exactly the confusion the model manager exists to
+            // prevent.
+            let Some(fallback) = llm_fallback_path(model) else {
+                eprintln!(
+                    "llm model failure: {} could not run ({}); no smaller model installed",
+                    file_label(model),
+                    first.msg
+                );
+                return Err(first);
+            };
+            eprintln!(
+                "llm model downgrade: {} failed ({}); retrying with {}",
+                file_label(model),
+                first.msg,
+                file_label(&fallback)
+            );
+            match run_task_once(task, &fallback, text, instruction) {
+                Ok(out) => {
+                    record_served_model(&fallback);
+                    eprintln!(
+                        "llm model downgrade: {} answered after {} failed",
+                        file_label(&fallback),
+                        file_label(model)
+                    );
+                    Ok(out)
+                }
+                Err(second) => {
+                    eprintln!(
+                        "llm model downgrade: {} failed too ({}); no model could run this task",
+                        file_label(&fallback),
+                        second.msg
+                    );
+                    Err(second)
+                }
+            }
+        }
+    }
+}
+
+/// One attempt, on the platform's own mechanism.
+fn run_task_once(task: &str, model: &Path, text: &str, instruction: &str) -> Result<String> {
+    #[cfg(target_os = "ios")]
+    {
+        run_in_process(task, model, text, instruction)
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        run_worker(&worker_path()?, task, model, text, instruction)
+    }
+}
+
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// The model to try when `current` will not run.
+///
+/// `OVC_LLM_MODEL_FALLBACK` names it explicitly. Otherwise it is the largest
+/// `llm/*.gguf` **smaller** than the one that just failed: the only reason to be
+/// here is that the preferred model asked for more memory or time than this device
+/// has, so the next candidate should ask for less, and the biggest such model is
+/// the best quality that still fits.
+///
+/// Returns `None` when nothing smaller is installed -- there is no point
+/// retrying the same file, and there is nothing else to guess at.
+fn llm_fallback_path(current: &Path) -> Option<PathBuf> {
+    let dir = current.parent()?;
+
+    let named = std::env::var("OVC_LLM_MODEL_FALLBACK")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| is_pure_file_name(v));
+    if let Some(named) = named {
+        let path = dir.join(named);
+        if path.is_file() && path != current {
+            return Some(path);
+        }
+        // A name that is not there is worth reporting: the operator asked for a
+        // specific fallback and the engine used the size-based one instead.
+        eprintln!("llm model downgrade: OVC_LLM_MODEL_FALLBACK is not an installed file, ignoring it");
+    }
+
+    let current_len = std::fs::metadata(current).ok().map(|meta| meta.len()).unwrap_or(u64::MAX);
+    let mut best: Option<(u64, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path == current || path.extension().and_then(|e| e.to_str()) != Some("gguf") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() || meta.len() >= current_len {
+            continue;
+        }
+        if best.as_ref().map_or(true, |(size, _)| meta.len() > *size) {
+            best = Some((meta.len(), path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+/// The worker's task names, answered by the functions the worker itself calls.
+///
+/// The mapping is written out twice on purpose: it is the contract between
+/// `ovc-llm-worker` and this function, the compiler cannot check a string, and a
+/// silent fallback would turn a typo into a wrong answer instead of an error.
+#[cfg(target_os = "ios")]
+fn run_in_process(task: &str, model: &Path, text: &str, instruction: &str) -> Result<String> {
+    match task {
+        "refine" => crate::llm::refine_with_keywords(model, text, instruction),
+        "refine-two-stage" => crate::llm::refine_two_stage(model, text, instruction),
+        "summary" => crate::llm::summarize_one(model, instruction, text),
+        "translate" => crate::llm::translate(model, text, instruction),
+        "edit" => crate::llm::edit_with_instruction(model, text, instruction),
+        other => Err(EngineError::new(
+            ErrorCode::Internal,
+            format!("unknown LLM task: {other}"),
+        )),
+    }
+}
+
 /// The worker is installed next to the core library (Contents/Frameworks in the app bundle),
 /// or next to the current executable for development runs.
+#[cfg(not(target_os = "ios"))]
 fn worker_path() -> Result<PathBuf> {
     // An explicit path wins, so the engine can be embedded by a caller whose
     // worker does not sit beside its own executable (the command-line tool, a
@@ -1108,6 +1405,7 @@ fn worker_path() -> Result<PathBuf> {
     ))
 }
 
+#[cfg(not(target_os = "ios"))]
 fn run_worker(worker: &Path, task: &str, model: &Path, text: &str, instruction: &str) -> Result<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -1143,10 +1441,124 @@ fn run_worker(worker: &Path, task: &str, model: &Path, text: &str, instruction: 
 #[cfg(test)]
 mod tests {
     use super::{
-        action_owners, drop_ownerless_restatements, drop_void_lines, has_owner, names_owner,
-        normalize_action_lines, owner_is_backed, section_or_empty, strip_invented_owners,
-        strip_owner_clauses,
+        action_owners, biggest_gguf, drop_ownerless_restatements, drop_void_lines, has_owner,
+        llm_fallback_path, llm_file_name, normalize_action_lines, section_or_empty,
+        strip_invented_owners, strip_owner_clauses, DEFAULT_LLM_FILE,
     };
+
+    /// Production folds the transcript once and passes it down, so a whole action
+    /// list shares the fold. These tests only care about the matching rule, so the
+    /// fold happens here.
+    fn owner_is_backed(owner: &str, transcript: &str) -> bool {
+        super::owner_is_backed_in(owner, transcript, &transcript.to_lowercase())
+    }
+
+    fn names_owner(text: &str, owner: &str) -> bool {
+        super::names_owner_in(&text.to_lowercase(), owner)
+    }
+
+    /// `OVC_LLM_MODEL` is joined onto `<models>/llm/`, so only a bare filename may
+    /// survive it. The bare `.` used to pass the old filter -- no separator, no
+    /// ".." -- and `exists()` is true for the directory it names, so the engine
+    /// handed `<models>/llm/.` to the worker as if it were the model file.
+    #[test]
+    fn only_a_bare_filename_is_accepted_as_the_model() {
+        for accepted in ["Qwen3.5-4B-Q4_K_M.gguf", "model.v2.gguf", "..Qwen.gguf"] {
+            assert_eq!(llm_file_name(Some(accepted)), accepted, "accepted: {accepted:?}");
+        }
+        for rejected in [
+            "",
+            "   ",
+            ".",
+            "..",
+            " .. ",
+            "/etc/passwd",
+            "../escape.gguf",
+            "sub/model.gguf",
+            "llm/",
+            "nul\0byte.gguf",
+        ] {
+            assert_eq!(
+                llm_file_name(Some(rejected)),
+                DEFAULT_LLM_FILE,
+                "rejected: {rejected:?}"
+            );
+        }
+        assert_eq!(llm_file_name(None), DEFAULT_LLM_FILE);
+    }
+
+    /// The default is the manifest's 2B. A downgrade is never the default answer:
+    /// it only happens at the call that could not run the preferred model.
+    #[test]
+    fn the_default_model_is_the_two_billion_one() {
+        assert_eq!(DEFAULT_LLM_FILE, "Qwen3.5-2B-Q4_K_M.gguf");
+    }
+
+    /// The fallback is the largest model SMALLER than the one that failed.
+    ///
+    /// That ordering is the whole rule: the only reason to reach this code is
+    /// that the preferred model asked for more memory or time than the device
+    /// had, so the candidate that replaces it has to ask for less -- and among
+    /// those, the biggest is the best quality that still fits.
+    #[test]
+    fn the_fallback_is_the_largest_model_smaller_than_the_one_that_failed() {
+        let dir = std::env::temp_dir().join(format!("ovc-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let big = dir.join("Qwen3.5-2B-Q4_K_M.gguf");
+        let small = dir.join("qwen2.5-0.5b-instruct-q4_k_m.gguf");
+        let tiny = dir.join("tiny.gguf");
+        std::fs::write(&big, vec![0u8; 4096]).unwrap();
+        std::fs::write(&small, vec![0u8; 1024]).unwrap();
+        std::fs::write(&tiny, vec![0u8; 128]).unwrap();
+        // Not a model, and bigger than nothing: must never be chosen.
+        std::fs::write(dir.join("notes.txt"), vec![0u8; 64]).unwrap();
+
+        std::env::remove_var("OVC_LLM_MODEL_FALLBACK");
+        assert_eq!(
+            llm_fallback_path(&big).as_deref(),
+            Some(small.as_path()),
+            "the largest model below the 2B"
+        );
+        assert_eq!(
+            llm_fallback_path(&small).as_deref(),
+            Some(tiny.as_path()),
+            "one step further down"
+        );
+        assert_eq!(llm_fallback_path(&tiny), None, "nothing smaller is installed");
+
+        // An operator's explicit choice wins over the size rule.
+        std::env::set_var("OVC_LLM_MODEL_FALLBACK", "tiny.gguf");
+        assert_eq!(llm_fallback_path(&big).as_deref(), Some(tiny.as_path()));
+        // A name that is not installed falls back to the size rule rather than
+        // failing: the operator's intent still points downward.
+        std::env::set_var("OVC_LLM_MODEL_FALLBACK", "missing.gguf");
+        assert_eq!(llm_fallback_path(&big).as_deref(), Some(small.as_path()));
+        std::env::remove_var("OVC_LLM_MODEL_FALLBACK");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The last resort when neither known filename is installed -- the shape a
+    /// phone is in after a model was dropped into `llm/` by hand.
+    #[test]
+    fn the_directory_fallback_picks_the_largest_installed_model() {
+        let dir = std::env::temp_dir().join(format!("ovc-biggest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.gguf");
+        let b = dir.join("b.gguf");
+        std::fs::write(&a, vec![0u8; 64]).unwrap();
+        std::fs::write(&b, vec![0u8; 256]).unwrap();
+        std::fs::write(dir.join("c.bin"), vec![0u8; 999]).unwrap();
+
+        assert_eq!(biggest_gguf(&dir).as_deref(), Some(b.as_path()));
+        std::fs::remove_file(&b).unwrap();
+        assert_eq!(biggest_gguf(&dir).as_deref(), Some(a.as_path()));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(biggest_gguf(&dir), None, "a missing directory is not an error");
+    }
 
     /// The model's "nothing here" answers, in every shape seen in testing.
     #[test]

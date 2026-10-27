@@ -77,8 +77,19 @@ enum Diagnostics {
 
         lines.append(Line(
             label: "models",
-            value: "\(SharedStore.hasModels ? "found" : "missing") · \(SharedStore.modelsDir.path)",
+            value: "\(SharedStore.hasModels ? "found" : "missing") · \(SharedStore.modelsRoot.path)",
             ok: SharedStore.hasModels
+        ))
+
+        // Which LLM will actually run. A downgrade is a decision made on the
+        // user's behalf, so every launch states it rather than leaving the reason
+        // buried in the launch that recorded it.
+        let llm = LLMPolicy.recorded
+        lines.append(Line(
+            label: "llm",
+            value: llm.map { "\($0.from) → \($0.to) · \($0.reason)" }
+                ?? "preferred · \(LLMPolicy.preferredInstalled?.name ?? "none installed")",
+            ok: SharedStore.hasLLM
         ))
 
         return lines

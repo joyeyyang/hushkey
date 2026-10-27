@@ -46,7 +46,12 @@ struct RootView: View {
     @ObservedObject private var dictation = DictationController.shared
     @State private var modelsReady = SharedStore.hasModels
     @State private var importing = false
+    @State private var showingModels = false
+    @State private var mode = SharedStore.mode
+    /// What Mode 2 has to say when it cannot run on this device.
+    @State private var modeNotice: String?
     @State private var copied = false
+    @State private var refine = SharedStore.refineEnabled
 
     private let ink = Color(red: 0.93, green: 0.90, blue: 0.86)
     private let dim = Color(red: 0.58, green: 0.55, blue: 0.51)
@@ -63,12 +68,42 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showingModels) {
+            ZStack {
+                paper.ignoresSafeArea()
+                modelsView
+            }
+            .preferredColorScheme(.dark)
+        }
         .onOpenURL { url in
             // The keyboard's microphone button. Cold launch and re-entry both
             // land here, and both should start recording immediately.
             if url.host == "record", modelsReady { dictation.start() }
         }
         .onAppear {
+            // Before any check: the model screen's whole point is to be a place
+            // the user can put something, so the folders exist first and the
+            // status is recomputed from what is actually on disk.
+            SharedStore.prepareModelDirs()
+            modelsReady = SharedStore.hasModels
+            // Mode 2's trigger: the keyboard asks over the group, and nothing
+            // switches apps.
+            SharedStore.observeRecordRequest { [dictation] in
+                guard SharedStore.mode == .pip else { return }
+                dictation.start()
+            }
+            // Launch flag: the simulator cannot be tapped from a script, and
+            // "does this device support PiP at all" is exactly the question that
+            // needs an answer on paper rather than in a comment.
+            if ProcessInfo.processInfo.arguments.contains("-OVC_PIP_PROBE") {
+                mode = .pip
+                SharedStore.mode = .pip
+                Diagnostics.log.notice("pip probe: requested at launch")
+                // The anchor view is installed during the first layout pass,
+                // which can land after `onAppear`; one turn of the run loop later
+                // it is there.
+                DispatchQueue.main.async { startPiP() }
+            }
             guard modelsReady else { return }
             dictation.prewarm()
             // Audio from a run the system killed before it could publish.
@@ -105,6 +140,16 @@ struct RootView: View {
                 Text("聽寫").font(.system(size: 30, weight: .semibold, design: .serif))
                     .foregroundStyle(ink)
                 Spacer()
+                // An icon, not the word "模型": the status word beside it can be
+                // the word 完成 too, and two of them read as two buttons.
+                Button {
+                    showingModels = true
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(dim)
                 Text(statusWord)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(statusColor)
@@ -161,6 +206,39 @@ struct RootView: View {
                 .disabled(displayText.isEmpty && dictation.phase == .idle)
             }
 
+            // The same switch the desktop has, and the same default: the cleanup
+            // pass is what makes a transcript readable to someone else, so it is on
+            // until a user says otherwise.
+            Toggle(isOn: Binding(
+                get: { refine },
+                set: { refine = $0; SharedStore.refineEnabled = $0 }
+            )) {
+                HStack(spacing: 6) {
+                    Text("AI 整理").font(.system(size: 13))
+                    Text("標點、去贅字、保留原意")
+                        .font(.system(size: 11))
+                        .foregroundStyle(dim)
+                }
+            }
+            .tint(seal)
+            .disabled(dictation.isBusy)
+
+            // Mode 1 / Mode 2. Flat, two words, current one underlined -- the
+            // same shape as the rest of this screen rather than a segmented
+            // control.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 16) {
+                    modeButton("跳回 App", .toApp)
+                    modeButton("留在原 App（小窗）", .pip)
+                }
+                if let modeNotice {
+                    Text(modeNotice)
+                        .font(.system(size: 11))
+                        .foregroundStyle(seal)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             Button {
                 if dictation.isRecording {
                     dictation.stop()
@@ -201,45 +279,248 @@ struct RootView: View {
         }
     }
 
+    // MARK: pip
+
+    private func modeButton(_ title: String, _ target: SharedStore.Mode) -> some View {
+        Button {
+            mode = target
+            SharedStore.mode = target
+            if target == .pip {
+                startPiP()
+            } else {
+                PiPController.shared.stop()
+                modeNotice = nil
+            }
+        } label: {
+            Text(title)
+                .font(.system(size: 12, weight: mode == target ? .semibold : .regular))
+                .foregroundStyle(mode == target ? ink : dim)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(mode == target ? ink : .clear)
+                        .frame(height: 1)
+                        .offset(y: 3)
+                }
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Starts the PiP window, and says so in the UI when the device will not.
+    ///
+    /// Silence here is the failure mode worth preventing: a user who picks "stay
+    /// in the other app" and gets a microphone button that does nothing has no
+    /// way to tell whether they mis-tapped or the device refused.
+    private func startPiP() {
+        Diagnostics.log.notice("pip: start requested")
+        // PiP anchors to a view that is on screen, and the key window is exactly
+        // that whenever the user can tap the switch. Reading it here rather than
+        // threading a SwiftUI placeholder through state removes a hand-off that
+        // has no failure mode worth owning.
+        let host = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?
+            .windows.first { $0.isKeyWindow }
+        guard let anchor = host else {
+            Diagnostics.log.error("pip: no key window yet; Mode 2 deferred")
+            modeNotice = "小窗還沒準備好，稍後再試一次。"
+            return
+        }
+        guard PiPController.isSupported else {
+            // The simulator is the usual reason, and it is not a bug to work
+            // around: no call-style PiP there, so Mode 2 cannot be demonstrated
+            // off-device. Say it in the log rather than only on screen.
+            Diagnostics.log.error("pip: unsupported on this device; falling back to Mode 1")
+            modeNotice = "這台裝置不支援小窗（PiP），已改回跳回 App。"
+            mode = .toApp
+            SharedStore.mode = .toApp
+            return
+        }
+        PiPController.shared.start(in: anchor)
+        modeNotice = "小窗會在本 App 切到背景後出現。"
+    }
+
     // MARK: models
 
     private var modelsView: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("還沒有語音模型").font(.system(size: 26, weight: .semibold, design: .serif))
-                .foregroundStyle(ink)
-            Text("這台裝置上找不到 Dolphin 辨識模型。選一個含 `asr/` 的 models 資料夾，它會被複製進 App。")
-                .font(.system(size: 14)).foregroundStyle(dim)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("模型").font(.system(size: 26, weight: .semibold, design: .serif))
+                        .foregroundStyle(ink)
+                    Spacer()
+                    // Reachable from the recorder too, so a model can be replaced
+                    // -- or a downgrade reviewed -- without uninstalling anything.
+                    if SharedStore.hasModels {
+                        Button("完成") { showingModels = false }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 14))
+                            .foregroundStyle(dim)
+                    }
+                }
+                Text(SharedStore.hasModels
+                     ? "辨識模型與 AI 整理模型都只留在這台裝置上。"
+                     : "辨識模型是必要的，AI 整理模型是選用的。兩者都只留在這台裝置上。")
+                    .font(.system(size: 14)).foregroundStyle(dim)
 
-            Button("選擇 models 資料夾") { importing = true }
-                .buttonStyle(QuietButton())
+                modelRow(
+                    title: "辨識模型",
+                    detail: "asr/dolphin/model.int8.onnx 與 tokens.txt",
+                    ready: SharedStore.hasModels,
+                    required: true
+                )
+                modelRow(
+                    title: "AI 整理模型",
+                    detail: "llm/ 裡放一個 .gguf（預設 \(LLMPolicy.preferredName)）",
+                    ready: SharedStore.hasLLM,
+                    required: false
+                )
 
-            Text(SharedStore.modelsDir.path)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(dim)
-                .textSelection(.enabled)
+                Button("選擇檔案或資料夾匯入") { importing = true }
+                    .buttonStyle(QuietButton())
 
-            Spacer()
+                if let downgrade = LLMPolicy.recorded {
+                    // A downgrade is a decision the app made on the user's behalf,
+                    // so it has to be visible and reversible -- otherwise "the AI
+                    // cleanup got worse" has no explanation anywhere.
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("AI 整理已降級")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(ink)
+                        Text("\(downgrade.from) → \(downgrade.to)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(dim)
+                        Text(downgrade.reason)
+                            .font(.system(size: 12))
+                            .foregroundStyle(dim)
+                        Button("重新嘗試大模型") {
+                            LLMPolicy.clear()
+                            modelsReady = SharedStore.hasModels
+                        }
+                        .buttonStyle(QuietButton())
+                        .padding(.top, 2)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(seal.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+
+                // The path a phone can actually reach. On a device the importer
+                // is the only way in *while the app is open*; with file sharing
+                // on, Finder and the Files app write to the same folder with the
+                // app closed, which is what makes a 100 MB model installable
+                // without a cable and Xcode.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("也可以用 Finder 或「檔案」App 放進去")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(ink)
+                    Text("我的 iPhone › 語音輸入 › models\n（asr/ 與 llm/ 兩個資料夾已經建好了）")
+                        .font(.system(size: 12))
+                        .foregroundStyle(dim)
+                    Text(SharedStore.modelsRoot.path)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(dim)
+                        .textSelection(.enabled)
+                }
+                .padding(.top, 4)
+
+                Spacer(minLength: 0)
+            }
+            .padding(24)
         }
-        .padding(24)
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.folder]) { result in
-            guard case .success(let url) = result else { return }
-            importModels(from: url)
+        .fileImporter(
+            isPresented: $importing,
+            allowedContentTypes: [.folder, .data],
+            allowsMultipleSelection: true
+        ) { result in
+            guard case .success(let urls) = result else { return }
+            importModels(from: urls)
         }
     }
 
-    private func importModels(from url: URL) {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+    private func modelRow(title: String, detail: String, ready: Bool, required: Bool) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: ready ? "checkmark.circle.fill" : (required ? "circle.dashed" : "circle"))
+                .font(.system(size: 15))
+                .foregroundStyle(ready ? ink : dim)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(title).font(.system(size: 14, weight: .medium)).foregroundStyle(ink)
+                    Text(ready ? "已安裝" : (required ? "未安裝" : "未安裝 · 選用"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(dim)
+                }
+                Text(detail)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(dim)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Color.white.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    /// Copies whatever the user picked into the model tree.
+    ///
+    /// Three shapes arrive here and the UI cannot tell them apart beforehand: a
+    /// `models/` folder to merge, an `asr/` or `llm/` folder to drop in place, or
+    /// loose files. The extension is the only reliable classifier for the loose
+    /// ones, so it decides -- a `.gguf` filed under `asr/` would simply never be
+    /// found again.
+    private func importModels(from urls: [URL]) {
         let dest = SharedStore.modelsDir
         DispatchQueue.global(qos: .userInitiated).async {
-            try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
-            let items = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
-            for item in items {
-                let target = dest.appendingPathComponent(item.lastPathComponent)
-                try? FileManager.default.removeItem(at: target)
-                try? FileManager.default.copyItem(at: item, to: target)
+            SharedStore.prepareModelDirs()
+            let manager = FileManager.default
+
+            func contents(_ dir: URL) -> [URL] {
+                (try? manager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
             }
-            DispatchQueue.main.async { modelsReady = SharedStore.hasModels }
+
+            func copy(_ from: URL, _ to: URL) {
+                try? manager.removeItem(at: to)
+                try? manager.copyItem(at: from, to: to)
+            }
+
+            func place(_ url: URL) {
+                let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                guard isDir else {
+                    switch url.pathExtension.lowercased() {
+                    case "gguf":
+                        copy(url, dest.appendingPathComponent("llm").appendingPathComponent(url.lastPathComponent))
+                    case "onnx", "txt", "json":
+                        copy(url, dest.appendingPathComponent("asr/dolphin").appendingPathComponent(url.lastPathComponent))
+                    default:
+                        break
+                    }
+                    return
+                }
+
+                let name = url.lastPathComponent
+                if name == "asr" || name == "llm" {
+                    // Picked the tree itself: its contents go in beside the
+                    // existing ones rather than one level deeper.
+                    for item in contents(url) {
+                        copy(item, dest.appendingPathComponent(name).appendingPathComponent(item.lastPathComponent))
+                    }
+                } else {
+                    // `models/`, or any folder the user made: descend.
+                    for item in contents(url) {
+                        place(item)
+                    }
+                }
+            }
+
+            for url in urls {
+                let scoped = url.startAccessingSecurityScopedResource()
+                place(url)
+                if scoped { url.stopAccessingSecurityScopedResource() }
+            }
+
+            DispatchQueue.main.async {
+                modelsReady = SharedStore.hasModels
+                if modelsReady { dictation.prewarm() }
+            }
         }
     }
 }

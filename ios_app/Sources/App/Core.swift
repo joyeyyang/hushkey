@@ -38,6 +38,10 @@ enum Core {
     static func initialize(models: URL) throws {
         guard !initialized else { return }
         try check(Core_Initialize(models.path))
+        // A model that could not keep up on this device stays downgraded until
+        // the user asks otherwise, so the choice has to be in the environment
+        // before the first LLM task.
+        LLMPolicy.apply()
         // The core ships two recognisers and prefers SenseVoice (240 MB) unless
         // `OVC_ASR_MODEL` says otherwise. There is no shell on iOS, so the app
         // states the choice itself -- but only when SenseVoice is genuinely absent,
@@ -89,6 +93,36 @@ enum Core {
         defer { Core_FreeString(p) }
         return String(cString: p)
     }
+
+    /// The cleanup pass: punctuation, no filler, the speaker's own words.
+    ///
+    /// Same C ABI the desktop calls, but a different place underneath. macOS hands
+    /// the work to `ovc-llm-worker` so the weights leave the parent's memory when
+    /// it exits; iOS cannot fork, so the core runs the model in this process and
+    /// drops it when the call returns. The caller sees no difference.
+    ///
+    /// `keywords` stays empty: the product decided a stored keyword list fed to the
+    /// model made it invent terms rather than spell them better.
+    static func refine(_ text: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_RefineTextWithKeywords(text, "", &out))
+        guard let p = out else { return text }
+        defer { Core_FreeString(p) }
+        let refined = String(cString: p).trimmingCharacters(in: .whitespacesAndNewlines)
+        return refined.isEmpty ? text : refined
+    }
+
+    /// The file that actually answered the last LLM task.
+    ///
+    /// Not what was asked for: the core retries with a smaller model when the
+    /// preferred one cannot run, and returns that model's text without saying so.
+    /// Empty before any task.
+    static func lastModelName() -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        guard LLM_LastModelName(&out) == 0, let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
 }
 
 /// Microphone in, 16 kHz mono float32 out.
@@ -101,10 +135,18 @@ final class MicCapture {
 
     var onSamples: (([Float]) -> Void)?
 
-    func start() throws {
+    func start(keepAlive: Bool = false) throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .measurement,
-                                options: [.duckOthers, .defaultToSpeaker])
+        // `keepAlive` is Mode 2: the PiP window is only held open by an active
+        // audio session, so deactivating it here (or ducking everyone else into
+        // silence) would drop the window the app is living inside.
+        if keepAlive {
+            try session.setCategory(.playAndRecord, mode: .spokenAudio,
+                                    options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
+        } else {
+            try session.setCategory(.playAndRecord, mode: .measurement,
+                                    options: [.duckOthers, .defaultToSpeaker])
+        }
         try session.setActive(true, options: .notifyOthersOnDeactivation)
 
         let input = engine.inputNode
@@ -139,9 +181,12 @@ final class MicCapture {
         try engine.start()
     }
 
-    func stop() {
+    func stop(keepAlive: Bool = false) {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
+        // Deactivating tears down the PiP keep-alive too, so a caller inside
+        // Mode 2 leaves the session up on purpose.
+        guard !keepAlive else { return }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 }

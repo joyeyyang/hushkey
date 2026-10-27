@@ -41,6 +41,20 @@ final class DictationController: ObservableObject {
     private var gate: SilenceGate?
     private var pollTimer: Timer?
     private var background: UIBackgroundTaskIdentifier = .invalid
+    /// The transcript as heard, kept while the cleanup pass runs so a timeout can
+    /// publish it instead of losing it.
+    private var pendingRaw: String?
+    /// Bounds the cleanup pass. A model that never returns would otherwise leave
+    /// the keyboard on "整理中…" forever, and the sentence -- already decoded and
+    /// sitting in `pendingRaw` -- would never be handed over.
+    private var refineTimer: Timer?
+    /// A spool file inherited from a killed run. Removed once its words are
+    /// published, so a second crash does not lose the sentence.
+    private var orphanSource: URL?
+    /// Set when the audio came back from disk after the system killed the app.
+    /// That sentence has already cost the user one attempt, so it is published as
+    /// heard rather than risking the slow path again.
+    private var skipRefine = false
 
     // MARK: start
 
@@ -54,7 +68,7 @@ final class DictationController: ObservableObject {
         guard SharedStore.hasModels else { return }
         work.async {
             do {
-                try Core.initialize(models: SharedStore.modelsDir)
+                try Core.initialize(models: SharedStore.modelsRoot)
                 Diagnostics.log.notice("recogniser ready")
             } catch {
                 Diagnostics.log.error("prewarm failed: \(error.localizedDescription, privacy: .public)")
@@ -84,7 +98,7 @@ final class DictationController: ObservableObject {
     private func openMicrophone() {
         work.async {
             do {
-                try Core.initialize(models: SharedStore.modelsDir)
+                try Core.initialize(models: SharedStore.modelsRoot)
                 try Core.start()
             } catch {
                 DispatchQueue.main.async { self.fail(error.localizedDescription) }
@@ -110,7 +124,7 @@ final class DictationController: ObservableObject {
                 gate.consume(samples)
             }
 
-            try mic.start()
+            try mic.start(keepAlive: SharedStore.mode == .pip)
             self.spool = spool
             self.mic = mic
             self.gate = gate
@@ -131,7 +145,7 @@ final class DictationController: ObservableObject {
         pollTimer = nil
 
         mic?.onSamples = nil
-        mic?.stop()
+        mic?.stop(keepAlive: SharedStore.mode == .pip)
         mic = nil
         gate = nil
 
@@ -154,21 +168,98 @@ final class DictationController: ObservableObject {
         }
     }
 
-    private func complete(_ out: String, reason: String) {
-        spool?.discard()
-        spool = nil
-        endBackground()
-
-        guard !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    private func complete(_ raw: String, reason: String) {
+        guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            spool?.discard()
+            spool = nil
+            endBackground()
             fail("沒有聽到聲音。再說一次，靠近一點。")
             return
         }
 
-        transcript = out
+        transcript = raw
+        live = ""
+
+        guard SharedStore.refineEnabled, !skipRefine else {
+            publish(raw, detail: reason.isEmpty ? "已辨識" : "已辨識 · \(reason)")
+            return
+        }
+
+        // The cleanup pass, on the same background time the decode started. If it
+        // does not finish, the transcript is published as heard rather than
+        // dropped: a rough sentence is still the user's sentence.
+        pendingRaw = raw
+        phase = .refining
+        SharedStore.setPhase(.refining, detail: "整理中…")
+        startRefineDeadline()
+
+        work.async {
+            var failure: String?
+            let refined: String
+            do {
+                refined = try Core.refine(raw)
+            } catch {
+                refined = raw
+                failure = error.localizedDescription
+            }
+            let served = Core.lastModelName()
+            DispatchQueue.main.async {
+                guard self.phase == .refining else { return }
+                if let failure {
+                    Diagnostics.log.error("refine failed: \(failure, privacy: .public)")
+                    self.publish(refined, detail: "已辨識 · 整理失敗")
+                } else {
+                    // Which model answered is a fact the core reports, not
+                    // something to infer from how long the pass took.
+                    LLMPolicy.recordIfDowngraded(
+                        served: served,
+                        reason: "整理時 \(LLMPolicy.preferredName) 無法執行，改用 \(served)"
+                    )
+                    self.publish(refined, detail: reason.isEmpty ? "已整理" : "已整理 · \(reason)")
+                }
+            }
+        }
+    }
+
+    /// Hands over the unedited transcript if the cleanup pass overruns.
+    ///
+    /// Below the ~30 seconds iOS allows a backgrounded app, so the app decides
+    /// what happens rather than racing the system's own deadline: a phone that is
+    /// busy gives the user their words a few seconds early instead of losing the
+    /// pass to a kill it cannot log.
+    private func startRefineDeadline() {
+        refineTimer?.invalidate()
+        refineTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
+            guard let self, self.phase == .refining, let raw = self.pendingRaw else { return }
+            Diagnostics.log.error("refine overran its deadline; publishing as heard")
+            // Twenty-five seconds is already inside the window iOS gives a
+            // backgrounded app, so this is the device saying the model is too slow
+            // -- for good, not once. Recorded so the next launch starts on the
+            // smaller one instead of losing the pass again.
+            LLMPolicy.recordDowngrade(reason: "整理超過 25 秒，未在背景時間內完成")
+            self.publish(raw, detail: "已辨識 · 未整理")
+        }
+    }
+
+    private func publish(_ text: String, detail: String) {
+        pendingRaw = nil
+        refineTimer?.invalidate()
+        refineTimer = nil
+        endBackground()
+        // Only now is the audio no longer needed: the words are on their way to
+        // the keyboard. Until this point the file is the only copy, and the system
+        // can still kill the app mid-pass.
+        spool?.discard()
+        spool = nil
+        if let orphanSource {
+            try? FileManager.default.removeItem(at: orphanSource)
+            self.orphanSource = nil
+        }
+        transcript = text
         live = ""
         phase = .done
-        SharedStore.publish(out, detail: reason.isEmpty ? "已辨識" : "已辨識 · \(reason)")
-        Diagnostics.log.notice("dictation done: \(out.count, privacy: .public) chars")
+        SharedStore.publish(text, detail: detail)
+        Diagnostics.log.notice("dictation done: \(text.count, privacy: .public) chars")
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
@@ -184,6 +275,11 @@ final class DictationController: ObservableObject {
         transcript = ""
         live = ""
         error = nil
+        pendingRaw = nil
+        refineTimer?.invalidate()
+        refineTimer = nil
+        skipRefine = false
+        orphanSource = nil
     }
 
     private func fail(_ message: String) {
@@ -195,6 +291,9 @@ final class DictationController: ObservableObject {
         gate = nil
         spool?.discard()
         spool = nil
+        pendingRaw = nil
+        refineTimer?.invalidate()
+        refineTimer = nil
         endBackground()
         phase = .failed
         error = message
@@ -229,13 +328,17 @@ final class DictationController: ObservableObject {
     private func beginBackground() {
         guard background == .invalid else { return }
         background = UIApplication.shared.beginBackgroundTask(withName: "ovc.decode") { [weak self] in
-            // Out of time: publishing what we have beats being killed silently.
+            // Out of time: publishing what is finished beats being killed with
+            // nothing. In particular a sentence still waiting on the cleanup pass
+            // goes out exactly as it was heard.
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.endBackground()
-                if self.phase == .transcribing, !self.transcript.isEmpty {
-                    self.complete(self.transcript, reason: "背景時間結束")
+                if let raw = self.pendingRaw {
+                    self.publish(raw, detail: "已辨識 · 未整理")
+                } else if !self.transcript.isEmpty {
+                    self.publish(self.transcript, detail: "已辨識")
                 }
+                self.endBackground()
             }
         }
     }
@@ -254,16 +357,17 @@ final class DictationController: ObservableObject {
     /// testing anyway: everything after the sample buffer is identical. Reached
     /// with `-OVC_AUDIO_FILE <path.wav>`, which is also how the regression check
     /// drives a known sentence end to end.
-    func runInjected(url: URL, detail: String = "測試音") {
+    func runInjected(url: URL, detail: String = "測試音", skipRefine: Bool = false) {
         guard !isBusy else { return }
         reset()
+        self.skipRefine = skipRefine
         phase = .recording
         SharedStore.setPhase(.recording, detail: "錄音中…")
         Diagnostics.log.notice("dictation injected: \(url.lastPathComponent, privacy: .public)")
 
         work.async {
             do {
-                try Core.initialize(models: SharedStore.modelsDir)
+                try Core.initialize(models: SharedStore.modelsRoot)
                 try Core.start()
             } catch {
                 DispatchQueue.main.async { self.fail(error.localizedDescription) }
@@ -282,11 +386,12 @@ final class DictationController: ObservableObject {
                 return
             }
 
-            // A recovered spool is consumed here. Leaving it would make the next
-            // launch transcribe the same sentence again.
+            // Consumed once the words reach the keyboard, not here: until then the
+            // file is the only copy of that sentence. `orphanSource` carries it to
+            // `publish`.
             if url.deletingLastPathComponent().standardizedFileURL
                 == AudioSpool.directory.standardizedFileURL {
-                try? FileManager.default.removeItem(at: url)
+                DispatchQueue.main.async { self.orphanSource = url }
             }
 
             // Written through the same spool as live audio, so the disk path is
@@ -334,7 +439,10 @@ final class DictationController: ObservableObject {
             try? FileManager.default.removeItem(at: stale)
         }
         Diagnostics.log.notice("recovering spool \(newest.lastPathComponent, privacy: .public)")
-        runInjected(url: newest, detail: "補回上次的錄音")
+        // Straight to the keyboard, no cleanup pass. Whatever killed the app last
+        // time happened with a sentence already decoded, so this path spends its
+        // one shot on delivering rather than on polishing.
+        runInjected(url: newest, detail: "補回上次的錄音", skipRefine: true)
     }
 
     /// Any WAV/CAF/M4A at any rate, as 16 kHz mono float32.

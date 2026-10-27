@@ -353,6 +353,26 @@ pub unsafe extern "C" fn LLM_RefineTextWithKeywordsStages(
     })())
 }
 
+/// The `.gguf` file that answered the most recent LLM task, or an empty string
+/// when no task has run yet.
+///
+/// Exists because a downgrade is invisible in the answer: when the preferred
+/// model cannot run, the core retries with a smaller one and returns its text, so
+/// a caller reading only the transcript cannot tell which model produced it. The
+/// app uses this to carry the decision across launches (a device that cannot run
+/// the 2B pays the failure once, not on every dictation) instead of guessing
+/// from timings.
+///
+/// # Safety
+/// `out` must be a valid pointer; free the result with `Core_FreeString`.
+#[no_mangle]
+pub unsafe extern "C" fn LLM_LastModelName(out: *mut *mut c_char) -> c_int {
+    status((|| {
+        let name = state::last_llm_model().unwrap_or_default();
+        write_out(out, &name)
+    })())
+}
+
 /// Translate a transcript into another language. `target` is "en" or "zh".
 ///
 /// # Safety

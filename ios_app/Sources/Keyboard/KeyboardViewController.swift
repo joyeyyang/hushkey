@@ -178,6 +178,15 @@ final class KeyboardViewController: UIInputViewController {
             bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
             return
         }
+        // Mode 2: the app is already alive inside its PiP window, so asking it to
+        // record needs no app switch -- and switching is the one thing this mode
+        // exists to avoid. `pipLive` is the guard: a mode that was chosen but is
+        // not running would otherwise make this button do nothing at all.
+        if SharedStore.mode == .pip, SharedStore.pipLive {
+            SharedStore.requestRecording()
+            bar.showNotice("錄音中…")
+            return
+        }
         guard let url = URL(string: "ovc://record") else { return }
         extensionContext?.open(url) { [weak self] ok in
             guard !ok else { return }

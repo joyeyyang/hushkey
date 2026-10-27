@@ -23,6 +23,19 @@
     </dict>
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationPortrait</string></array>
+    <!-- File sharing, so models can be put on the phone at all. A phone has no
+         shell: without these two keys the only way to install a 100 MB
+         recogniser is the app's own importer, and a user told "the folder is
+         empty" had nothing to open. With them the app appears under Finder ›
+         iPhone › Files › 語音輸入 and under the Files app, and `models/` can be
+         dragged straight in. -->
+    <key>UIFileSharingEnabled</key><true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+    <!-- Mode 2 lives inside a picture-in-picture window: without this the system
+         suspends the app the moment it is backgrounded and the window closes
+         with it. `audio` is the only mode PiP accepts for a call-style window. -->
+    <key>UIBackgroundModes</key>
+    <array><string>audio</string></array>
     <key>NSMicrophoneUsageDescription</key>
     <string>錄音並在本機轉成文字。音訊不離開這台裝置。</string>
     <key>CFBundleURLTypes</key>

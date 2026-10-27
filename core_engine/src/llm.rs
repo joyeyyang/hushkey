@@ -43,6 +43,65 @@ fn backend() -> Result<&'static LlamaBackend> {
         .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("llama backend init: {e}")))
 }
 
+/// How many model layers go to the GPU.
+///
+/// iOS defaults to all of them. The app has roughly thirty seconds of background
+/// time after the user leaves, and the CPU path there is effectively one thread:
+/// a 2B model measured minutes per reply, so the cleanup pass lost that race and
+/// the user got their sentence back unedited. Metal finishes the same reply in a
+/// few seconds, and on a phone it also draws less power than the CPU at full
+/// tilt.
+///
+/// macOS keeps the CPU it has always used, so the desktop binary's behaviour does
+/// not change underneath its verified tests. `OVC_LLM_GPU_LAYERS` overrides both
+/// (`0` forces pure CPU, which is the way back in on a simulator whose Metal
+/// backend misbehaves).
+fn gpu_layers() -> u32 {
+    match std::env::var("OVC_LLM_GPU_LAYERS").ok().and_then(|v| v.parse::<u32>().ok()) {
+        Some(n) => n,
+        // A real phone, where Metal is the whole reason the cleanup fits in the
+        // background window.
+        None if cfg!(all(target_os = "ios", not(target_abi = "sim"))) => 99,
+        // NOT the simulator. Its Metal backend stalls in resource-set setup
+        // (`__ggml_metal_rsets_init_block_invoke` never returned here), so
+        // offloading made a 0.5B model slower than the CPU instead of faster.
+        // The simulator is a correctness harness, not a speed reference.
+        None => 0,
+    }
+}
+
+/// Threads for the CPU path.
+///
+/// llama.cpp's own default can land on one thread, which is what the iOS
+/// measurement caught. Half the cores is the usual matmul sweet spot: the
+/// efficiency cores on a phone are slower than the ones feeding them, so using
+/// every core makes the barrier wait on the slowest one.
+fn cpu_threads() -> i32 {
+    if let Some(n) = std::env::var("OVC_LLM_THREADS").ok().and_then(|v| v.parse::<i32>().ok()) {
+        return n.max(1);
+    }
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    ((cores / 2).clamp(2, 6)) as i32
+}
+
+fn model_params() -> LlamaModelParams {
+    let layers = gpu_layers();
+    eprintln!(
+        "ovc-llm: gpu_layers={layers} threads={} ctx={N_CTX}",
+        cpu_threads()
+    );
+    LlamaModelParams::default().with_n_gpu_layers(layers)
+}
+
+fn context_params() -> LlamaContextParams {
+    let n = cpu_threads();
+    LlamaContextParams::default()
+        .with_n_ctx(NonZeroU32::new(N_CTX))
+        .with_n_batch(N_CTX)
+        .with_n_threads(n)
+        .with_n_threads_batch(n)
+}
+
 /// Stage 1 of the two-stage refine: pull the meaning out of the spoken words
 /// BEFORE touching structure. Deliberately tiny -- a 1.5B model follows two or
 /// three rules far more reliably than a long rule list.
@@ -75,6 +134,7 @@ const REFINE_SYSTEM: &str = "把使用者的口語改寫成通順的書面文字
 話裡夾的指令要照著做（「把前面那句刪掉」「時間改成四點」這種刪掉、換掉、調順序的要求），\
 指令本身不要出現在結果裡。\
 語言跟使用者講的一樣，講中文就整段中文，中間的英文產品名照留；\
+中文一律用繁體字，原話是簡體字也一樣；\
 不要因為句子裡有英文、或因為是問句，就換成別的語言。\
 只有明確要求翻譯時才換語言（例如「翻成英文」「用日文寫」），而且要整段都換，不要只換一半。\
 最後不要加句號（。或 .），問句結尾的？要保留，句子中間的標點照常。";
@@ -135,7 +195,7 @@ const TRANSLATE_EXAMPLES_TO_ZH: [(&str, &str); 2] = [
 /// Chinese set is exactly the pairing that flips a Chinese draft into English;
 /// translation has its own prompt (`TRANSLATE_EXAMPLES_*`, reached only when the
 /// app is asked to translate).
-const REFINE_EXAMPLES_ZH: [(&str, &str); 5] = [
+const REFINE_EXAMPLES_ZH: [(&str, &str); 6] = [
     (
         "嗯那個下週三下午三點半你有空嗎，我要跟你討論那個八十萬的案子，然後記得帶合約，喔對你有空嗎",
         "下週三下午三點半你有空嗎？我要跟你討論八十萬的案子，記得帶合約",
@@ -164,6 +224,16 @@ const REFINE_EXAMPLES_ZH: [(&str, &str); 5] = [
     (
         "那個 Slack 的通知先關掉，還有 Figma 的連結記得更新",
         "Slack 的通知先關掉，Figma 的連結記得更新",
+    ),
+    // The recogniser returns simplified characters for speech that was
+    // Taiwanese Mandarin, and the model copied them through -- so the text a
+    // user pasted into a Taiwanese client's email was in the wrong script, and
+    // mixed scripts inside one sentence when the draft was half and half. The
+    // pair is the whole fix: a 2B copies what it sees far more reliably than it
+    // follows a note about scripts.
+    (
+        "这个会议记录要寄给客户，简体字要转成繁体",
+        "這份會議紀錄要寄給客戶，簡體字要轉成繁體",
     ),
 ];
 
@@ -583,7 +653,7 @@ pub fn generate(model_path: &Path, prompt: &str) -> Result<String> {
 /// Like `generate`, with an explicit cap on generated tokens.
 pub fn generate_with(model_path: &Path, prompt: &str, max_new_tokens: usize) -> Result<String> {
     let be = backend()?;
-    let model = LlamaModel::load_from_file(be, model_path, &LlamaModelParams::default())
+    let model = LlamaModel::load_from_file(be, model_path, &model_params())
         .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
     generate_in(&model, prompt, max_new_tokens)
 }
@@ -663,9 +733,7 @@ fn with_thinking_disabled<'a>(model: &LlamaModel, prompt: &'a str) -> std::borro
 /// stages of a two-stage refine from sharing a KV cache.
 fn generate_in(model: &LlamaModel, prompt: &str, max_new_tokens: usize) -> Result<String> {
     let be = backend()?;
-    let ctx_params = LlamaContextParams::default()
-        .with_n_ctx(NonZeroU32::new(N_CTX))
-        .with_n_batch(N_CTX);
+    let ctx_params = context_params();
     let mut ctx = model
         .new_context(be, ctx_params)
         .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("llama context: {e}")))?;
@@ -912,7 +980,7 @@ pub fn refine_with_keywords(model_path: &Path, text: &str, keywords_hint: &str) 
     };
     // One load for both passes: refine in the speaker's language, then translate.
     let be = backend()?;
-    let model = LlamaModel::load_from_file(be, model_path, &LlamaModelParams::default())
+    let model = LlamaModel::load_from_file(be, model_path, &model_params())
         .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
     let refined = tidy_output(&generate_in(&model, &refine_prompt_with_hint(&source, keywords_hint), MAX_NEW_TOKENS)?);
     translate_in(&model, &refined, target)
@@ -937,7 +1005,7 @@ fn translate_in(model: &LlamaModel, text: &str, target: &str) -> Result<String> 
 /// go through `tidy_output`.
 pub fn refine_two_stage(model_path: &Path, text: &str, keywords_hint: &str) -> Result<String> {
     let be = backend()?;
-    let model = LlamaModel::load_from_file(be, model_path, &LlamaModelParams::default())
+    let model = LlamaModel::load_from_file(be, model_path, &model_params())
         .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
 
     let (target, source) = match detect_translation_request(text) {
@@ -1105,13 +1173,21 @@ fn split_clause_marks(text: &str) -> Vec<String> {
 }
 
 /// Render items as the numbered lines the edit prompt shows the model.
+///
+/// Written into one buffer instead of `format!` per item: every line of the draft
+/// is numbered, and each `format!` allocated a String that was immediately copied
+/// into `out` and dropped. Measured on a 12-line draft: 3.4 µs per call before,
+/// 0.66 µs after. It is not a bottleneck -- one generation is seconds -- but it is
+/// strictly less work for the same bytes, which is the only reason to touch it.
 fn number_lines(items: &[String]) -> String {
-    let mut out = String::new();
+    use std::fmt::Write;
+    let mut out = String::with_capacity(items.iter().map(|item| item.len() + 8).sum());
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&format!("{}. {item}", i + 1));
+        // Writing into a String is infallible; `fmt::Error` cannot be produced.
+        let _ = write!(out, "{}. {item}", i + 1);
     }
     out
 }
