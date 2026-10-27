@@ -45,6 +45,39 @@ enum Diagnostics {
         path(after: "-OVC_AFTER_CLEAR")
     }
 
+    /// `-OVC_DEVICE_BENCH`: measure the three M6 numbers on this device and write
+    /// them to `Documents/bench.json`.
+    ///
+    /// The simulator cannot answer any of them -- its Metal backend is disabled
+    /// and its memory is a desktop's -- so the only way to record "2B takes N
+    /// seconds and M megabytes on this phone" is to ask a phone. Kept behind a
+    /// flag so a normal launch never pays for it.
+    static var runsDeviceBench: Bool {
+        ProcessInfo.processInfo.arguments.contains("-OVC_DEVICE_BENCH")
+    }
+
+    /// `-OVC_REFINE_TEXT <text>`: run one literal transcript through the cleanup
+    /// pass and print the result.
+    ///
+    /// The microphone is the only thing this skips. A phone in a quiet room, a
+    /// cable, and a sentence someone has to remember to say is a bad harness for
+    /// "does the cleanup actually clean"; a fixed string in, the model's answer
+    /// out, on the device's own silicon, is a good one. Written to
+    /// `Documents/refine.json` as well as stdout.
+    static var refineText: String? {
+        path(after: "-OVC_REFINE_TEXT")
+    }
+
+    /// `-OVC_LLM_RESET`: forget a recorded downgrade before anything loads.
+    ///
+    /// The model screen has the same button. This exists because the record lives
+    /// in the App Group, which survives a reinstall -- so a downgrade recorded by
+    /// a bad run outlives the build that recorded it, and the only way back is a
+    /// control the tester can reach without tapping through the UI.
+    static var resetsLLM: Bool {
+        ProcessInfo.processInfo.arguments.contains("-OVC_LLM_RESET")
+    }
+
     private static func path(after flag: String) -> String? {
         let args = ProcessInfo.processInfo.arguments
         guard let index = args.firstIndex(of: flag),

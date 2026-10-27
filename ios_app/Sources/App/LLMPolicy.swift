@@ -83,6 +83,24 @@ enum LLMPolicy {
 
     // MARK: decide
 
+    /// The file the engine was actually told to use.
+    ///
+    /// Three sources, in the order the core reads them: a recorded downgrade
+    /// (`apply` sets `OVC_LLM_MODEL`), a value the launch itself carried (a
+    /// measurement run, a support override), and finally the manifest's default.
+    /// This is the answer to "did the 2B fail, or was it never asked?" — a
+    /// question the served model alone cannot answer, which is how a benchmark
+    /// run that chose the 0.5B on purpose was recorded as "2B failed" and left
+    /// this device permanently on the small model.
+    static var requestedName: String {
+        if let active = activeName { return active }
+        if let raw = ProcessInfo.processInfo.environment["OVC_LLM_MODEL"],
+           !raw.trimmingCharacters(in: .whitespaces).isEmpty {
+            return (raw as NSString).lastPathComponent
+        }
+        return preferredName
+    }
+
     /// Hands the engine a downgraded model, if one was recorded.
     ///
     /// Called once, from `Core.initialize`. It runs *after* `Core_Initialize`
@@ -100,12 +118,24 @@ enum LLMPolicy {
 
     /// Remembers that `served` answered when the preferred model was asked for.
     ///
-    /// `served` comes from the core (`LLM_LastModelName`), so this is a fact
-    /// rather than an inference: the caller does not have to guess from timings
-    /// whether the big model ran.
+    /// `served` comes from the core (`LLM_LastModelName`), so it is a fact rather
+    /// than an inference -- but only about *what ran*. Whether it was a fallback
+    /// depends on what was *requested*, and that is a second fact this function
+    /// has to check for itself: a run that asked for the 0.5B on purpose (a
+    /// measurement, an override) answers with the 0.5B and is not a downgrade.
+    /// Treating those as one recorded a permanent downgrade on a device whose 2B
+    /// had never failed, and the reason line then said "2B 無法執行" about
+    /// something that was never tried.
     @discardableResult
     static func recordIfDowngraded(served: String, reason: String) -> Bool {
         guard !served.isEmpty, served != preferredName else { return false }
+        // Not asked for the big one: nothing failed, so nothing to record.
+        guard requestedName == preferredName else {
+            Diagnostics.log.notice(
+                "llm model: served \(served, privacy: .public) because it was requested, not as a fallback"
+            )
+            return false
+        }
         guard let preferred = preferredInstalled, preferred.name == preferredName else { return false }
         guard let candidate = installed.first(where: { $0.name == served }),
               candidate.bytes < preferred.bytes else { return false }
@@ -152,9 +182,37 @@ enum LLMPolicy {
     ///
     /// Needed because a downgrade recorded under memory pressure, or on a phone
     /// that was busy, should not be permanent. The model screen offers it.
+    ///
+    /// It also forgets that the big model ever succeeded, because that fact was
+    /// evidence about *that* attempt and a user pressing "try the big one again" is
+    /// asking for a clean slate, not for a head start.
     static func clear() {
         SharedStore.defaults?.removeObject(forKey: key)
+        SharedStore.defaults?.removeObject(forKey: successKey)
         unsetenv("OVC_LLM_MODEL")
         Diagnostics.log.error("llm model downgrade cleared; \(preferredName, privacy: .public) will be tried again")
+    }
+
+    // MARK: proof
+
+    private static let successKey = "llmPreferredSucceeded"
+
+    /// Whether the model that is supposed to answer has ever finished a pass here.
+    ///
+    /// This is the difference between "too slow for this phone" and "too slow on
+    /// its very first run". The first cleanup after an install pays
+    /// `ggml_metal_library_compile_all` — measured at 17.8 seconds on an A17 Pro —
+    /// on top of ~3 seconds of generation, which is close enough to the 25-second
+    /// background deadline that a slower phone genuinely can trip it. Recording a
+    /// downgrade there would make a one-time compile into a permanent model change,
+    /// which is the exact failure this file's history is about.
+    static var preferredHasSucceeded: Bool {
+        SharedStore.defaults?.bool(forKey: successKey) ?? false
+    }
+
+    static func notePreferredServed() {
+        guard !preferredHasSucceeded else { return }
+        SharedStore.defaults?.set(true, forKey: successKey)
+        Diagnostics.log.notice("llm model: \(preferredName, privacy: .public) finished a pass on this device")
     }
 }

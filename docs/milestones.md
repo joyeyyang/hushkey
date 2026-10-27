@@ -14,8 +14,16 @@
 | M2 錄音→辨識→落字 | `[~]` | 落字只驗到本 App 的 probe 畫面；第三方 App 在 M6 |
 | M3 AI 整理＋2B／降級 | `[x]` | 2B 的**速度**數字只有真機有意義 |
 | M4 PiP 零跳轉 | `[~]` | 模擬器不支援 PiP，PiP 視窗本身只能在真機驗 |
-| M5 真機安裝與模型 | `[~]` | 需要插線＋付費帳號開 App Group |
-| M6 真機實測 | `[ ]` | 全部，只有真機能量 |
+| M5 真機安裝與模型 | `[x]` | — |
+| M6 真機實測 | `[~]` | 三項數字已有（見 M6 節）；Third-party 落字與 Mode 1/2 全流程要人工操作＋截圖 |
+| M7 與 macOS 對齊 | `[~]` | 見 `## M7 — 與 macOS 對齊`，未完成的是會議模式與語音編輯 |
+
+### 2026-10-28 這一輪
+
+使用者回報「手機語音輸入之後 AI 沒有整理」，查出來不是模型不夠力，是**假降級**：
+一次 bench 用 `DEVICECTL_CHILD_OVC_LLM_MODEL=qwen2.5-0.5b…` 指定跑小模型，
+`LLMPolicy.recordIfDowngraded` 只看「誰作答」，就把那次指定記成「2B 無法執行」，
+永久寫進 App Group，之後每次啟動都 `setenv` 成 0.5B。根因、修法與佐證見附錄 F。
 
 2026-10-27 已跑完 plan／review／debug 五輪複查：review 的 12 項見附錄 A，
 debug 的 7 項見附錄 B，第三輪回頭審「前兩輪修得對不對」找到的 9 項見附錄 C，
@@ -360,17 +368,69 @@ Dolphin 與 SenseVoice 的 token 表不同，跟著錯的那個會讓辨識在�
 撐不撐得住、PiP 會不會被系統收掉」只有真機能回答。
 
 **完成定義**
-- [ ] 真機上 2B 模型的：模型載入秒數、整理耗時、峰值記憶體
-- [ ] 若 2B 超出背景時間或記憶體不足 → **記錄實際數字**後才降級，不是憑感覺
-- [ ] 降級後 0.5B 的同三項數字
+- [x] 真機上 2B 模型的：模型載入秒數、整理耗時、峰值記憶體
+- [x] 若 2B 超出背景時間或記憶體不足 → **記錄實際數字**後才降級，不是憑感覺
+- [x] 降級後 0.5B 的同三項數字
 - [ ] Mode 1 全流程：按麥克風 → 跳 App → 說完 → 返回 → 文字出現
 - [ ] Mode 2 全流程：PiP 小窗、零跳轉、鍵盤即時字幕
 - [ ] 鍵盤在第三方 App（Messages / Safari / Notes）都能落字
-- [ ] 上述每一項都有截圖或 log，不是「應該可以」
+- [~] 上述每一項都有截圖或 log，不是「應該可以」
+
+**實測數字（iPhone 15 Pro · A17 Pro · iOS 27.0.1 · `00008130-001630243AE8001C`）**
+
+| 項目 | 數字 | 怎麼量的 |
+|---|---|---|
+| ASR 載入 | 0.45–0.52 秒 | `-OVC_DEVICE_BENCH`，`Documents/bench.json` 的 `asrLoadSeconds` |
+| ASR 模型 | 228.45 MB（SenseVoice int8） | `OvcMemoryUsage.model_bytes`，載入後峰值 378.8 MB |
+| 2B 整理（第二次啟動起） | 24 字 2.24 秒 · 41 字 2.91 秒，峰值 1777.1 MB | 同上，`refine[]` |
+| 2B 首次啟動 | 22.09 秒，其中 `ggml_metal_library_compile_all` 17.818 秒 | 真機 log；第二次啟動快取後同一段 0.012 秒 |
+| 0.5B（備援） | 1.50 秒 · 1.06 秒，峰值 957.8 MB | 同上 |
+| 端到端 `-OVC_AUDIO_FILE` | ASR → 整理 → `s.published`（seq 2、3）全通 | App Group plist |
+
+**結論：2B 不需要降級。** 峰值 1.78 GB 在 A17 Pro 上離被殺很遠，整理 2–3 秒
+也在 iOS 給背景 App 的 ~30 秒之內。0.5B 留著只是備援，不是預設。
+
+首次啟動的 22 秒**不能當常態**：那是 Metal 函式庫要編譯，編完寫進
+`Library/Caches/…/com.apple.metal/`，之後 0.012 秒。真正該注意的是
+「第一次整理要等 20 秒」，而它只發生在安裝後第一次。
 
 **這一步沒有程式碼可寫，只有量測與修正。** 量不到的項目要明確寫「量不到」，
 不能寫「應該沒問題」——`docs/PROJECT.md` 第 8 節記的正是這件事：
 量測工具自己壞掉時它不會失敗，它會測不到東西。
+
+---
+
+## M7 — 與 macOS 對齊
+
+**為什麼需要**：使用者要的是「iOS 與 Mac 兩個系統內容一模一樣」。這件事不能靠
+感覺，要靠一張表，而且**沒做的要寫沒做**——一份只列已完成項目的對照表，
+正好就是「AI 沒整理」這種錯誤能活好幾個月的原因。
+
+**2026-10-28 這一輪補上的**
+
+| 功能 | 之前 | 現在 |
+|---|---|---|
+| 簡→繁（`Hans-Hant`） | 沒有 | 辨識後與整理後各一次（「下礼拜和校庆」→「下禮拜和校慶」） |
+| 整理後的守門（`sanityCheck`） | 沒有 | 有：擋空回覆、斷章、洩漏提示詞、被翻走、Meta 開場 |
+| 翻譯（自動／不翻／一律英文／一律繁中） | 沒有 | 有，四個模式與 macOS 同名同義 |
+| 整理段數 0/1/2 | 沒有 | 有 |
+| 歷史 | 沒有 | 有：搜尋、複製、分享、單筆刪除、全部清空（要確認）、每句耗時 |
+| 關鍵字 | 沒有 | 有（與 macOS 同樣**不注入提示詞**，理由寫在畫面上） |
+| 匯出 | 沒有 | 有：Markdown / txt / JSON + 系統分享面板 |
+| 音檔匯入 | 只有 `-OVC_AUDIO_FILE` 旗標 | 有：文件選擇器，任何 AVFoundation 開得起來的格式 |
+| 暫停／繼續 | 沒有 | 有；同一個 spool、同一個 ASR session，不是切兩段 |
+| 五個分頁 | 只有單頁 | 轉錄／歷史／關鍵字／模型／設定，順序與 macOS 相同 |
+
+**還沒對齊（明確清單）**
+
+| 功能 | 為什麼還沒 | 要什麼才能做 |
+|---|---|---|
+| 會議模式（摘鈕／決議／待辦） | 核心的 `LLM_Summarize` 已經接好，缺的是錄音端：iOS 拿不到系統音訊，`我：／對方：` 分不出來 | ReplayKit Broadcast Upload Extension + 使用者授權；不是一個下午的事 |
+| 語音編輯（改上一次送出的字） | iOS 沒有 AX，改不到別的 App 的文字；**但鍵盤改得到自己上次插入的字**（`deleteBackward` × N 再 `insertText`） | 共享通道 + 鍵盤端替換；下一輪做 |
+| 貼上前確認（可編輯後才送） | 鍵盤插入是即時的，Mac 的「Enter 才貼上」在鍵盤上要另一套 UI | 同上，與語音編輯一起做 |
+| 5 套紙色主題 | iOS 固定深紙色 | 純外觀；`Palette` 已經是單一來源，改起來不難 |
+| SRT 匯出 | Markdown／txt／JSON 已足夠 | 會議模式有時間段之後才有意義 |
+| 模型從 manifest 下載與驗證 | iOS 靠 Finder／檔案 App 放入（已寫在畫面上） | 手機上的下載器＋SHA-256 驗證；與 macOS 的 `ModelInstaller` 對齊 |
 
 ---
 
@@ -379,7 +439,7 @@ Dolphin 與 SenseVoice 的 token 表不同，跟著錯的那個會讓辨識在�
 ```
 M0 ──> M1 ──> M2 ──> M3 ──> M4
                       │
-                      └──> M5 ──> M6
+                      └──> M5 ──> M6 ──> M7
 ```
 
 M5 的程式部分（模型安裝）可以與 M3/M4 平行做，但**真機驗證**必須等 M5 的
@@ -670,6 +730,31 @@ xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios \
 xcrun simctl launch <sim> com.example.offlinevoiceassistant.ios -OVC_PIP_PROBE
 ```
 
+真機上的純文字整理探針（不需要麥克風，不寫入任何共享狀態；會印在
+`devicectl --console` 上，同時寫進 `Documents/refine.json`）：
+
+```bash
+xcrun devicectl device process launch --console --terminate-existing \
+  --device 0E8DDA9B-F778-5062-B0E5-33D3BBF7706A \
+  com.example.offlinevoiceassistant.ios \
+  -OVC_REFINE_TEXT "呃，我们明天我们班来开个会，就是。我们是。不是下礼拜和校庆嘛？"
+# 輸出在 OVC_REFINE_BEGIN … OVC_REFINE_END 之間：
+#   requestedModel（應該被叫的那一份）/ servedModel（實際作答的）
+#   raw（模型原始輸出）/ traditional（再正規化之後）/ seconds / peakRSSMB
+```
+
+清除假降級（App Group 不會被重裝清掉，所以需要這個開關；模型頁也有同一顆按鈕）：
+
+```bash
+xcrun devicectl device process launch --console --terminate-existing \
+  --device 0E8DDA9B-F778-5062-B0E5-33D3BBF7706A \
+  com.example.offlinevoiceassistant.ios -OVC_LLM_RESET
+```
+
+裝到真機**不會**清空 `Documents/`：模型與 App Group 都留著。
+`devicectl device info files` 可以列出容器內容（`--subdirectory` 會回 error 3，
+只能列根目錄，用 grep 過濾）。
+
 清 spool 目錄時不要用 `rm -f "$G/spool/"*.claimed`：zsh 在沒有任何符合的檔案時會讓**整行**失敗
 （連前面的 `*.wav` 都不會刪），於是你會看到上一個測試留下的檔案，誤以為程式沒清。改用：
 
@@ -683,3 +768,92 @@ find "$G/spool" -name '*.wav' -delete; find "$G/spool" -name '*.claimed' -delete
 G=~/Library/Developer/CoreSimulator/Devices/<sim>/data/Containers/Shared/AppGroup/<group>
 xcrun simctl spawn <sim> defaults read "$G/Library/Preferences/group.com.example.offlinevoiceassistant"
 ```
+
+---
+
+## 附錄 F：假降級——「AI 沒有整理」的根因（2026-10-28）
+
+### 症狀
+
+使用者說「手機語音輸入之後 AI 沒有整理」。裝置上的證據是這樣：
+
+```
+s.detail  = 已整理 · 靜音
+s.published.text = 呃，我們明天我們班來開個會，就是。我們是。不是下礼拜和校庆嘛？…
+```
+
+三件事同時不對：
+
+1. 78 字、口頭禪「呃」「就是。」原封不動 → 根本沒整理
+2. 「我們」「開會」是繁體，「下礼拜」「校庆」是簡體 → 繁簡混雜
+3. `s.detail` 卻寫著「已整理」——狀態沒有說謊，整理**跑過了**，只是跑的是 0.5B
+
+### 根因（不是猜的，是 App Group 裡讀出來的）
+
+```json
+"llmDowngrade": {
+  "from": "Qwen3.5-2B-Q4_K_M.gguf",
+  "to":   "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+  "reason": "整理時 Qwen3.5-2B-Q4_K_M.gguf 無法執行，改用 qwen2.5-0.5b-instruct-q4_k_m.gguf",
+  "at": 814813160.492318
+}
+```
+
+`reason` 說「2B 無法執行」，但那句話是**推論出來的，不是觀察到的**。
+當時在跑 M6 量測，bench 用 `DEVICECTL_CHILD_OVC_LLM_MODEL=qwen2.5-0.5b…`
+**指定**跑小模型。舊的 `recordIfDowngraded` 只比對「誰作答」：
+
+```swift
+guard !served.isEmpty, served != preferredName else { return false }   // 只看 served
+```
+
+served 是 0.5B、preferred 是 2B → 記成降級。於是：
+
+- 寫進 App Group（**重裝 App 不會清掉 App Group**）
+- 之後每次啟動 `LLMPolicy.apply()` 都 `setenv("OVC_LLM_MODEL", "qwen2.5-0.5b…")`
+- 真機聽寫從此固定跑 0.5B，2B 一次都沒被叫過
+
+一個量測用的環境變數，變成了一台裝置上永久的產品設定。
+
+### 修法（兩層，都是「先把事實查清楚」）
+
+1. **`LLMPolicy.requestedName`**：新增「引擎這次被叫用哪一份」的計算——
+   已記錄的降級 → 啟動時帶的 `OVC_LLM_MODEL` → manifest 預設。
+2. **`recordIfDowngraded` 先問「有沒有被要求用大的」**：
+
+```swift
+guard requestedName == preferredName else {
+    Diagnostics.log.notice("served … because it was requested, not as a fallback")
+    return false
+}
+```
+
+   被指定使用的模型**不算降級**，只記一行 notice。這才是「降級」（asked for 2B,
+   got 0.5B）與「指定」（asked for 0.5B, got 0.5B）的分界。
+3. **`-OVC_LLM_RESET`** 與模型頁的「重新嘗試大模型」：App Group 活得比 App 久，
+   所以需要一個不靠 UI 也能按的還原開關。
+
+### 佐證
+
+- 清掉之後重讀 App Group：`llmDowngrade` 這個 key 不見了（其餘狀態保留）
+- 規則層（macOS 上編譯 `TextScript` + `TextRules` 直接餵測資）：
+
+```
+A_traditional   : 呃，我們明天我們班來開個會，就是。我們是。不是下禮拜和校慶嘛？那我們可能要開個會
+A_leftSimplified: []
+B_good_ok       : true      （正常整理結果 → 放行）
+C_leaked_ok     : false | echoed the instructions: 不要摘要
+D_translated_away_ok: false | no Chinese left in the output
+E_english_src_ok: true      （英文聽寫不會被當成「被翻走」）
+F_empty_ok      : false
+G_meta_ok       : false     （「以下是整理後的內容：」被擋）
+H_tiny_ok       : false     （只剩 1/5 長度，判定為改寫成別的東西）
+```
+
+- 真機 `-OVC_REFINE_TEXT`（見下方重跑指令）：待手機解鎖後執行，結果補在這裡。
+
+### 學到的（寫下來免得再犯）
+
+**量測用的覆寫不可以進入產品狀態。** `DEVICECTL_CHILD_*` 是量測工具，
+`LLMPolicy` 是產品記憶；兩者中間原本只隔一個「誰作答」的比較。
+任何「把觀察寫成持久狀態」的地方，都要能分開「我要求的」與「我得到的」。

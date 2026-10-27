@@ -27,6 +27,14 @@ final class DictationController: ObservableObject {
     @Published private(set) var live = ""
     /// A failure worth showing on the app's own screen.
     @Published private(set) var error: String?
+    /// Whether the microphone is held but not listening.
+    ///
+    /// Distinct from "not recording": the sentence is still open, the spool is
+    /// still being written to once it resumes, and nothing has been decoded. A
+    /// phone dictation is interrupted constantly, and the Mac's pause is the right
+    /// answer to that -- the alternative is publishing half a sentence or throwing
+    /// the first half away.
+    @Published private(set) var isPaused = false
 
     /// What the user should read right now, in one string.
     var display: String { transcript + live }
@@ -90,6 +98,13 @@ final class DictationController: ObservableObject {
     /// the only copy the user has of what they said, so the tap waits for it
     /// rather than either dropping the sentence or ignoring the tap.
     private var startAfterRecovery = false
+    /// When the sentence started being spoken, for the history entry's duration.
+    /// Not when the microphone opened: the two differ by the permission prompt on
+    /// a first run, and a duration that includes a permission dialog is a lie.
+    private var startedAt: Date?
+    /// The `tmp` copy of a file the user imported. Deleted with the dictation, so
+    /// repeating the import does not accumulate copies of the same recording.
+    private var importedSource: URL?
 
     @discardableResult
     private func nextGeneration() -> Int {
@@ -142,6 +157,7 @@ final class DictationController: ObservableObject {
         let g = nextGeneration()
         reset()
         phase = .recording
+        startedAt = Date()
         SharedStore.setPhase(.recording, detail: "錄音中…")
         // The last dictation's live words are still on the shared key, and the
         // keyboard draws them the moment the phase says "recording".
@@ -175,15 +191,19 @@ final class DictationController: ObservableObject {
     private func attach(g: Int) {
         guard phase == .recording, g == generation else { return }
         do {
-            let spool = try AudioSpool()
+            // Resuming re-attaches a microphone to a sentence that already has a
+            // spool. A fresh one would split the recording in two, and the second
+            // file would be the only thing recovery could find.
+            let spool = try self.spool ?? AudioSpool()
             let mic = MicCapture()
             let gate = SilenceGate()
+            let spooled = spool
 
             gate.onFire = { [weak self] reason in
                 DispatchQueue.main.async { self?.stop(reason: reason) }
             }
             mic.onSamples = { samples in
-                spool.append(samples)
+                spooled.append(samples)
                 Core.submit(samples)
                 gate.consume(samples)
             }
@@ -200,11 +220,48 @@ final class DictationController: ObservableObject {
             self.spool = spool
             self.mic = mic
             self.gate = gate
+            self.isPaused = false
             startPolling(g: g)
             Diagnostics.log.notice("dictation started")
         } catch {
             fail(error.localizedDescription, g: g)
         }
+    }
+
+    // MARK: pause
+
+    /// Stops listening without ending the sentence.
+    ///
+    /// The ASR session stays open (`Core.stop` is what finishes it) and the spool
+    /// stays on disk, so resuming appends to the same recording rather than
+    /// starting a second one. The silence gate is dropped with the microphone: it
+    /// fires on *absence* of audio, so leaving it armed while paused would auto-stop
+    /// the dictation a second later and publish the half the user was pausing to
+    /// protect.
+    func pause() {
+        guard phase == .recording, !isPaused else { return }
+        pollTimer?.invalidate()
+        pollTimer = nil
+        // The open utterance is a preview, not committed words: keeping it on
+        // screen while paused is honest (it was said), and `resume` picks the tail
+        // up from the recogniser.
+        live = ""
+        isPaused = true
+        mic?.onSamples = nil
+        mic?.stop(keepAlive: keepsAudioSession)
+        mic = nil
+        gate = nil
+        SharedStore.setPhase(.recording, detail: "已暫停")
+        Diagnostics.log.notice("dictation paused")
+    }
+
+    /// Starts listening again on the sentence that was paused.
+    func resume() {
+        guard phase == .recording, isPaused else { return }
+        isPaused = false
+        SharedStore.setPhase(.recording, detail: "錄音中…")
+        attach(g: generation)
+        Diagnostics.log.notice("dictation resumed")
     }
 
     // MARK: stop
@@ -250,46 +307,53 @@ final class DictationController: ObservableObject {
             return
         }
 
-        transcript = raw
+        // Script first, before the model sees anything, and the model's answer is
+        // guarded afterwards. Both live in `Refiner` -- the same chain, thresholds
+        // and fallbacks the Mac runs, walked across rather than re-invented.
+        let heard = Refiner.fallback(raw)
+        transcript = heard
         live = ""
 
         guard SharedStore.refineEnabled, !skipRefine else {
-            publish(raw, detail: reason.isEmpty ? "已辨識" : "已辨識 · \(reason)", g: g)
+            publish(heard, detail: reason.isEmpty ? "已辨識" : "已辨識 · \(reason)", g: g)
             return
         }
 
         // The cleanup pass, on the same background time the decode started. If it
         // does not finish, the transcript is published as heard rather than
         // dropped: a rough sentence is still the user's sentence.
-        pendingRaw = raw
+        pendingRaw = heard
         phase = .refining
         SharedStore.setPhase(.refining, detail: "整理中…")
         startRefineDeadline(g: g)
 
         work.async {
-            var failure: String?
-            let refined: String
-            do {
-                refined = try Core.refine(raw)
-            } catch {
-                refined = raw
-                failure = error.localizedDescription
-            }
+            // One call, one chain: Script → refine → sanity guard → translate.
+            // The guard is the part iOS never had, and its absence is why a small
+            // model's answer to the *instructions* could be published verbatim.
+            let result = Refiner.refine(
+                raw: raw,
+                polish: true,
+                translateTarget: Preferences.translateTarget
+            )
             let served = Core.lastModelName()
             DispatchQueue.main.async {
                 guard g == self.generation, self.phase == .refining else { return }
-                if let failure {
-                    Diagnostics.log.error("refine failed: \(failure, privacy: .public)")
-                    self.publish(refined, detail: "已辨識 · 整理失敗", g: g)
-                } else {
-                    // Which model answered is a fact the core reports, not
-                    // something to infer from how long the pass took.
+                // Which model answered is a fact the core reports, not something to
+                // infer from how long the pass took.
+                if !served.isEmpty, served != LLMPolicy.requestedName {
                     LLMPolicy.recordIfDowngraded(
                         served: served,
-                        reason: "整理時 \(LLMPolicy.preferredName) 無法執行，改用 \(served)"
+                        reason: "整理時 \(LLMPolicy.requestedName) 無法執行，改用 \(served)"
                     )
-                    self.publish(refined, detail: reason.isEmpty ? "已整理" : "已整理 · \(reason)", g: g)
+                } else if !served.isEmpty {
+                    // Proof that this phone *can* run the model it was asked for.
+                    // The background deadline reads it before blaming the model.
+                    LLMPolicy.notePreferredServed()
                 }
+                var detail = reason.isEmpty ? "已整理" : "已整理 · \(reason)"
+                if let note = result.note { detail += " · \(note)" }
+                self.publish(result.text, detail: detail, g: g, model: served)
             }
         }
     }
@@ -307,10 +371,21 @@ final class DictationController: ObservableObject {
                   let raw = self.pendingRaw
             else { return }
             Diagnostics.log.error("refine overran its deadline; publishing as heard")
-            // Twenty-five seconds is already inside the window iOS gives a
-            // backgrounded app, so this is the device saying the model is too slow
-            // -- for good, not once. Recorded so the next launch starts on the
-            // smaller one instead of losing the pass again.
+            // Thirty seconds is already inside the window iOS gives a backgrounded
+            // app, so this is the device saying the model is too slow -- for good,
+            // not once. Recorded so the next launch starts on the smaller one
+            // instead of losing the pass again.
+            //
+            // Unless the preferred model has never finished a pass here: the first
+            // cleanup after an install also pays a ~18-second Metal library
+            // compile, so an overrun *then* is the compile, not the model. A
+            // downgrade recorded there would turn one slow first run into a
+            // permanent model change -- the same mistake as before, one layer down.
+            guard LLMPolicy.preferredHasSucceeded else {
+                Diagnostics.log.notice("first pass after install overran; not recording a downgrade")
+                self.publish(raw, detail: "已辨識 · 未整理", g: g)
+                return
+            }
             LLMPolicy.recordDowngrade(reason: "整理超過 25 秒，未在背景時間內完成")
             // The pass itself cannot be interrupted -- it is one blocking call
             // into llama.cpp -- so it keeps the work queue busy and the next
@@ -321,7 +396,7 @@ final class DictationController: ObservableObject {
         }
     }
 
-    private func publish(_ text: String, detail: String, g: Int) {
+    private func publish(_ text: String, detail: String, g: Int, model: String = "") {
         guard g == generation, publishedGeneration != g else { return }
         publishedGeneration = g
         pendingRaw = nil
@@ -331,17 +406,29 @@ final class DictationController: ObservableObject {
         transcript = text
         live = ""
         phase = .done
+        isPaused = false
         // The words are written first. Deleting the audio before the handoff wrote
         // anything means a failure in between (no App Group, a kill) leaves neither
         // the file nor the text -- the one ordering that can lose a sentence
         // outright, on a path whose whole point is not losing it.
         SharedStore.publish(text, detail: detail)
+        // And kept in history for the same reason the Mac keeps one: the field the
+        // text was typed into is not somewhere a phone user can go back to.
+        History.add(
+            text: text,
+            detail: detail,
+            model: model.isEmpty ? Core.lastModelName() : model,
+            seconds: startedAt.map { Date().timeIntervalSince($0) } ?? 0
+        )
+        startedAt = nil
         spool?.discard()
         spool = nil
         if let orphanSource {
             try? FileManager.default.removeItem(at: orphanSource)
             self.orphanSource = nil
         }
+        removeImportedSource()
+        isPaused = false
         Diagnostics.log.notice("dictation done: \(text.count, privacy: .public) chars")
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         finishRecovery()
@@ -387,6 +474,8 @@ final class DictationController: ObservableObject {
         live = ""
         error = nil
         pendingRaw = nil
+        isPaused = false
+        startedAt = nil
         refineTimer?.invalidate()
         refineTimer = nil
         skipRefine = false
@@ -406,6 +495,7 @@ final class DictationController: ObservableObject {
         // its time expires, and leaves `background` non-invalid so the *next*
         // dictation gets no protection at all.
         endBackground()
+        removeImportedSource()
     }
 
     private func fail(_ message: String, g: Int? = nil) {
@@ -517,6 +607,50 @@ final class DictationController: ObservableObject {
         background = .invalid
     }
 
+    // MARK: files
+
+    /// Transcribes a recording the user picked, through the same pipeline.
+    ///
+    /// The Mac's 匯入音檔 equivalent, and it is the same code on purpose: the file
+    /// is read into samples, fed to the recogniser exactly as live audio is, and
+    /// the cleanup pass runs on the result. Anything AVFoundation can open works,
+    /// so a voice memo taken before this app existed is not a second-class input.
+    ///
+    /// The file is copied to `tmp` first. A security-scoped URL is only readable
+    /// while the scope is open, and the read happens on the work queue after this
+    /// returns -- so the copy is what makes the access lifetime correct rather than
+    /// lucky.
+    func transcribeFile(_ url: URL) {
+        guard !isBusy else {
+            fail("還在處理上一段，稍等再匯入。")
+            return
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let ext = url.pathExtension.isEmpty ? "audio" : url.pathExtension
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(ext)
+        do {
+            try FileManager.default.copyItem(at: url, to: copy)
+        } catch {
+            fail("讀不到這個音檔：\(error.localizedDescription)")
+            return
+        }
+        runInjected(url: copy, detail: "音檔", treatingAsFile: true)
+        // Recorded *after* the call: `runInjected` resets first, and that reset
+        // deletes the previous import — setting the field before it would delete the
+        // copy this very call is about to read.
+        importedSource = copy
+    }
+
+    private func removeImportedSource() {
+        if let importedSource {
+            try? FileManager.default.removeItem(at: importedSource)
+            self.importedSource = nil
+        }
+    }
+
     // MARK: injected audio
 
     /// Runs the whole pipeline over a file instead of the microphone.
@@ -525,7 +659,8 @@ final class DictationController: ObservableObject {
     /// testing anyway: everything after the sample buffer is identical. Reached
     /// with `-OVC_AUDIO_FILE <path.wav>`, which is also how the regression check
     /// drives a known sentence end to end.
-    func runInjected(url: URL, detail: String = "測試音", skipRefine: Bool = false) {
+    func runInjected(url: URL, detail: String = "測試音", skipRefine: Bool = false,
+                     treatingAsFile: Bool = false) {
         guard !isBusy else { return }
         let g = nextGeneration()
         reset()
@@ -533,10 +668,15 @@ final class DictationController: ObservableObject {
         // A recovery decodes last launch's sentence; it is not recording. Claiming
         // `.recording` would put 錄音中 on the keyboard while the microphone is
         // closed, so a user who taps at that moment talks into a dictation that
-        // never started -- the failure the launch delay only narrows.
-        let announcing: SharedStore.Phase = recovering ? .transcribing : .recording
+        // never started -- the failure the launch delay only narrows. An imported
+        // file is the same situation for a different reason: nothing is being
+        // spoken, so the screen says 辨識中 and the keyboard says the same.
+        let announcing: SharedStore.Phase = (recovering || treatingAsFile) ? .transcribing : .recording
         phase = announcing
-        SharedStore.setPhase(announcing, detail: recovering ? "補回上次的錄音…" : "錄音中…")
+        SharedStore.setPhase(
+            announcing,
+            detail: treatingAsFile ? "辨識音檔…" : (recovering ? "補回上次的錄音…" : "錄音中…")
+        )
         // Set before anything can fail, not after the file has been read: this file
         // is the only copy of that sentence, and every exit (`publish`, `fail`,
         // `reset`) finds it through this property. Assigned late, an engine that

@@ -267,5 +267,6 @@ accessibility replacement
 | 台語（Minnan） | 模型支援 `zh-MINNAN`，沒有人用耳朵聽過 |
 | 簽章／公證 | 只做 ad-hoc 簽章 |
 | 資料刪除 UI | 未實作（錄音狀態指示器有） |
-| iOS | 程式與模擬器實測到 M4（M0–M3 完成、M4/M5 部分），已完成 plan／review／debug 五輪複查；進度與完成定義見 `docs/milestones.md`（附錄 A–E 是五輪修掉的東西）；M6 全項待真機 |
+| iOS | M0–M7 見 `docs/milestones.md`：M0–M3、M5 完成，M6 三項數字已量到（2B 整理 2.24–2.91 秒、峰值 1.78 GB，**不需降級**），M7 與 macOS 對齊已補上簡繁轉換、整理守門、翻譯、整理段數、歷史、關鍵字、匯出、音檔匯入、暫停；未完成的是會議模式與語音編輯（附錄 A–E 是五輪複查修掉的東西，附錄 F 是「假降級」根因） |
+| iOS 與 macOS 的實際落差 | 會議模式（iOS 拿不到系統音訊）、語音編輯（iOS 沒有 AX，但鍵盤改得到自己上次插入的字）、5 套主題、SRT、模型 manifest 下載 |
 | Android | 只有設計筆記 |

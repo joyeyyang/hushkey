@@ -146,13 +146,55 @@ enum Core {
     ///
     /// `keywords` stays empty: the product decided a stored keyword list fed to the
     /// model made it invent terms rather than spell them better.
-    static func refine(_ text: String) throws -> String {
+    ///
+    /// `stages` is the Mac's `OVC_REFINE_STAGES`: 0 lets the engine pick by
+    /// transcript length, 1 condenses once, 2 understands then condenses.
+    static func refine(_ text: String, stages: UInt32 = 0) throws -> String {
         var out: UnsafeMutablePointer<CChar>?
-        try check(LLM_RefineTextWithKeywords(text, "", &out))
+        try check(LLM_RefineTextWithKeywordsStages(text, "", stages, &out))
         guard let p = out else { return text }
         defer { Core_FreeString(p) }
         let refined = String(cString: p).trimmingCharacters(in: .whitespacesAndNewlines)
         return refined.isEmpty ? text : refined
+    }
+
+    /// A dedicated translate pass, run after the cleanup.
+    ///
+    /// Separate from `refine` on purpose, exactly as on the Mac: one prompt asked
+    /// to both clean and translate produced half-translated drafts. `target` is
+    /// "en" or "zh"; the caller has already decided that a pass is wanted.
+    static func translate(_ text: String, to target: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_Translate(text, target, &out))
+        guard let p = out else { return text }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
+
+    /// Applies a spoken edit instruction to text this app last handed over.
+    ///
+    /// The core numbers the lines itself and does positional replacement and
+    /// deletion without the model; only a transformation ("改短一點") reaches
+    /// llama.cpp. Same call the Mac's `VoiceEdit` makes.
+    static func edit(_ text: String, instruction: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_EditText(text, instruction, &out))
+        guard let p = out else { return text }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
+
+    /// 摘要／決議／待辦 for a finished meeting transcript.
+    ///
+    /// A different chain from the dictation cleanup, and deliberately so: the
+    /// dictation prompt compresses a transcript into one line, which is exactly
+    /// what a meeting must not do with "who promised what".
+    static func summarize(_ transcript: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_Summarize(transcript, &out))
+        guard let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
     }
 
     /// The file that actually answered the last LLM task.
@@ -165,6 +207,17 @@ enum Core {
         guard LLM_LastModelName(&out) == 0, let p = out else { return "" }
         defer { Core_FreeString(p) }
         return String(cString: p)
+    }
+
+    /// What the engine holds, for the on-device measurement.
+    ///
+    /// `peak` is the process peak, not the current footprint: iOS reports the
+    /// number a memory-pressure kill would look at, which is the figure M6 is
+    /// actually asking about.
+    static func memoryUsage() -> (models: UInt64, peak: UInt64) {
+        var usage = OvcMemoryUsage(model_bytes: 0, peak_rss_bytes: 0)
+        guard Memory_GetUsage(&usage) == 0 else { return (0, 0) }
+        return (usage.model_bytes, usage.peak_rss_bytes)
     }
 }
 
