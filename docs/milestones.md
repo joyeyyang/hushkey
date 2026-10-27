@@ -892,3 +892,43 @@ llmDowngrade = (不存在)      llmPreferredSucceeded = true
 **量測用的覆寫不可以進入產品狀態。** `DEVICECTL_CHILD_*` 是量測工具，
 `LLMPolicy` 是產品記憶；兩者中間原本只隔一個「誰作答」的比較。
 任何「把觀察寫成持久狀態」的地方，都要能分開「我要求的」與「我得到的」。
+
+---
+
+## 附錄 G：鍵盤拿掉字母鍵、整理改成正式語域、HUD 重疊（2026-10-28）
+
+### G.1 iOS 鍵盤不再有 QWERTY
+
+使用者的理由就是最好的規格：「有實體英文鍵盤的話，跟我直接打英文也沒有區別」。
+
+- `VoiceBar` 現在是整個鍵盤：即時字幕（兩行）在上，下面一列
+  `🌐 ｜ ⧉ 複製 ｜ ⏸ 暫停 ｜ 🎤 麥克風`，高度 126 pt。
+- **🌐 不是裝飾**：那是離開這個鍵盤、回到使用者自己鍵盤的唯一方法。拿掉字母鍵
+  卻留下它，會做出一把出不去的鍵盤。
+- 暫停／繼續走 `SharedStore.requestPause()`／`requestResume()`（Darwin notification），
+  和 Mode 2 的錄音請求同一條通道——鍵盤沒有麥克風，每個麥克風決定都是給 App 的訊息。
+  App 用 `DictationController.init` 訂閱（不是某個畫面的 `onAppear`：錄音活得比畫面久，
+  Mode 1／Mode 2 的重點就是 App 在背景時按得到）。按下去 1.2 秒內狀態沒動就在鍵盤上說
+  「App 沒有回應」，而不是留一顆看起來有效的按鈕。
+- `-OVC_KB_PROBE` 的探針畫面現在把真正的 `VoiceBar` 畫出來（`project.yml` 把
+  `Sources/Keyboard/VoiceBar.swift` 也加進 App target），所以版面可以在機器上截圖檢查，
+  不必在手機上才發現字幕被裁掉。
+
+### G.2 整理要更正式
+
+見 `docs/PROJECT.md` §5.5：提示詞第一段改成語域規則＋列舉，few-shot 答案跟著改，
+`instructionPhrases` 兩平台同步加三句。Rust 核心重編（iOS device／sim 與 macOS）。
+
+### G.3 macOS HUD：狀態列畫在麥克風上
+
+見 `docs/PROJECT.md` §5.6。offline 截圖集多一張
+`<theme>-dictation-partial.png`——那是唯一會把兩個東西放進波形格子的形狀，
+也就是 bug 的形狀。`dictation-processing.png` 同時驗到「圖示與狀態列同時在畫面上」。
+
+重跑：
+
+```bash
+OVC_SELFTEST_UI=/tmp/ovc-hud OVC_SELFTEST_UI_THEME=paper,night \
+  dist/OfflineVoiceAssistant.app/Contents/MacOS/OfflineVoiceAssistant
+# → /tmp/ovc-hud/paper-dictation-partial.png 等 5 張 × 2 主題
+```

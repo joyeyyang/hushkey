@@ -88,6 +88,10 @@ enum Text {
         "不要摘要", "不要漏掉任何一件事", "重複講的同一件事只留一次", "刪掉口頭禪",
         "多餘的字", "照原樣保留", "問句保持問句", "預設用繁體中文輸出",
         "把使用者的口語改寫成通順的書面文字",
+        // Added with the formal-register rule: a longer prompt is a longer thing
+        // for a small model to answer instead of the draft. Kept identical to the
+        // iOS copy on purpose -- two lists that drift are two products.
+        "像寫給客戶或同事的信", "像自言自語", "換成正式而具體的詞",
     ]
 
     /// Returns the leaked phrase, or nil when the answer looks like a real edit.

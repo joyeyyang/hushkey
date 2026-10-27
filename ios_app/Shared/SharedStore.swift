@@ -24,6 +24,17 @@ enum SharedStore {
     /// only in `.pip` mode where switching apps is exactly what must not happen.
     static let recordRequestName = "com.example.offlinevoiceassistant.record"
 
+    /// Pause and resume, also asked for from the keyboard.
+    ///
+    /// Same channel as `recordRequestName` and for the same reason: the keyboard
+    /// owns no microphone, so every microphone decision is a message to the app.
+    /// These two matter more than they look. In Mode 1 the app is backgrounded
+    /// while it records, and the silence gate auto-stops after 1.2 seconds -- so
+    /// without a pause the only way to hold a sentence together through an
+    /// interruption is to keep talking.
+    static let pauseRequestName = "com.example.offlinevoiceassistant.pause"
+    static let resumeRequestName = "com.example.offlinevoiceassistant.resume"
+
     enum Phase: String, Codable {
         case idle
         case recording
@@ -194,6 +205,13 @@ enum SharedStore {
         /// The old single-blob key, removed on `clear()` so an upgraded install
         /// does not keep a stale duplicate for ever.
         static let legacy = "session"
+        /// Whether the microphone is held but not listening.
+        ///
+        /// Its own key rather than a seventh `Phase`: "paused" is not a stage of
+        /// the pipeline, it is a property of the recording, and folding it into
+        /// `Phase` would mean every `switch` in both processes grew a case that
+        /// behaves exactly like `.recording` except in the two places it does not.
+        static let paused = "s.paused"
     }
 
     static func current() -> Session {
@@ -399,6 +417,55 @@ enum SharedStore {
     /// avoid.
     static func requestRecording() {
         post(name: recordRequestName)
+    }
+
+    /// Whether the microphone is open but not listening.
+    static var isPaused: Bool {
+        get { defaults?.bool(forKey: Key.paused) ?? false }
+        set {
+            defaults?.set(newValue, forKey: Key.paused)
+            post()
+        }
+    }
+
+    /// The keyboard's pause / resume buttons.
+    static func requestPause() { post(name: pauseRequestName) }
+    static func requestResume() { post(name: resumeRequestName) }
+
+    /// Runs `handler` on the main queue when the keyboard asks to pause or resume.
+    ///
+    /// One registration for both, because they are one decision: a keyboard that
+    /// hears "pause" but not "resume" leaves a button that can only ever stop
+    /// listening. The handler is handed `true` for pause.
+    static func observePauseRequest(_ handler: @escaping (Bool) -> Void) {
+        PauseRequest.handler = handler
+        guard !PauseRequest.registered, let center = poster else { return }
+        PauseRequest.registered = true
+        let observer = Unmanaged.passUnretained(PauseRequest.shared).toOpaque()
+        for name in [pauseRequestName, resumeRequestName] {
+            CFNotificationCenterAddObserver(
+                center, observer,
+                // The callback cannot capture -- not the handler, not even the
+                // name it was registered for -- so which button was pressed is read
+                // back off the notification's own name, spelled out here rather
+                // than referenced.
+                { _, _, delivered, _, _ in
+                    let which = (delivered?.rawValue as String?) ?? ""
+                    DispatchQueue.main.async {
+                        PauseRequest.handler?(which == "com.example.offlinevoiceassistant.pause")
+                    }
+                },
+                name as CFString,
+                nil,
+                .deliverImmediately
+            )
+        }
+    }
+
+    private final class PauseRequest {
+        static let shared = PauseRequest()
+        static var handler: ((Bool) -> Void)?
+        static var registered = false
     }
 
     /// Runs `handler` on the main queue when the keyboard asks for a recording.

@@ -20,6 +20,21 @@ import UIKit
 final class DictationController: ObservableObject {
     static let shared = DictationController()
 
+    init() {
+        // The keyboard's pause / resume buttons. Registered here rather than in a
+        // view: the recording outlives every screen (that is the whole point of
+        // Mode 1 and Mode 2), and a subscription owned by a view would stop
+        // working exactly when the app is in the background with a microphone
+        // open -- the only situation the buttons exist for.
+        SharedStore.observePauseRequest { [weak self] paused in
+            guard let self else { return }
+            if paused { self.pause() } else { self.resume() }
+        }
+        // A stale `true` from a process the system killed would leave the keyboard
+        // showing ▶ while nothing is listening.
+        SharedStore.isPaused = false
+    }
+
     @Published private(set) var phase: SharedStore.Phase = .idle
     /// Settled words, accumulated as the recogniser closes utterances.
     @Published private(set) var transcript = ""
@@ -221,6 +236,7 @@ final class DictationController: ObservableObject {
             self.mic = mic
             self.gate = gate
             self.isPaused = false
+            SharedStore.isPaused = false
             startPolling(g: g)
             Diagnostics.log.notice("dictation started")
         } catch {
@@ -247,6 +263,7 @@ final class DictationController: ObservableObject {
         // up from the recogniser.
         live = ""
         isPaused = true
+        SharedStore.isPaused = true
         mic?.onSamples = nil
         mic?.stop(keepAlive: keepsAudioSession)
         mic = nil
@@ -259,6 +276,7 @@ final class DictationController: ObservableObject {
     func resume() {
         guard phase == .recording, isPaused else { return }
         isPaused = false
+        SharedStore.isPaused = false
         SharedStore.setPhase(.recording, detail: "錄音中…")
         attach(g: generation)
         Diagnostics.log.notice("dictation resumed")
@@ -407,6 +425,7 @@ final class DictationController: ObservableObject {
         live = ""
         phase = .done
         isPaused = false
+        SharedStore.isPaused = false
         // The words are written first. Deleting the audio before the handoff wrote
         // anything means a failure in between (no App Group, a kill) leaves neither
         // the file nor the text -- the one ordering that can lose a sentence
@@ -475,6 +494,7 @@ final class DictationController: ObservableObject {
         error = nil
         pendingRaw = nil
         isPaused = false
+        SharedStore.isPaused = false
         startedAt = nil
         refineTimer?.invalidate()
         refineTimer = nil

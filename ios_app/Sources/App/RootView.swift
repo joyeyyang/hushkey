@@ -140,6 +140,15 @@ struct RootView: View {
     /// device cannot be typed into from the command line.
     private func launchFlags() {
         let arguments = ProcessInfo.processInfo.arguments
+        // `-OVC_TAB <0-4>`: open on a given page. A screenshot check that cannot
+        // reach 歷史 or 設定 is a check of one page out of five, and the other four
+        // are exactly where a broken binding or an empty-state crash would live.
+        if let index = arguments.firstIndex(of: "-OVC_TAB"),
+           arguments.index(after: index) < arguments.endIndex,
+           let value = Int(arguments[arguments.index(after: index)]),
+           titles.indices.contains(value) {
+            tab = value
+        }
         if arguments.contains("-OVC_PIP_PROBE") {
             SharedStore.mode = .pip
             Diagnostics.log.notice("pip probe: requested at launch")

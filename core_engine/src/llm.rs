@@ -118,6 +118,13 @@ const UNDERSTAND_SYSTEM: &str = "把下面這段口語改寫成通順、完整�
 /// and a small model imitates them more reliably than it follows a rule.
 /// Traditional Chinese is enforced afterwards in code, not here.
 ///
+/// The register is stated first and in the most words, because it is the part a
+/// small model will not infer: the drafts are speech, and speech transcribed
+/// faithfully reads as casual at best and as a note to self at worst. The user
+/// asked for something closer to a letter to a client, so the rule names the
+/// particles to drop ("喔/啦/耶") rather than saying "be formal" -- the same
+/// reason the rest of this prompt names examples instead of adjectives.
+///
 /// The three rules that follow from reported failures, each stated once:
 /// * a spoken instruction inside the draft is APPLIED and then removed;
 /// * the language is the speaker's, and only an explicit translation request
@@ -127,7 +134,10 @@ const UNDERSTAND_SYSTEM: &str = "把下面這段口語改寫成通順、完整�
 ///   English terms in it was read as such a request);
 /// * no full stop at the very end. Only the final character is spoken about, so
 ///   interior punctuation is not touched.
-const REFINE_SYSTEM: &str = "把使用者的口語改寫成通順的書面文字，只輸出改寫後的內容。\
+const REFINE_SYSTEM: &str = "把使用者的口語改寫成通順、正式的書面文字，只輸出改寫後的內容。\
+語氣要像寫給客戶或同事的信，不要像自言自語；\
+不要「喔、啦、耶、欸、嘛」這類語氣詞，也不要「蠻、超、有點」這類隨性的說法，\
+換成正式而具體的詞；句子要完整，主詞動詞不要省到讀起來像片段。\
 不要摘要、不要漏掉任何一件事；重複的只留一次；刪掉口頭禪和多餘的字；\
 只有一個重點就寫一句，多個重點就一行一個、行首加「• 」；\
 數字、時間、名字照原樣保留；問句保持問句。\
@@ -167,7 +177,7 @@ const TRANSLATE_EXAMPLES_TO_ZH: [(&str, &str); 2] = [
         "我們應該下週上線，因為客戶在等。",
     ),
     (
-        "Can you send me the report before the meeting?",
+        "Could you send me the report before the meeting?",
         "你可以在開會前把報告寄給我嗎？",
     ),
 ];
@@ -198,7 +208,7 @@ const TRANSLATE_EXAMPLES_TO_ZH: [(&str, &str); 2] = [
 const REFINE_EXAMPLES_ZH: [(&str, &str); 6] = [
     (
         "嗯那個下週三下午三點半你有空嗎，我要跟你討論那個八十萬的案子，然後記得帶合約，喔對你有空嗎",
-        "下週三下午三點半你有空嗎？我要跟你討論八十萬的案子，記得帶合約",
+        "下週三下午三點半是否有空？我想與你討論八十萬的案子，請記得攜帶合約",
     ),
     // A repeated clause followed by a DIFFERENT short clause: the repeat goes,
     // the new clause stays. Without this pair the model treated the whole
@@ -206,24 +216,24 @@ const REFINE_EXAMPLES_ZH: [(&str, &str); 6] = [
     // one repeat and dropped it ("不要遲到" was silently lost in testing).
     (
         "嗯我明天下午要去拜訪客戶然後記得帶名片喔對我明天下午要去拜訪客戶不要忘記",
-        "我明天下午要去拜訪客戶，記得帶名片，不要忘記",
+        "我明天下午將前往拜訪客戶，請務必記得攜帶名片",
     ),
     // The instruction names the clause to drop ("把地點那句刪掉") and the rest
     // is kept, including the reason that follows it. The instruction itself is
     // gone from the answer.
     (
         "下週三下午三點半開會，地點在二樓會議室，把地點那句刪掉，我還沒確定",
-        "下週三下午三點半開會，地點還沒確定",
+        "下週三下午三點半將舉行會議，地點尚未確定",
     ),
     // Replacement: the old value does not survive anywhere, and the English term
     // the speaker used stays English inside an otherwise Chinese answer.
-    ("明天下午兩點跟客戶 sync，時間改成四點", "明天下午四點跟客戶 sync"),
+    ("明天下午兩點跟客戶 sync，時間改成四點", "與客戶的 sync 改至明天下午四點"),
     // A Chinese sentence carrying English product names is still Chinese. This
     // pair exists because the model answered such a draft in English; the rule
     // alone did not stop it.
     (
         "那個 Slack 的通知先關掉，還有 Figma 的連結記得更新",
-        "Slack 的通知先關掉，Figma 的連結記得更新",
+        "請先關閉 Slack 的通知，並更新 Figma 的連結",
     ),
     // The recogniser returns simplified characters for speech that was
     // Taiwanese Mandarin, and the model copied them through -- so the text a
@@ -240,25 +250,25 @@ const REFINE_EXAMPLES_ZH: [(&str, &str); 6] = [
 const REFINE_EXAMPLES_EN: [(&str, &str); 4] = [
     (
         "um so I think uh we should probably ship this you know next week because the client is waiting",
-        "We should ship this next week because the client is waiting",
+        "We should ship this next week, as the client is waiting",
     ),
     // Teaches that a question comes back as a question. Without it the model
     // turned "can you send the report before then?" into "Please send the
     // report before then." -- an ask came back as an order (observed).
     (
         "um can you uh send me the report before the meeting? the report before the meeting",
-        "Can you send me the report before the meeting?",
+        "Could you send me the report before the meeting?",
     ),
     // Deletion, with an interior period kept: the room clause goes, the fact the
     // speaker added afterwards stays, and only the END of the answer is bare.
     (
         "um the kickoff is Wednesday at 3:30 in the second-floor room, actually delete the room bit, I haven't confirmed it, so the room is still open",
-        "The kickoff is Wednesday at 3:30. The room is still open",
+        "The kickoff is on Wednesday at 3:30. The room has not been confirmed yet",
     ),
     // Replacement.
     (
         "uh the client meeting is at 2 tomorrow, make that 4",
-        "The client meeting is at 4 tomorrow",
+        "The client meeting has been moved to 4 tomorrow",
     ),
 ];
 

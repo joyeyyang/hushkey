@@ -11,20 +11,16 @@ import UIKit
 /// microphone belongs to the containing app, and this extension's job is the three
 /// things it *can* do: show the session's phase, type the result at the cursor,
 /// and hand the text to the clipboard.
+///
+/// It also has no letter keys. A QWERTY row under the microphone made this a worse
+/// English keyboard with a recording button attached; the user's own keyboard is
+/// one globe tap away, which is what the globe button is for.
 final class KeyboardViewController: UIInputViewController {
-    private let rows = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
 
     private var bar: VoiceBar!
-    private var shifted = false
     private var refreshTimer: Timer?
     /// The last text this keyboard saw, so ⧉ still works after it was inserted.
     private var lastText = ""
-    /// The letter keys, kept so ⇧ can retitle them. Walking `view.subviews` for
-    /// them never worked: it reaches the keyboard's stack views, one level above
-    /// the buttons, so shift changed what would be typed but nothing on screen.
-    private var letterKeys: [UIButton] = []
-
-    private let ink = UIColor(red: 0.93, green: 0.90, blue: 0.86, alpha: 1)
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -82,7 +78,8 @@ final class KeyboardViewController: UIInputViewController {
         bar.apply(
             phase: session.phase,
             text: text,
-            needsSwitch: !(SharedStore.mode == .pip && SharedStore.pipAlive)
+            needsSwitch: !(SharedStore.mode == .pip && SharedStore.pipAlive),
+            paused: SharedStore.isPaused
         )
 
         if SharedStore.sharedContainer == nil {
@@ -105,7 +102,8 @@ final class KeyboardViewController: UIInputViewController {
         textDocumentProxy.insertText(pending.text)
         SharedStore.markConsumed(pending.seq)
         lastText = pending.text
-        bar.apply(phase: .done, text: "已插入 \(pending.text.count) 字", needsSwitch: true)
+        bar.apply(phase: .done, text: "已插入 \(pending.text.count) 字",
+                  needsSwitch: true, paused: false)
     }
 
     // MARK: ui
@@ -114,6 +112,8 @@ final class KeyboardViewController: UIInputViewController {
         bar = VoiceBar()
         bar.translatesAutoresizingMaskIntoConstraints = false
         bar.onMic = { [weak self] in self?.openRecorder() }
+        bar.onPause = { [weak self] in self?.togglePause() }
+        bar.onNext = { [weak self] in self?.advanceToNextInputMode() }
         bar.onCopy = { [weak self] in
             guard let self, !self.lastText.isEmpty else { return }
             UIPasteboard.general.string = self.lastText
@@ -121,67 +121,11 @@ final class KeyboardViewController: UIInputViewController {
         }
         view.addSubview(bar)
 
-        let keys = buildKeys()
-        view.addSubview(keys)
-
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             bar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bar.topAnchor.constraint(equalTo: view.topAnchor),
-            bar.heightAnchor.constraint(equalToConstant: 46),
-
-            keys.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 6),
-            keys.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -6),
-            keys.topAnchor.constraint(equalTo: bar.bottomAnchor, constant: 4),
-            keys.bottomAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -4),
         ])
-    }
-
-    private func buildKeys() -> UIStackView {
-        let stack = UIStackView()
-        stack.axis = .vertical
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        for row in rows {
-            let line = UIStackView()
-            line.axis = .horizontal
-            line.spacing = 5
-            line.distribution = .fillEqually
-            for ch in row {
-                let button = key(String(ch), action: #selector(typeKey(_:)))
-                letterKeys.append(button)
-                line.addArrangedSubview(button)
-            }
-            if row == rows[2] {
-                line.insertArrangedSubview(key("⌫", action: #selector(backspace)), at: 0)
-                line.insertArrangedSubview(key("⇧", action: #selector(shiftKey)), at: 0)
-            }
-            stack.addArrangedSubview(line)
-        }
-
-        let bottom = UIStackView()
-        bottom.axis = .horizontal
-        bottom.spacing = 5
-        bottom.distribution = .fillEqually
-        bottom.addArrangedSubview(key("🌐", action: #selector(nextKeyboard)))
-        bottom.addArrangedSubview(key("空白", action: #selector(spaceKey)))
-        bottom.addArrangedSubview(key("換行", action: #selector(returnKey)))
-        stack.addArrangedSubview(bottom)
-
-        return stack
-    }
-
-    private func key(_ title: String, action: Selector) -> UIButton {
-        let button = UIButton(type: .system)
-        button.setTitle(title, for: .normal)
-        button.setTitleColor(ink, for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 17, weight: .regular)
-        button.backgroundColor = UIColor.white.withAlphaComponent(0.09)
-        button.layer.cornerRadius = 6
-        button.heightAnchor.constraint(equalToConstant: 40).isActive = true
-        button.addTarget(self, action: action, for: .touchUpInside)
-        return button
     }
 
     // MARK: actions
@@ -203,6 +147,29 @@ final class KeyboardViewController: UIInputViewController {
             return
         }
         openApp()
+    }
+
+    /// Pause or resume, as a message to the app.
+    ///
+    /// The button only works while a recording exists, and the app is the only side
+    /// that knows whether it does -- so this asks and then checks, rather than
+    /// painting the new state optimistically off its own guess.
+    private func togglePause() {
+        let paused = SharedStore.isPaused
+        if paused {
+            SharedStore.requestResume()
+        } else {
+            SharedStore.requestPause()
+        }
+        bar.showNotice(paused ? "繼續中…" : "暫停中…")
+        // The app may be suspended (Mode 1 records from the background). If the
+        // state did not move within a beat, say so instead of leaving a button that
+        // looks like it worked.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self else { return }
+            guard SharedStore.isPaused == !paused else { return }
+            self.bar.showNotice("App 沒有回應，請先切回「語音輸入」")
+        }
     }
 
     /// A Darwin notification has no acknowledgement, so the request is checked:
@@ -228,26 +195,4 @@ final class KeyboardViewController: UIInputViewController {
             }
         }
     }
-
-    @objc private func typeKey(_ sender: UIButton) {
-        guard var text = sender.title(for: .normal) else { return }
-        if shifted { text = text.uppercased() }
-        textDocumentProxy.insertText(text)
-        if shifted { setShift(false) }
-    }
-
-    @objc private func shiftKey() { setShift(!shifted) }
-
-    private func setShift(_ on: Bool) {
-        shifted = on
-        for button in letterKeys {
-            guard let title = button.title(for: .normal) else { continue }
-            button.setTitle(on ? title.uppercased() : title.lowercased(), for: .normal)
-        }
-    }
-
-    @objc private func backspace() { textDocumentProxy.deleteBackward() }
-    @objc private func spaceKey() { textDocumentProxy.insertText(" ") }
-    @objc private func returnKey() { textDocumentProxy.insertText("\n") }
-    @objc private func nextKeyboard() { advanceToNextInputMode() }
 }

@@ -449,6 +449,27 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
 
     /// Offscreen render of the confirm-before-insert card. The editable body is
     /// a different surface from the transcript, and it has to survive the merge.
+    /// Offscreen render of the second before the first word lands: the controls,
+    /// the meter, and the live partial borrowing the meter's slot.
+    ///
+    /// This shape exists in the offscreen set because it is the one that was
+    /// wrong: the strip after the mic is a single 170 pt slot, and this is the
+    /// only shape that draws two things into it.
+    func snapshotLivePartial(to url: URL, partial: String, paused: Bool = false) {
+        collapsed = false
+        begin(title: "聽寫", status: "辨識中…", show: false)
+        applyMode(.recording)
+        for level in [0.4, 0.66, 0.5] { waveView.push(CGFloat(level)) }
+        countLabel.stringValue = "\(partial.count) 字"
+        if paused {
+            setPaused(true)
+        } else {
+            setPartial(partial)
+        }
+        layoutContents()
+        render(to: url)
+    }
+
     /// Offscreen render of the post-mic step (辨識中 / 整理中), which is the shape
     /// the user asked to keep visible.
     func snapshotProcessing(to url: URL, status: String, segments: [TranscriptSegment]) {
@@ -705,16 +726,28 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         handleView.frame = NSRect(x: m + 404, y: bandMidY - 11, width: 14, height: 22)
 
         statusLabel.sizeToFit()
-        if mode == .recording, noticeWork != nil || (isPaused && !pillCarriesState) {
+        // The strip after the mic is ONE slot of 170 pt, and the waveform owns it.
+        // Anything else drawn there -- the live words, a notice, "已暫停" -- borrows
+        // it and turns the meter off for as long as it does (`restoreWaveSlot` puts
+        // both back). `!statusLabel.isHidden` is the whole test, in place of the
+        // three separate conditions that used to decide this, because a visible
+        // label in the recording shape IS the borrower.
+        let borrowsWaveSlot = mode == .recording && !statusLabel.isHidden
+        if borrowsWaveSlot {
             // In the waveform's slot: after the hairline divider, and stopping
-            // short of the right-aligned character count (which needs ~30 pt) so
-            // a notice never runs under it.
+            // short of the right-aligned character count -- which ends at m+286 and
+            // is up to ~38 pt wide, so the line ends at m+240. At 190 pt it ran
+            // straight into the count ("…這週的進度3 字" in the offscreen render).
             statusLabel.frame = NSRect(x: m + 78, y: bandMidY - statusLabel.frame.height / 2,
-                                       width: 190, height: min(statusLabel.frame.height, Self.capsuleShape.height))
+                                       width: 162, height: min(statusLabel.frame.height, Self.capsuleShape.height))
         } else {
-            // Leave room for the ⋮⋮ grip on the right, and for the check on the left
-            // when a result is showing.
-            let leftPad: CGFloat = (mode == .result) ? 56 : 24
+            // Past whatever is drawn in the left slot. The mic sits at m+22 and is
+            // 20 pt wide, so a line starting at m+24 was drawn straight through it
+            // -- which is what "辨識中…" did in both the recording shape (before the
+            // first words) and the processing shape (after the mic closed). The
+            // check glyph takes the same slot for a result, hence the same 56.
+            let leftPad: CGFloat = (mode == .result || !micView.isHidden) ? 56 : 24
+            // Leave room for the ⋮⋮ grip on the right.
             let rightPad: CGFloat = 74
             statusLabel.frame = NSRect(x: m + leftPad, y: bandMidY - statusLabel.frame.height / 2,
                                        width: shapeW - leftPad - rightPad, height: min(statusLabel.frame.height, Self.capsuleShape.height))
@@ -1084,12 +1117,18 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
             statusLabel.stringValue = status
             statusLabel.isHidden = false
             statusLabel.sizeToFit()
-        case .recording, .processing:
-            // Before the first words there is no header for the pill to sit in, so
-            // the capsule's own line carries the step. Once the transcript gives
-            // the pill a home the capsule line goes away: one sentence, one place.
-            statusLabel.stringValue = showsHeader ? "" : status
-            statusLabel.isHidden = showsHeader
+        case .recording:
+            // The recording shape says the step in the pill once there is a
+            // transcript for the pill to sit in, and never in the capsule's line:
+            // that line's slot belongs to the waveform. It used to carry the step
+            // before the first words arrived, which put "辨識中…" on top of both the
+            // microphone and the meter -- the window said three things at once in
+            // one 170 pt strip. The 朱紅 mic already says "listening".
+            statusLabel.isHidden = true
+            // The label has just left the slot, so the meter comes back -- a notice
+            // may have been borrowing it. Not while paused: the meter is hidden
+            // then on purpose, because audio is being dropped.
+            if !isPaused { waveView.isHidden = false }
             statusLabel.sizeToFit()
         case .edit:
             break
@@ -1112,13 +1151,20 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         guard mode == .recording, !showsHeader else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            // Not "empty": the step the session is on is still worth saying.
-            statusLabel.stringValue = sessionStatus
-            statusLabel.isHidden = false
+            // Nothing is being said yet, so the slot goes back to the meter and
+            // nothing else is drawn in it. It used to say the step here
+            // ("辨識中…"), which never went away again: a live poll returns an
+            // empty partial on almost every tick, so the line stayed up for the
+            // whole recording and was drawn through the microphone and the
+            // waveform. The step is in the pill once there is a header, and in the
+            // title before that.
+            restoreWaveSlot()
         } else {
-            // The slot is narrow; the tail is what is being said right now.
+            // The slot is narrow; the tail is what is being said right now. The
+            // meter goes while the words are there: one occupant per slot.
             statusLabel.stringValue = String(trimmed.suffix(16))
             statusLabel.isHidden = false
+            waveView.isHidden = true
         }
         statusLabel.sizeToFit()
         layoutContents()

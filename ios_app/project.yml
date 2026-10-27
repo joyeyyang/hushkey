@@ -20,6 +20,10 @@ targets:
     sources:
       - path: Sources/App
       - path: Shared
+      # `VoiceBar.swift` is in the keyboard target, and also here: the probe screen
+      # draws the real bar so its layout can be checked on a machine, and a copy of
+      # it in the app would be a second thing to keep in sync.
+      - path: Sources/Keyboard/VoiceBar.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.offlinevoiceassistant.ios

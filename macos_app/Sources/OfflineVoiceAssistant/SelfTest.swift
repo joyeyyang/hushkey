@@ -229,13 +229,21 @@ enum SelfTest {
                 text: "下週三上線，其他頁面之後再排。"
             )
             // The step between the mic and the paste: the capsule has to stay,
-            // and say what it is doing.
+            // and say what it is doing. This is also the shot that catches a
+            // status line drawn through the microphone: the glyph is on screen and
+            // the label is visible at the same time.
             window.snapshotProcessing(
                 to: dir.appendingPathComponent("\(theme.id)-dictation-processing.png"),
                 status: "整理中…",
                 segments: Array(dictationSegments.prefix(2))
             )
-            for shape in ["dictation-recording", "dictation-edit", "dictation-result", "dictation-processing"] {
+            // The second before the first word lands, which is the only shape that
+            // puts two things in the meter's slot.
+            window.snapshotLivePartial(
+                to: dir.appendingPathComponent("\(theme.id)-dictation-partial.png"),
+                partial: "那我們先確認一下這週的進度"
+            )
+            for shape in ["dictation-recording", "dictation-edit", "dictation-result", "dictation-processing", "dictation-partial"] {
                 let url = dir.appendingPathComponent("\(theme.id)-\(shape).png")
                 if let data = try? Data(contentsOf: url), data.count > 3_000 {
                     print("ok \(theme.id) \(shape) \(data.count)B")
