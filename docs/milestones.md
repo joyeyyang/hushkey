@@ -383,6 +383,7 @@ Dolphin 與 SenseVoice 的 token 表不同，跟著錯的那個會讓辨識在�
 | ASR 載入 | 0.45–0.52 秒 | `-OVC_DEVICE_BENCH`，`Documents/bench.json` 的 `asrLoadSeconds` |
 | ASR 模型 | 228.45 MB（SenseVoice int8） | `OvcMemoryUsage.model_bytes`，載入後峰值 378.8 MB |
 | 2B 整理（第二次啟動起） | 24 字 2.24 秒 · 41 字 2.91 秒，峰值 1777.1 MB | 同上，`refine[]` |
+| 2B 整理（68 字，含簡→繁與守門） | 3.70 秒，峰值 1699.2 MB | `-OVC_REFINE_TEXT` |
 | 2B 首次啟動 | 22.09 秒，其中 `ggml_metal_library_compile_all` 17.818 秒 | 真機 log；第二次啟動快取後同一段 0.012 秒 |
 | 0.5B（備援） | 1.50 秒 · 1.06 秒，峰值 957.8 MB | 同上 |
 | 端到端 `-OVC_AUDIO_FILE` | ASR → 整理 → `s.published`（seq 2、3）全通 | App Group plist |
@@ -850,7 +851,41 @@ G_meta_ok       : false     （「以下是整理後的內容：」被擋）
 H_tiny_ok       : false     （只剩 1/5 長度，判定為改寫成別的東西）
 ```
 
-- 真機 `-OVC_REFINE_TEXT`（見下方重跑指令）：待手機解鎖後執行，結果補在這裡。
+- 真機 `-OVC_REFINE_TEXT`（iPhone 15 Pro，使用者回報的那一句原文）：
+
+```json
+{
+  "recordedDowngrade": null,
+  "requestedModel": "Qwen3.5-2B-Q4_K_M.gguf",
+  "servedModel":    "Qwen3.5-2B-Q4_K_M.gguf",
+  "inputChars": 68,
+  "inputTraditional": "呃，我們明天我們班來開個會，就是。我們是。不是下禮拜和校慶嘛？…",
+  "raw":         "明天我们班来开个会，讨论校庆要卖什么东西及需要准备的活動",
+  "traditional": "明天我們班來開個會，討論校慶要賣什麼東西及需要準備的活動",
+  "seconds": 3.70,
+  "peakRSSMB": 1699.2
+}
+```
+
+  三件事同時被證明：
+
+  1. **跑的是 2B**（`requestedModel == servedModel`，`recordedDowngrade` 已清空）
+  2. **真的整理了**：68 字 → 26 字，「呃」「就是。」「我們是。」與整段重複全部消失，
+     問句濃縮成「要討論……」的敘述
+  3. **`raw` 是簡體**（「开个会」「校庆」）而 `traditional` 沒有——中間那個
+     `Hans-Hant` 不是裝飾，沒有它鍵盤拿到的就是半繁半簡，也就是使用者看到的那個樣子
+
+- 端到端（同一支手機、`-OVC_AUDIO_FILE probe.wav`，App Group 讀回來）：
+
+```
+s.detail = 已整理 · 測試音
+s.published.text = 提醒我明天下午兩點帶合約去見陳總，順便問他上個月的發票處理好了沒有
+llmDowngrade = (不存在)      llmPreferredSucceeded = true
+```
+
+  同一段音檔在修好之前產出的是「提醒我明天下午两点带合约去见陈总」——
+  簡體、且幾乎沒有整理。現在是繁體、補了連接詞、去掉贅字。
+
 
 ### 學到的（寫下來免得再犯）
 
