@@ -262,8 +262,11 @@ enum SharedStore {
         // `max` with the published sequence covers the upgrade: an install from
         // before this key existed has `s.consumedSeq = 3` and no `s.seq`, and
         // starting that one at 1 would reintroduce the very bug on the first
-        // launch after the update.
-        let seq = max(defaults.integer(forKey: Key.seq), previous.seq) + 1
+        // launch after the update. `consumedSeq` is included for the same reason
+        // one step further out: anything that resets the counter (a restored
+        // backup, a repair that clears two keys but not the third) still cannot
+        // produce a sequence the keyboard has already typed.
+        let seq = max(defaults.integer(forKey: Key.seq), previous.seq, previous.consumedSeq) + 1
         let next = Published(seq: seq, text: text, detail: detail ?? "已整理完成")
         if let data = try? JSONEncoder().encode(next) {
             defaults.set(data, forKey: Key.published)

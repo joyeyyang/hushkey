@@ -109,18 +109,53 @@ final class AudioSpool {
     }
 
     /// Keeps the directory from growing without bound on a phone that dictates a
-    /// lot and never finishes a launch.
+    /// lot and never finishes a launch. Claimed files are counted in the same
+    /// budget: they are never recovered, so without this they would accumulate one
+    /// per killed recovery, a few megabytes at a time, for ever.
     static func prune(keeping limit: Int = 6) {
-        let files = dated().sorted { $0.1 > $1.1 }
+        let files = (dated() + claimed()).sorted { $0.1 > $1.1 }
         for (url, _) in files.dropFirst(limit) {
             try? FileManager.default.removeItem(at: url)
         }
     }
 
-    private static func dated() -> [(URL, Date)] {
+    /// Takes a spool out of the recovery candidate set, before decoding it.
+    ///
+    /// Recovery writes its own spool while it decodes, so a second kill makes the
+    /// half-fed copy the newest orphan. Keeping the original recoverable then
+    /// means a later launch picks it up *again* and types the same sentence a
+    /// second time -- the duplicate this pipeline was just made to stop. Claiming
+    /// first (a rename that `orphans()` no longer matches) trades that duplicate
+    /// for the risk of losing the sentence if the recovery itself is killed twice;
+    /// the file is still on disk under `.claimed`, and `abandonedClaims()` reports
+    /// it so the loss is visible rather than silent.
+    static func claim(_ url: URL) -> URL? {
+        let claimed = url.deletingPathExtension().appendingPathExtension("claimed")
+        do {
+            try FileManager.default.moveItem(at: url, to: claimed)
+            return claimed
+        } catch {
+            Diagnostics.log.error(
+                "spool claim failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    /// Claims left behind by a recovery that was itself killed. Reported, not
+    /// silently ignored: nothing will decode them.
+    static func abandonedClaims() -> [URL] {
+        claimed().map(\.0)
+    }
+
+    private static func claimed() -> [(URL, Date)] {
+        dated(suffix: ".claimed")
+    }
+
+    private static func dated(suffix: String = ".wav") -> [(URL, Date)] {
         let manager = FileManager.default
         guard let names = try? manager.contentsOfDirectory(atPath: directory.path) else { return [] }
-        return names.filter { $0.hasSuffix(".wav") }.compactMap { name in
+        return names.filter { $0.hasSuffix(suffix) }.compactMap { name in
             let url = directory.appendingPathComponent(name)
             guard let attributes = try? manager.attributesOfItem(atPath: url.path),
                   let modified = attributes[.modificationDate] as? Date

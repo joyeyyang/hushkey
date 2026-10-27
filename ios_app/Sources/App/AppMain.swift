@@ -135,11 +135,11 @@ struct RootView: View {
             // simulator cannot be tapped from a script. It exercises the real
             // action, which is what makes the check worth running.
             if ProcessInfo.processInfo.arguments.contains("-OVC_CLEAR") {
-                // Three seconds, not immediately: with a spool left by a killed
-                // run, recovery has started by then, which is the case worth
-                // testing -- 清除 during recovery must stop it rather than let the
-                // sentence arrive anyway.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                // Two seconds: late enough that a recovery has started by then,
+                // early enough to land inside its decode rather than after the
+                // sentence was already published. Both outcomes are worth
+                // exercising; the log says which one happened.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                     Diagnostics.log.notice("clear requested at launch")
                     dictation.clear()
                 }

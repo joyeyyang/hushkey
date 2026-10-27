@@ -17,9 +17,9 @@
 | M5 真機安裝與模型 | `[~]` | 需要插線＋付費帳號開 App Group |
 | M6 真機實測 | `[ ]` | 全部，只有真機能量 |
 
-2026-10-27 已跑完 plan／review／debug 三輪複查；review 的 12 項見附錄 A，
-debug 的 7 項見附錄 B。文件裡的「佐證」只寫真的跑過的，量不到的一律標成
-「待真機」或「程式碼層」，不寫「應該可以」。
+2026-10-27 已跑完 plan／review／debug 三輪複查：review 的 12 項見附錄 A，
+debug 的 7 項見附錄 B，第三輪回頭審「前兩輪修得對不對」找到的 9 項見附錄 C。
+文件裡的「佐證」只寫真的跑過的，量不到的一律標成「待真機」或「程式碼層」，不寫「應該可以」。
 
 
 ---
@@ -100,7 +100,7 @@ iOS 不行。這一步是讓同一份 C ABI 在 iOS 上也能用。
 ——後者涵蓋升級：舊安裝沒有 `s.seq`，`consumedSeq` 卻可能已經是 6。實測：
 
 ```
-（清除後）s.seq = 5 | consumedSeq = 3 | published.seq = 無
+（清除後）s.seq 停在 5（清除不動它）| consumedSeq = 3 | published.seq = 無
 （新的一句）s.seq = 6 | published.seq = 6          ← 沒有回退
 （鍵盤插字）consumedSeq = 6                        ← 只插一次，截圖 d3-insert-after-clear.png
 （升級模擬：刪掉 s.seq、published.seq = 6、consumedSeq = 6）
@@ -218,28 +218,46 @@ dictation done: 27 chars
 `r2-insert.png`）。順帶看到原始輸出長什麼樣：「今天下午下午三點…」——ASR 的重複詞
 只有整理階段會修掉，而這條路刻意跳過整理。
 
-**補辨識的三條邊界（第二輪複查後改的，都是實測）**：
+**補辨識的四條邊界（第二、三輪複查後改的，都是實測）**：
 
 1. **等 1.5 秒才開始。** 從鍵盤按麥克風的冷啟動是「先開 App、再走 `onOpenURL` 開始錄音」，
-   補辨識若搶在前面，會先占住麥克風二十幾秒，使用者對著一個「其實還沒開始」的錄音講話。
-   現在啟動後 1.5 秒、且只在仍為 `.idle` 時才補。（上表那次 log 沒有這個延遲，因為它
-   是 `-OVC_CLEAR` 測試啟動，`onOpenURL` 不會來，延遲只影響麥克風路徑。）
-2. **不再刪掉其他比較舊的 spool。** 補辨識自己也會寫一份 spool；被砍第二次的話，
-   半途那份變成「最新」，於是下一次啟動會把完整的原檔連同它一起刪掉——「不會掉字」
-   在這裡反而變成掉字。現在保留舊的，`prune` 負責上限，下一次啟動補下一份。
-3. **補辨識途中按清除，是真的取消。** 實測（`-OVC_CLEAR` 在 3 秒後觸發，故意讓它撞上
-   進行中的補辨識）：
+   補辨識若搶在前面，會占住麥克風二十幾秒，使用者對著一個「其實還沒開始」的錄音講話。
+   現在啟動後 1.5 秒才補；這個延遲對**每一次啟動**都成立，只是只有麥克風路徑會在那個
+   窗口內搶到 `start()`。
+2. **補辨識期間不再謊報「錄音中」。** 這條路徑原本把共享 phase 設成 `.recording`，
+   於是鍵盤顯示「錄音中…」，而麥克風根本沒開——使用者對著一場不會發生的錄音講話。
+   現在它對外是 `.transcribing`＋「補回上次的錄音…」。實測（啟動後 2 秒讀共享狀態）：
 
 ```
-recovering spool cafe0002-orphan.wav
-dictation injected: cafe0002-orphan.wav
+s.phase = transcribing
+s.detail = 辨識中…
+dictation injected: bbbb0002-new.claimed
 dictation done: 27 chars
-clear requested at launch            ← 清除晚了一步，這句已經發布
-（結果）s.phase = idle · s.published 不存在 · s.seq = 5 · spool 目錄空
 ```
 
-清除把剛發布的那句拿走、把 spool 目錄清空，序號**沒有**回退（4 → 5）。
-之後重開 App，`recovering spool` 出現 **0 次**——清掉的句子不會自己回來。
+3. **清除會收走已發布的句子與 spool，也真的能取消進行中的補辨識**（`-OVC_CLEAR`
+   在 2 秒後觸發）。用一段 10.5 秒的音檔當 orphan，讓解碼跑得夠久，清除這次落在
+   解碼途中：
+
+```
+recovering spool eeee0003-long.wav
+dictation injected: eeee0003-long.claimed
+clear requested at launch            ← 落在解碼途中，不是發布之後
+（結果）s.phase = idle · s.published 不存在 · s.seq 沒有變 · spool 目錄空
+```
+
+   沒有任何 `dictation done`——那句話不會晚一步冒出來。短音檔的情況（清除晚於發布）
+   也驗過：句子被收走、spool 清空、重開 App 時 `recovering spool` 出現 **0 次**。
+
+4. **舊的 orphan 留給下一次啟動，但要先「認領」。** 補辨識自己也會寫一份 spool；
+   被砍第二次的話，半途那份變成「最新」。原本這裡會把舊的清掉，那等於把完整的原檔
+   連同半成品一起刪掉——「不會掉字」在這裡反而變成掉字。現在保留舊的，選中的那一份
+   先改名成 `*.claimed`（離開 `orphans()` 的候選集）再解碼。**這一條是雙面的**：
+   不認領的話，下一次啟動會撿到原檔並把同一句再插一次（實測重現過）；認領之後，
+   被砍第二次的那句話就不會交付，只留下一個 `.claimed` 檔與一行
+   `recovery abandoned N claimed spool(s)`。`.claimed` 一起算進 `prune` 的上限。
+   另外 `orphans()` 只挑 mtime 在 3 秒～**600 秒**之間的檔案，超過十分鐘的 spool
+   不會被補，只會等 `prune` 收掉。
 
 
 ---
@@ -284,9 +302,11 @@ pip: unsupported on this device; falling back to Mode 1
 
 **心跳而不是旗標**：`pipLive` 只在 PiP delegate 裡寫 `true`，但 delegate 不會在
 「行程被砍」時執行，於是它會永遠停在 `true`，鍵盤就一再把麥克風點擊吞掉。現在 App 每秒
-蓋一次章（`pipLive` + `pipLiveAt`），鍵盤只在章還新鮮時才相信它。新鮮度從 8 秒放寬到
-**20 秒**：主執行緒在匯入模型時可以卡好幾秒，而誤判的代價是「使用者被強迫跳 App 一次」，
-比多等幾秒更糟。實測（模擬器，先手動把 `pipLive` 寫成 1、`pipLiveAt` 寫成遠古時間）：
+蓋一次章（`pipLive` + `pipLiveAt`），鍵盤只在章還新鮮時才相信它。新鮮度訂在 **20 秒**：
+主執行緒在匯入模型時可以卡好幾秒，而誤判的代價是「使用者被強迫跳 App 一次」，比多等幾秒
+更糟。**這條新鮮度本身沒有實測**——模擬器連 PiP 都起不來，心跳根本不會跑，只有真機能驗。
+在模擬器上驗到的是「殘留的旗標在啟動時會歸零」（先手動把 `pipLive` 寫成 1、`pipLiveAt` 寫成
+遠古時間）：
 
 ```
 （啟動前）pipLive = 0 → 手動寫成 1
@@ -296,7 +316,7 @@ pip: unsupported on this device; falling back to Mode 1
 （啟動後）pipLive = 0
 ```
 
-也就是「旗標留在 1」這種殘留狀態在啟動時會被清掉，之後由心跳決定——不是由上一次執行決定。
+也就是「上一次執行的旗標」不會被當成「這一次的事實」。
 
 
 ---
@@ -401,7 +421,8 @@ M5 的程式部分（模型安裝）可以與 M3/M4 平行做，但**真機驗�
 
 第一輪修完不代表修對。這一輪請子代理**專門找「還是會壞」的地方**（跨行程可見性、
 序號、generation 守衛、生命週期、音訊 session、FFI），每一項都要指出「什麼情況下會壞、
-使用者看到什麼」。以下是它找到且已修的路徑，全部在模擬器上重跑過。
+使用者看到什麼」。以下是它找到且已修的路徑；能在模擬器上重跑的都在下表「驗證」欄寫了
+結果，三項（PiP、麥克風失敗、降級階梯）在這台機器上觸發不了，只到程式碼層。
 
 | # | 缺陷（原本會怎樣） | 修法 | 驗證 |
 |---|---|---|---|
@@ -410,7 +431,7 @@ M5 的程式部分（模型安裝）可以與 M3/M4 平行做，但**真機驗�
 | 3 | 背景到期 handler 先比對 generation 才 `endBackground()`；不符時**背景任務永遠不結束**，iOS 到期直接砍行程，而且下一次聽寫拿不到任何背景時間 | 先 `endBackground()` 再比對 | 程式碼層（路徑順序可讀） |
 | 4 | `publish` 的序號由「已發布那筆 +1」推算，`clear()` 刪掉那筆 → 序號從 1 重數，鍵盤已插到第 3 句時，新句子在序號爬回 3 之前**全部不落字** | 序號搬到獨立鍵 `s.seq`，單調遞增；`clear()` 不重置它，也不重置 `consumedSeq`；取 `max(s.seq, published.seq) + 1`，順便涵蓋「舊安裝沒有這個 key」的升級路徑 | 清除後 `s.seq` 4→5、新句 5→6、鍵盤插一次（`d3-insert-after-clear.png`）；升級模擬（刪掉 `s.seq`、`published.seq=6`、`consumedSeq=6`）→ 新句 `s.seq=7`、`consumedSeq` 6→7（`d4-upgrade-insert.png`） |
 | 5 | 麥克風停止／失敗一律 `keepAlive: false`，在 Mode 2 下等於關掉音訊 session → **一次失敗就把 PiP 小窗拆了**，之後每次按麥克風都跳 App | 三處（`attach`／`stop`／`fail`）改用 `keepsAudioSession`（`mode == .pip \|\| PiPController.shared.isLive`） | 程式碼層；PiP 本身待真機 |
-| 6 | 補辨識與麥克風互搶：冷啟動時補辨識先跑，占住麥克風二十幾秒，使用者對著一場「其實還沒開始」的錄音講話 | 延後 1.5 秒才補＋`recovering`／`startAfterRecovery`／`finishRecovery()`：麥克風點擊不搶，等補辨識交付完立刻接上 | 見 M3 的三條邊界 |
+| 6 | 補辨識與麥克風互搶：冷啟動時補辨識先跑，占住麥克風二十幾秒，使用者對著一場「其實還沒開始」的錄音講話 | 延後 1.5 秒＋`recovering`／`startAfterRecovery`／`finishRecovery()`：麥克風點擊不搶，等補辨識交付完立刻接上；補辨識期間對外是 `.transcribing`，不再謊報錄音中 | 延遲與 phase 有實測（M3 邊界 1、2）；「排隊後自動接上」只有程式碼層 |
 | 7 | 降級起點固定是「偏好的模型」→ 裝 2B／1.5B／0.5B 時，第二次失敗又選回剛剛超時的 1.5B，log 還說「沒有更小的」 | 起點改成實際生效的模型（`activeName ?? preferredName`），可 2B → 1.5B → 0.5B | 程式碼層（Swift 這一側沒有測試目標；`cargo test` 測的是 Rust 的降級選擇） |
 
 **順手採納的建議**
@@ -442,6 +463,39 @@ M5 的程式部分（模型安裝）可以與 M3/M4 平行做，但**真機驗�
 另外這一輪新增一項誠實記錄：**模擬器上的 Dolphin 會把英文與數字正規化成中文**
 （`-OVC_ASR_LANGUAGE=en` 也不給輸出），所以「中英混排」只能靠 `merge` 探針驗規則，
 不能用音檔驗整條路徑；真機的辨識結果要等 M6。
+
+---
+
+## 附錄 C：第三輪複查（只看前一輪修得對不對）之後修掉的東西（2026-10-27）
+
+修完的程式碼本身也要被審。這一輪只審 `691a3c6` 這個 diff，找到的是**上一輪修法帶進來的**
+兩個新問題，以及幾個順序與清理上的漏洞。
+
+| # | 缺陷（原本會怎樣） | 修法 | 驗證 |
+|---|---|---|---|
+| 1 | 保留舊 orphan 之後，同一句會被插兩次：第一次被砍留下完整的 A → 補辨識寫了 B 又被砍 → 下次補 B 並發布 → 再一次啟動撿到 A **再發布一次** | 補辨識前先把選中的檔案 `claim`（改名成 `*.claimed`，`orphans()` 不再看它）。代價是「補辨識本身被砍第二次」時那句話不會交付，所以下次啟動會**明確記錄** `recovery abandoned N claimed spool(s)`，而不是默默消失 | 植兩個 orphan、2.2 秒砍掉補辨識 → 日誌 `recovery abandoned 1 claimed spool(s)`，下一次只補較舊那一份，**沒有重複句** |
+| 2 | 補辨識期間對外宣稱 `.recording`：鍵盤顯示「錄音中…」、麥克風卻沒開，使用者說的話完全沒被錄，而且鍵盤的 1.5 秒退路不會啟動（它只認「不是 `.recording`」） | 補辨識改用 `.transcribing`＋「補回上次的錄音…」，`runInjected` 的內部比對也跟著用同一個 phase | 啟動後 2 秒讀共享狀態：`s.phase = transcribing`、`s.detail = 辨識中…` |
+| 3 | `publish` 先刪音檔、後寫共享狀態：中間掛掉（或 App Group 不可用）就**音檔與文字都沒有** | 先 `SharedStore.publish`，再刪 spool／orphan | 程式碼層（順序） |
+| 4 | `mic.start` 已經啟用音訊 session 才在 `engine.start()` 拋錯；此時 `self.mic` 還是 nil，`fail()` 的 `mic?.stop()` 不會收拾 | `fail()` 記住「有沒有 microphone」，沒有的話自己 `setActive(false)`（PiP 模式跳過） | 程式碼層 |
+| 5 | 讀不回來的 orphan 永遠排在最前面（`orphans()` 取最新），每次都失敗，較舊的完整檔案永遠輪不到 | 讀取失敗／空檔時若來源在 `spool/`，直接刪掉 | 程式碼層 |
+| 6 | 同一啟動可以補兩次 orphan（`onAppear` 會重跑，而舊 orphan 現在被刻意保留） | `didRecoverOrphan` 每次啟動只補一次 | 程式碼層 |
+| 7 | 模型判斷不一致：`hasModels` 認 fp32 的 SenseVoice，`Core.initialize` 只認 int8 → 裝了 fp32 的機器會被改成用 Dolphin（而 Dolphin 在真實錄音上曾輸出不連貫的句子） | 兩邊都認 `model.int8.onnx`／`model.onnx` | 程式碼層 |
+| 8 | `.claimed` 檔案不在 `prune` 的預算裡，每次被砍的補辨識都留一個幾 MB 的檔 | `prune` 把 `.claimed` 一起算進上限 | 程式碼層 |
+| 9 | `-OVC_CLEAR` 在 3 秒後觸發，其實落在發布**之後**，驗到的不是「補辨識途中取消」 | 改成 2 秒，並用 10.5 秒的音檔讓解碼跑得夠久 | 日誌顯示清除落在 `injected` 與 `done` 之間，**沒有** `dictation done`（見 M3 邊界 3） |
+
+**這一輪順帶量到的（同一台模擬器）**：注入 `probe7.wav` → `dictation done: 27 chars`、
+`s.seq` 9→10；鍵盤插一次，`consumedSeq` = 10。清除 → `s.phase = idle`、`s.published`
+消失、`s.seq` 不動、spool 空。
+
+**另一件用「換順序」換來的風險，也寫下來**：`publish` 現在先寫共享狀態、再刪音檔。
+中間（兩行之間）被砍的話，文字已經在鍵盤那一側，但音檔還在 spool 裡，下次啟動會把它當
+orphan 補辨識，於是同一句再被插一次。這個窗口只有兩行、而且要在 `publish` 剛寫完時被砍，
+比原本「先刪檔、後寫字」那條會**整個句子消失**的路徑好一些——但它是「重複」而不是「沒有」，
+寫在這裡以免下一個人以為這條路徑是無代價的。
+
+**仍然沒修（誠實記錄）**：補辨識若被砍第二次，那句話不會交付（`.claimed` 留在磁碟上、
+日誌有記）。要救得回來，就得能分辨「這個 `.claimed` 是已交付過的副本」與「還沒交付」，
+那是把單槽交接換成佇列的同一件事，留給下一輪。
 
 ---
 

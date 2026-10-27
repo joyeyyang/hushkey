@@ -49,11 +49,15 @@ enum Core {
         // The core ships two recognisers and prefers SenseVoice (240 MB) unless
         // `OVC_ASR_MODEL` says otherwise. There is no shell on iOS, so the app
         // states the choice itself -- but only when SenseVoice is genuinely absent,
-        // so an install that has it keeps the core's own preference.
-        let sense = models.appendingPathComponent("asr/model.int8.onnx")
+        // so an install that has it keeps the core's own preference. "Absent" means
+        // neither quantisation: `state.rs` accepts `model.int8.onnx` or
+        // `model.onnx`, and testing only the int8 one sent an fp32 install down the
+        // Dolphin path while the model screen said SenseVoice was installed.
+        let sense = ["asr/model.int8.onnx", "asr/model.onnx"].contains {
+            FileManager.default.fileExists(atPath: models.appendingPathComponent($0).path)
+        }
         let dolphin = models.appendingPathComponent("asr/dolphin/model.int8.onnx")
-        if !FileManager.default.fileExists(atPath: sense.path),
-           FileManager.default.fileExists(atPath: dolphin.path) {
+        if !sense, FileManager.default.fileExists(atPath: dolphin.path) {
             setenv("OVC_ASR_MODEL", "dolphin", 1)
         }
         // `Core_Initialize` only points the engine at the model tree; nothing is
