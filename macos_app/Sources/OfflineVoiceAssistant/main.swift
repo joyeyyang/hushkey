@@ -157,6 +157,9 @@ final class AppController {
 
         window.onResetPermission = { [weak self] in self?.resetAccessibilityPermission() }
         window.onImportAudio = { [weak self] url in self?.importAudioFile(url) }
+        window.onManualEdit = { [weak self] instruction, region, draft, selection in
+            self?.applyManualEdit(instruction, region: region, to: draft, selection: selection)
+        }
 
         // Picking an older line out of the history pastes it where the cursor is.
         window.onPasteHistory = { [weak self] text in self?.pasteFromHistory(text) }
@@ -1102,6 +1105,41 @@ final class AppController {
         coreQueue.async {
             let polished = self.polish(text)
             DispatchQueue.main.async { self.finish(polished) }
+        }
+    }
+
+    /// The 修改提示詞 button: the same core call the spoken path makes, with the
+    /// instruction typed and the region picked by hand.
+    ///
+    /// A separate entry point from `present(_:)` on purpose. The spoken path has
+    /// to first decide whether a sentence IS an edit; this one was told so by the
+    /// user pressing a button, so nothing is classified and nothing falls back to
+    /// "paste it as a dictation". A failure here leaves the draft untouched and
+    /// says so.
+    private func applyManualEdit(_ instruction: String,
+                                 region: PromptEditRegion,
+                                 to draft: String,
+                                 selection: Range<String.Index>?) {
+        ModelInstaller.log("manual edit: region \(region.title), \(draft.count) chars")
+        hud.showStage("套用修改中…")
+        let config = passConfig()
+        coreQueue.async {
+            guard let edited = applyVoiceEdit(instruction, to: draft,
+                                              region: region,
+                                              selection: selection,
+                                              config: config) else {
+                DispatchQueue.main.async {
+                    self.hud.flash("沒有改到任何字，原文沒有變動", seconds: 3)
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                self.mainWindow?.setTranscript(edited)
+                self.recordHistory(edited)
+                self.rememberDictation(edited)
+                self.lastDelivery = edited
+                self.hud.flash("已修改", seconds: 2)
+            }
         }
     }
 

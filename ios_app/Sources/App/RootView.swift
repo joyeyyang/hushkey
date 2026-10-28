@@ -232,6 +232,17 @@ struct RootView: View {
             SharedStore.mode = .pip
             Diagnostics.log.notice("pip probe: requested at launch")
         }
+        // `-OVC_SAMPLE_TEXT`: put a sentence on 轉錄 without a microphone.
+        //
+        // The 修改提示詞 panel only exists once there is a sentence to revise, and
+        // a simulator has no dictation -- so the page it lives on is otherwise
+        // unreachable from a script, and a layout can only be looked at by hand.
+        // Three lines, because the region picker's 第 N 行 needs more than one.
+        if arguments.contains("-OVC_SAMPLE_TEXT") {
+            dictation.replaceTranscript(
+                "明天下午三點跟小林開會\n討論第四季時程\n地點還沒確定"
+            )
+        }
         guard arguments.contains("-OVC_CLEAR") else { return }
         // Two seconds: late enough that a recovery has started by then, early
         // enough to land inside its decode rather than after the sentence was

@@ -269,3 +269,40 @@ public func applyVoiceEdit(_ instruction: String, to text: String,
     guard !edited.isEmpty, edited != current else { return nil }
     return edited
 }
+
+/// Applies one 修改的提示詞 to the region the caller named.
+///
+/// Same call as `applyVoiceEdit(_:to:config:)` -- `LLM_EditText`, the core's
+/// numbering and its shape checks -- with the region made explicit:
+///
+/// * `.whole` / `.line(n)` — the whole draft goes to the core and the line
+///   number rides in the instruction, which is how `locate_edit_target` resolves
+///   it. The 修改的提示詞 is never concatenated into the draft.
+/// * `.selection` — the selected slice IS the draft as far as the core is
+///   concerned, and the answer is spliced back into the same range, so the
+///   untouched text cannot be rewritten.
+///
+/// - Parameter selection: a range in `text`, required only for `.selection`. An
+///   empty or missing range is a refusal rather than a silent fallback to the
+///   whole draft: "只改我選的那段" must never rewrite the rest.
+/// - Returns: nil when nothing usable came back. The caller keeps its draft.
+public func applyVoiceEdit(_ instruction: String, to text: String,
+                           region: PromptEditRegion,
+                           selection: Range<String.Index>?,
+                           config: VoiceInputConfig) -> String? {
+    let current = Text.toTraditional(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    switch region {
+    case .whole, .line:
+        return applyVoiceEdit(region.instruction(instruction), to: current, config: config)
+    case .selection:
+        guard let selection, !selection.isEmpty, selection.upperBound <= current.endIndex else {
+            return nil
+        }
+        let slice = String(current[selection])
+        guard !slice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard let answer = try? CoreABI.edit(slice, instruction: instruction) else { return nil }
+        let edited = Text.toTraditional(answer.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard !edited.isEmpty, edited != slice else { return nil }
+        return current.replacingCharacters(in: selection, with: edited)
+    }
+}

@@ -2632,6 +2632,53 @@ mod tests {
         assert!(parse_edited_items("   \n  ").is_empty());
     }
 
+    /// The 修改的提示詞 and the draft are two separate things in the prompt.
+    ///
+    /// `EDIT_SYSTEM` says the first line is the instruction and the numbered
+    /// draft starts after a blank line. If the instruction were concatenated
+    /// into the text instead, the model would be handed a draft whose first line
+    /// reads like an order -- which is the shape it copies, and the reason the
+    /// app has a field for the instruction rather than letting the user type it
+    /// into the sentence.
+    #[test]
+    fn the_edit_instruction_is_not_part_of_the_draft() {
+        let instruction = "把第二點改成禮拜五";
+        let draft = "明天下午三點跟小林開會\n討論第四季時程\n地點還沒確定";
+        let prompt = edit_prompt(instruction, draft);
+
+        // The instruction appears exactly once, as the first line of the user
+        // turn -- not once per line, and not inside the numbered draft.
+        assert_eq!(prompt.matches(instruction).count(), 1, "{prompt}");
+        // The draft reaches the model numbered, and numbered by the core.
+        assert!(prompt.contains("1. 明天下午三點跟小林開會"), "{prompt}");
+        assert!(prompt.contains("2. 討論第四季時程"), "{prompt}");
+        assert!(prompt.contains("3. 地點還沒確定"), "{prompt}");
+        // The instruction sits above the blank line; the draft below it.
+        let user_turn = prompt.rsplit("<|im_start|>user\n").next().unwrap();
+        let (head, body) = user_turn.split_once("\n\n").expect("instruction, blank line, draft");
+        assert_eq!(head.trim(), instruction);
+        assert!(!body.contains(instruction), "{body}");
+        assert!(body.starts_with("1. "), "{body}");
+    }
+
+    /// The line the UI's picker names is the line the core resolves.
+    ///
+    /// This is the contract the 第 N 行 region rides on: the picker writes
+    /// "第N點" in front of the user's words, and `locate_by_position` has to
+    /// read that as a position rather than as part of the replacement.
+    #[test]
+    fn a_prefixed_line_number_locates_that_line() {
+        let draft = numbered_items("明天下午三點跟小林開會\n討論第四季時程\n地點還沒確定");
+        for n in 1..=3 {
+            let instruction = format!("第{n}點改短一點");
+            assert_eq!(locate_by_position(&instruction, draft.len()), Some(n - 1), "{instruction}");
+        }
+        // The Arabic form the picker writes and the spoken form the microphone
+        // produces reach the same line.
+        assert_eq!(locate_by_position("第2點改成禮拜五", 3), Some(1));
+        assert_eq!(locate_by_position("第二點改成禮拜五", 3), Some(1));
+    }
+
     #[test]
     fn joining_follows_the_original_layout() {
         let items = vec!["甲".to_string(), "乙".to_string()];

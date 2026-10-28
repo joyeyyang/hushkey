@@ -46,6 +46,10 @@ struct Options {
     var isEdit: String?
     /// `--edit`: the instruction; the text it applies to arrives on stdin.
     var editInstruction: String?
+    /// `--region`: which part of the stdin text the instruction is about.
+    var editRegion: PromptEditRegion = .whole
+    /// `--select A:B`: the character range for `--region selection`.
+    var editSelection: String?
     /// `--summarize`: the transcript to summarise; it arrives on stdin.
     var summarize = false
 }
@@ -65,6 +69,10 @@ usage: voiceinput [options] <audio-file> [...]
   --no-polish             skip the AI cleanup pass entirely
   --is-edit <text>        print yes/no: does this line read as a spoken edit?
   --edit <instruction>    edit the text read from stdin (whole stream) and print it
+  --region <whole|line:N|selection>
+                          which part of that text the instruction is about
+                          (default whole; selection needs --select A:B)
+  --select <A:B>          character offsets of the selected region
   --summarize             summarise the transcript read from stdin (meeting sections)
   --paste                 also paste the refined text at the cursor (needs Accessibility)
   --selftest              run a built-in check and print PASS/FAIL
@@ -126,6 +134,14 @@ func parseArguments(_ args: [String]) -> Options {
             opts.isEdit = value("--is-edit")
         case "--edit":
             opts.editInstruction = value("--edit")
+        case "--region":
+            let raw = value("--region")
+            guard let region = PromptEditRegion.parse(raw) else {
+                fail("--region expects whole, line:N or selection, got \"\(raw)\"", code: 1)
+            }
+            opts.editRegion = region
+        case "--select":
+            opts.editSelection = value("--select")
         case "--summarize":
             opts.summarize = true
         case "--paste":
@@ -304,13 +320,35 @@ func makeEngine(_ config: VoiceInputConfig) -> VoiceInputEngine {
 /// it cannot edit — the worker is missing, or the model answered with nothing
 /// usable — and that is reported as a failure rather than printed as text, so a
 /// script never pastes an empty line over a good draft.
-func runEdit(instruction: String, config: VoiceInputConfig) -> Never {
+func runEdit(instruction: String,
+             region: PromptEditRegion,
+             selection raw: String?,
+             config: VoiceInputConfig) -> Never {
     let data = FileHandle.standardInput.readDataToEndOfFile()
     guard let target = String(data: data, encoding: .utf8) else {
         fail("the text on stdin is not valid UTF-8", code: 1)
     }
+    // A `selection` region is a range in the text that arrived, so the caller
+    // states it as character offsets. Anything else is about the whole draft,
+    // and the region only decides WHERE -- never what the instruction says.
+    var selection: Range<String.Index>?
+    if region == .selection {
+        guard let raw,
+              case let parts = raw.split(separator: ":"), parts.count == 2,
+              let start = Int(parts[0]), let end = Int(parts[1]),
+              start >= 0, end > start,
+              let lower = target.index(target.startIndex, offsetBy: start, limitedBy: target.endIndex),
+              let upper = target.index(target.startIndex, offsetBy: end, limitedBy: target.endIndex)
+        else {
+            fail("--region selection needs --select A:B (character offsets into stdin)", code: 1)
+        }
+        selection = lower..<upper
+    }
     let engine = makeEngine(config)
-    guard let edited = applyVoiceEdit(instruction, to: target, config: config) else {
+    guard let edited = applyVoiceEdit(instruction, to: target,
+                                      region: region,
+                                      selection: selection,
+                                      config: config) else {
         engine.shutdown()
         fail("could not apply the edit (no usable result)", code: 1)
     }
@@ -349,7 +387,10 @@ if let spoken = opts.isEdit {
 }
 
 if let instruction = opts.editInstruction {
-    runEdit(instruction: instruction, config: config)
+    runEdit(instruction: instruction,
+            region: opts.editRegion,
+            selection: opts.editSelection,
+            config: config)
 }
 
 if opts.summarize {

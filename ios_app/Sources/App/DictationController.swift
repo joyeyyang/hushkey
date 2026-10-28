@@ -603,6 +603,25 @@ final class DictationController: ObservableObject {
         start()
     }
 
+    /// Replaces the sentence on screen with a version the user asked for with a
+    /// 修改提示詞.
+    ///
+    /// Deliberately NOT published to the keyboard. The keyboard has already
+    /// inserted the original at the cursor, and `SharedStore.publish` hands it a
+    /// NEW sequence to insert -- so a second publish would type the corrected
+    /// sentence *after* the uncorrected one. The result stays on this page and
+    /// the 複製 button carries it back; replacing text the keyboard no longer
+    /// owns is a different feature, and one it cannot do from here.
+    func replaceTranscript(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        transcript = trimmed
+        live = ""
+        phase = .done
+        error = nil
+        History.add(text: trimmed, detail: "已修改", model: Core.lastModelName())
+    }
+
     func clear() {
         let wasBusy = isBusy
         let wasRecording = phase == .recording

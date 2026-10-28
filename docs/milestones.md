@@ -1067,3 +1067,143 @@ A3 的競爭則用「orphan spool ＋ fresh request」一起驗：啟動後 log 
 - Rust 核心每個 C 入口共用同一把全域 mutex。25 秒逾時能**放行 UI**，但不能取消
   已在 Rust 裡卡住的 `Core.stop()`；那把鎖仍可能讓下一個核心呼叫排隊。訊息已明說
   「把 App 關掉再開一次」。要真正取消推論，必須在 Rust 端加取消點，這是另一輪工作。
+
+## 附錄 I：修改提示詞——「改哪一段、怎麼改」（2026-10-28）
+
+### I.1 這是第二次處理，不是「AI 整理」的一部分
+
+一句話進來的流程有兩段，而且刻意分成兩段：
+
+| | 什麼時候跑 | 誰決定內容 | 核心入口 |
+|---|---|---|---|
+| AI 整理 | 每句都跑（可關） | `REFINE_SYSTEM`：去贅字、加標點 | `LLM_RefineText*` |
+| 修改提示詞 | 使用者按「執行修改」才跑 | **使用者的那一句話** | `LLM_EditText` |
+
+合併會讓其中一個去做另一個的事：整理沒有「第 2 行」的概念，修改則不該自己去猜
+要不要補標點。所以提示詞、系統指令、入口都分開，只共用底層的生成函式
+（`generate`）與模型管理。
+
+### I.2 提示詞與原文在核心裡是兩塊，不是串在一起
+
+`core_engine/src/llm.rs::edit_prompt` 的形狀是：
+
+```text
+<EDIT_SYSTEM>…使用者的訊息裡，第一行是指令，空一行之後才是要改的文字。
+<|im_start|>user
+第2點改成禮拜五下午兩點        ← 修改的提示詞（第一行）
+                                 ← 空行
+1. 明天下午三點跟小林開會        ← 原文，由核心自己編號
+2. 討論第四季時程
+3. 地點還沒確定
+```
+
+新增測試 `llm::tests::the_edit_instruction_is_not_part_of_the_draft` 直接驗這件事：
+指令在整份 prompt 只出現一次、位於第一行、空行之後的本文不含指令、本文從 `1. ` 開始。
+
+### I.3 三種區域都真的到核心，不是 UI 裝飾
+
+| 區域 | 送給核心的指令 | 核心做的事 | 為什麼不會誤改別行 |
+|---|---|---|---|
+| 整段 | 原樣 | `locate_edit_target` 找不到位置 → 整份改寫 | 轉換型指令（改短）走這條 |
+| 第 N 行 | `第{N}點` + 原樣 | `locate_by_position` → `edit_one_line` | 行號是核心自己數的，不是 UI 數的 |
+| 選取範圍 | 原樣 | 把選取切片**當成整段**送進去，答案 splice 回原字串 | 沒選到的字根本沒進 prompt |
+
+UI 的 `第 N 行` 用阿拉伯數字（`第2點`），核心的 digit 分支接受它；麥克風講的
+`第二點` 由 `chinese_position` 處理。兩條路到同一行，測試
+`llm::tests::a_prefixed_line_number_locates_that_line` 兩種都驗。
+UI 的行數預覽（`PromptEditRegion.lines` / `PromptEdit.lines`）刻意照核心
+`numbered_items` 的規則（去空行、去項目符號、去既有編號），所以「第 3 行」在畫面上
+和核心眼裡是同一行；macOS 有 7 個單元測試釘住這件事。
+
+### I.4 真實輸出對照（`voiceinput --edit`，worker `core_engine/target/release/ovc-llm-worker`）
+
+原文（3 行）：
+
+```text
+明天下午三點跟小林開會
+討論第四季時程
+地點還沒確定
+```
+
+**同一段原文，不同修改提示詞 → 輸出不同：**
+
+```text
+--- 第2點改成禮拜五下午兩點
+明天下午三點跟小林開會
+禮拜五下午兩點
+地點還沒確定
+
+--- 第2點刪掉
+明天下午三點跟小林開會
+地點還沒確定
+
+--- 第2點改短一點
+明天下午三點跟小林開會
+討論第四季
+地點還沒確定
+```
+
+**同一個修改提示詞，不同區域 → 影響範圍不同：**
+
+```text
+--- 改成大衛拜訪 --region line:1
+大衛拜訪
+討論第四季時程
+地點還沒確定
+
+--- 改成大衛拜訪 --region line:2
+明天下午三點跟小林開會
+大衛拜訪
+地點還沒確定
+
+--- 改成大衛拜訪 --region line:3
+明天下午三點跟小林開會
+討論第四季時程
+大衛拜訪
+```
+
+**選取範圍只動選到的那幾個字：**
+
+```text
+--- 把三點改成四點 --region selection --select 0:11
+明天下午四點跟小林開會
+討論第四季時程
+地點還沒確定
+
+--- 把時程改成禮拜五 --region selection --select 12:19
+明天下午三點跟小林開會
+討論第四季禮拜五
+地點還沒確定
+```
+
+### I.5 已知限制：整段＋轉換型指令在 2B 上不穩
+
+```text
+--- 改短一點（region 預設 whole）
+voiceinput: could not apply the edit (no usable result)
+```
+
+模型把原文原樣還回來，核心判定「沒有可用結果」而拒絕——這是既有、已量測過的
+限制，不是這次改壞的。App 的錯誤訊息因此直接引導使用者把範圍指成「第 N 行」或
+選取起來（同一句 `改短一點` 指到第 2 行就成功，見 I.4）。指錯行比重寫整份安全。
+
+### I.6 改完的文字不自動送進鍵盤
+
+`SharedStore.publish` 會給新序號，鍵盤看到新序號會**再插入一次**——使用者會得到
+「原文 + 改好的版本」兩段。所以 `replaceTranscript` 只更新畫面上的句子與歷史，
+帶回原本輸入框的方式是按「複製」。要讓鍵盤替換已插入的字，是另一個功能（鍵盤得
+記得自己插了什麼、游標在哪），這輪不做。
+
+### I.7 建置與測試
+
+| 檢查 | 真實結果 |
+|---|---|
+| `cargo test --manifest-path core_engine/Cargo.toml --lib` | `90 passed; 0 failed`（含新增 2 個 edit 測試） |
+| `swift test`（macOS） | `Executed 17 tests, with 0 failures`（含新增 `PromptEditRegionTests` 7 個） |
+| iOS simulator Debug build | `** BUILD SUCCEEDED **` |
+| iOS 畫面 | `docs/evidence/ios-prompt-edit.png`：修改提示詞輸入框、執行修改鈕、整段／選取範圍／第 1 行 |
+
+證據邊界：模擬器沒有 LLM 模型，所以 iOS 的**畫面與建置**是在模擬器驗的；核心行為
+（提示詞分離、三種區域）是在同一份 Rust 核心上以 `voiceinput` 與 `edit_batch` 量的。
+iOS 走的是 in-process 的 `LLM_EditText`、macOS 走 worker，兩者是同一個 C ABI 函式，
+但「在 iPhone 上按下去」仍要真機人工測一次。

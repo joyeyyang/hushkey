@@ -1,5 +1,6 @@
 import AppKit
 import UniformTypeIdentifiers
+import VoiceInputKit
 
 /// The app's main window: a persistent control panel with five tabs
 /// (轉錄 / 歷史 / 關鍵字 / 模型 / 設定). It stays open until the user closes it;
@@ -73,6 +74,18 @@ final class MainWindow: NSWindow {
     private let resetPermissionButton = ThemedButton("重設權限（清掉舊紀錄）", kind: .ghost, theme: ThemeCatalog.current)
 
     private let transcriptView = NSTextView()
+    /// 修改提示詞: the instruction the user types, the region they pick, and the
+    /// button that applies it. The app already had the SPOKEN path (say the
+    /// instruction, the classifier applies it); this is the same core call with
+    /// the instruction typed instead of spoken, because the classifier does not
+    /// catch every sentence and a missed one looked like the feature was absent.
+    private let editField = NSTextField()
+    private let editRegionPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let editButton = ThemedButton("執行修改", kind: .secondary, theme: ThemeCatalog.current)
+    /// Instruction, region, the draft the region was measured against, and the
+    /// selected range when the region is a selection. The draft travels with the
+    /// range so the two cannot disagree about what "選取範圍" is.
+    var onManualEdit: ((String, PromptEditRegion, String, Range<String.Index>?) -> Void)?
     private let transcriptScroll = NSScrollView()
     private let copyTranscriptButton = ThemedButton("複製", kind: .secondary, theme: ThemeCatalog.current)
     /// What is actually in the transcript card. Kept separately from the text
@@ -397,13 +410,39 @@ final class MainWindow: NSWindow {
             self.styleTranscript()
         }
 
-        let column = NSStackView.column([recordCard, permissionCard, transcriptCard], spacing: Metrics.space4)
+        // 修改提示詞
+        let editHeading = Ink.heading("修改提示詞", theme)
+        let editCaption = Ink.caption(
+            "把要 AI 怎麼改寫成一句話，再選要改哪一段。這是在「AI 整理」之後多跑的一次，只改你指的那一段。",
+            theme
+        )
+        editField.placeholderString = "例：把第二點改成禮拜五下午兩點／改短一點"
+        editField.font = NSFont.systemFont(ofSize: 13)
+        editField.setContentHuggingPriority(.init(1), for: .horizontal)
+        editField.target = self
+        editField.action = #selector(didTapManualEdit)
+        editRegionPopUp.font = NSFont.systemFont(ofSize: 12)
+        editRegionPopUp.addItem(withTitle: "整段")
+        editRegionPopUp.addItem(withTitle: "選取範圍")
+        button(editButton, #selector(didTapManualEdit))
+        let editRow = NSStackView.row([editField, editRegionPopUp, editButton], spacing: Metrics.space2)
+        let editBody = NSStackView.column([editHeading, editCaption, editRow], spacing: Metrics.space2)
+        let editCard = card(editBody)
+        refreshers.append { [weak self] in
+            guard let self else { return }
+            editHeading.textColor = self.theme.textPrimary
+            editCaption.textColor = self.theme.textSecondary
+            self.editField.textColor = self.theme.textPrimary
+        }
+
+        let column = NSStackView.column([recordCard, permissionCard, transcriptCard, editCard], spacing: Metrics.space4)
         let host = scrolled(column)
         NSLayoutConstraint.activate([
             column.widthAnchor.constraint(equalTo: host.widthAnchor),
             recordCard.widthAnchor.constraint(equalTo: column.widthAnchor),
             permissionCard.widthAnchor.constraint(equalTo: column.widthAnchor),
             transcriptCard.widthAnchor.constraint(equalTo: column.widthAnchor),
+            editCard.widthAnchor.constraint(equalTo: column.widthAnchor),
             transcriptScroll.widthAnchor.constraint(equalTo: transcriptCard.widthAnchor, constant: -2 * Metrics.space4),
         ])
         return host
@@ -414,6 +453,8 @@ final class MainWindow: NSWindow {
         // common case where the user just wants the whole result on the
         // pasteboard without hunting for a selection.
         copyTranscriptButton.isEnabled = !transcriptText.isEmpty
+        editButton.isEnabled = !transcriptText.isEmpty
+        refreshEditRegions()
         transcriptView.string = transcriptText
         if transcriptText.isEmpty {
             transcriptView.textStorage?.setAttributedString(NSAttributedString(
@@ -639,6 +680,56 @@ final class MainWindow: NSWindow {
 
     /// Copies the last result. Pasting it into another app is then the user's
     /// own Cmd+V, which needs no Accessibility permission at all.
+    /// Rebuilds the region list from the draft on screen.
+    ///
+    /// The line items are the CORE's numbering (`PromptEditRegion.lines` follows
+    /// the core's `numbered_items`), so "第 3 行" in this menu is the line the
+    /// core will edit, not a count of the newlines this view happens to show.
+    private func refreshEditRegions() {
+        let previous = editRegionPopUp.indexOfSelectedItem
+        editRegionPopUp.removeAllItems()
+        editRegionPopUp.addItem(withTitle: "整段")
+        editRegionPopUp.addItem(withTitle: "選取範圍")
+        for (index, line) in PromptEditRegion.lines(of: transcriptText).enumerated() {
+            let preview = line.count > 16 ? String(line.prefix(16)) + "…" : line
+            editRegionPopUp.addItem(withTitle: "第 \(index + 1) 行：\(preview)")
+        }
+        if previous >= 0, previous < editRegionPopUp.numberOfItems {
+            editRegionPopUp.selectItem(at: previous)
+        }
+    }
+
+    /// The 修改提示詞 button. The window owns the draft and the selection, so it
+    /// hands both to the app, which owns the engine.
+    @objc private func didTapManualEdit() {
+        let typed = editField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !typed.isEmpty else {
+            setStatus("先輸入修改的提示詞")
+            return
+        }
+        guard !transcriptText.isEmpty else {
+            setStatus("還沒有一筆結果可以修改")
+            return
+        }
+        let index = editRegionPopUp.indexOfSelectedItem
+        var region: PromptEditRegion = .whole
+        var selection: Range<String.Index>?
+        if index == 1 {
+            region = .selection
+            let ns = transcriptView.selectedRange()
+            if ns.length > 0 { selection = Range(ns, in: transcriptText) }
+            // Not a silent fallback to the whole draft: "只改我選的那段" must
+            // never rewrite the rest.
+            guard selection != nil else {
+                setStatus("先在逐字稿上選取要改的那一段")
+                return
+            }
+        } else if index >= 2 {
+            region = .line(index - 1)
+        }
+        onManualEdit?(typed, region, transcriptText, selection)
+    }
+
     @objc private func didTapCopyTranscript() {
         guard !transcriptText.isEmpty else { return }
         let pasteboard = NSPasteboard.general

@@ -15,6 +15,9 @@ struct RecorderTab: View {
     @State private var modeNotice: String?
     @State private var copied = false
     @State private var importing = false
+    /// The transcript's selected range, reported by the text view. The 修改提示詞
+    /// panel's 「選取範圍」 region is this, not a re-derivation of it.
+    @State private var selection = NSRange(location: 0, length: 0)
 
     var body: some View {
         VStack(spacing: 14) {
@@ -57,6 +60,18 @@ struct RecorderTab: View {
                 }
                 .buttonStyle(QuietButton())
                 .disabled(dictation.display.isEmpty && dictation.phase == .idle)
+            }
+
+            // The second pass, and only the second: the sentence is done, so
+            // there is something to revise. 整理 above is the cleanup every
+            // sentence gets; this one runs only when the user asks and only on
+            // the region they name.
+            if !dictation.display.isEmpty && !dictation.isBusy {
+                PromptEditPanel(
+                    dictation: dictation,
+                    selection: selection,
+                    text: dictation.display
+                )
             }
 
             // The same switch the desktop has, and the same default: the cleanup
@@ -115,12 +130,16 @@ struct RecorderTab: View {
 
     private var transcriptCard: some View {
         ScrollView {
-            Text(dictation.display.isEmpty ? emptyHint : dictation.display)
-                .font(.system(size: 20, design: .serif))
-                .foregroundStyle(dictation.display.isEmpty ? Palette.dim : Palette.ink)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(18)
-                .textSelection(.enabled)
+            // A UITextView rather than `Text`: 「選取範圍」 needs the app to read
+            // WHICH characters the user selected, and `.textSelection(.enabled)`
+            // draws a selection the app cannot see.
+            SelectableTranscript(
+                text: dictation.display,
+                placeholder: emptyHint,
+                selection: $selection
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(18)
         }
         .background(Palette.wash, in: RoundedRectangle(cornerRadius: 14))
         .frame(maxHeight: .infinity)
