@@ -121,10 +121,15 @@ final class KeyboardViewController: UIInputViewController {
         }
         view.addSubview(bar)
 
+        // Pinned on all four sides, bottom included: the extension's height is
+        // whatever its content asks for, and a bar pinned only at the top left the
+        // system's default keyboard height (a QWERTY-sized 216 pt) with the bar
+        // floating in the top third of it. The bar owns its own 126 pt.
         NSLayoutConstraint.activate([
             bar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             bar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bar.topAnchor.constraint(equalTo: view.topAnchor),
+            bar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
     }
 

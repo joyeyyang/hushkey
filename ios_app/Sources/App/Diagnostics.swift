@@ -68,6 +68,18 @@ enum Diagnostics {
         path(after: "-OVC_REFINE_TEXT")
     }
 
+    /// `-OVC_PAUSE_PROBE`: start a dictation and pause/resume it over the App
+    /// Group, exactly as the keyboard's buttons do.
+    ///
+    /// The buttons themselves cannot be pressed from a script, and the part that
+    /// can break is not the button -- it is the Darwin notification crossing to a
+    /// backgrounded app, which is the whole reason the controls live on the
+    /// keyboard at all. This posts the same two notifications on a timer and lets
+    /// the log say whether the app heard them.
+    static var probesPause: Bool {
+        ProcessInfo.processInfo.arguments.contains("-OVC_PAUSE_PROBE")
+    }
+
     /// `-OVC_LLM_RESET`: forget a recorded downgrade before anything loads.
     ///
     /// The model screen has the same button. This exists because the record lives

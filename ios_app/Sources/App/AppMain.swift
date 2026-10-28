@@ -31,6 +31,10 @@ struct OVCApp: App {
             }
         }
 
+        if Diagnostics.probesPause {
+            Task { @MainActor in PauseProbe.run() }
+        }
+
         if let text = Diagnostics.refineText {
             RefineProbe.run(text)
         }

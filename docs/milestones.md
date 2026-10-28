@@ -419,7 +419,7 @@ Dolphin 與 SenseVoice 的 token 表不同，跟著錯的那個會讓辨識在�
 | 關鍵字 | 沒有 | 有（與 macOS 同樣**不注入提示詞**，理由寫在畫面上） |
 | 匯出 | 沒有 | 有：Markdown / txt / JSON + 系統分享面板 |
 | 音檔匯入 | 只有 `-OVC_AUDIO_FILE` 旗標 | 有：文件選擇器，任何 AVFoundation 開得起來的格式 |
-| 暫停／繼續 | 沒有 | 有；同一個 spool、同一個 ASR session，不是切兩段 |
+| 暫停／繼續 | 沒有 | 有；鍵盤上就有一顆，走 Darwin 通道，同一個 spool、同一個 ASR session，不是切兩段（真機已驗） |
 | 五個分頁 | 只有單頁 | 轉錄／歷史／關鍵字／模型／設定，順序與 macOS 相同 |
 
 **還沒對齊（明確清單）**
@@ -932,3 +932,40 @@ OVC_SELFTEST_UI=/tmp/ovc-hud OVC_SELFTEST_UI_THEME=paper,night \
   dist/OfflineVoiceAssistant.app/Contents/MacOS/OfflineVoiceAssistant
 # → /tmp/ovc-hud/paper-dictation-partial.png 等 5 張 × 2 主題
 ```
+
+### G.4 真機驗證（2026-10-28，iPhone 15 Pro）
+
+`-OVC_REFINE_TEXT`（同一句使用者回報的原文，修改提示詞之後）：
+
+```json
+{
+  "requestedModel": "Qwen3.5-2B-Q4_K_M.gguf",
+  "servedModel":    "Qwen3.5-2B-Q4_K_M.gguf",
+  "raw":         "明天我们班将召开会议，议题为校庆相关事项。会议旨在讨论校庆期间需销售的物品及所需准备的各类活动",
+  "traditional": "明天我們班將召開會議，議題為校慶相關事項。會議旨在討論校慶期間需銷售的物品及所需準備的各類活動",
+  "seconds": 4.11,
+  "peakRSSMB": 1746.7
+}
+```
+
+對照修改前（附錄 F）：
+
+| | 修改前 | 修改後 |
+|---|---|---|
+| 整理結果 | 明天我們班來開個會，討論校慶要賣什麼東西及需要準備的活動 | 明天我們班將召開會議，議題為校慶相關事項。會議旨在討論校慶期間需銷售的物品及所需準備的各類活動 |
+
+「呃」「就是。」「我們是。」與整段重複都還在消失之列，差別是留下來的那一句現在是書面語。
+`raw` 仍是簡體（「将召开会议」「议题」），`traditional` 不是——`Hans-Hant` 這一步照樣在做工。
+
+`-OVC_PAUSE_PROBE`（鍵盤兩顆按鈕用的同一條 Darwin 通道，計時器代按）：
+
+```
+before pause  sharedPaused false  controllerPaused false  phase recording
+after pause   sharedPaused true   controllerPaused true   phase recording
+after resume  sharedPaused false  controllerPaused false  phase recording
+after stop    sharedPaused false  controllerPaused false  phase done
+published     「我將繼續交五家店」  detail 已整理
+```
+
+四件事被證明：通知跨得過行程、暫停不會結束這一句（`phase` 一直是 `recording`）、
+恢復之後狀態回得來、暫停過的聽寫仍然只發布一次而且真的整理過。
