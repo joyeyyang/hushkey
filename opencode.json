@@ -19,7 +19,7 @@
       }
     },
     "plan": {
-      "mode": "subagent",
+      "mode": "primary",
       "model": "opencode/deepseek-v4.1-flash-free",
       "description": "規劃分析專家：先讀懂需求與現有程式碼，再產出可執行的實作計畫。",
       "permission": {
@@ -32,7 +32,7 @@
       }
     },
     "review": {
-      "mode": "subagent",
+      "mode": "primary",
       "model": "opencode/deepseek-v4.1-flash-free",
       "description": "程式碼審查員：檢查變更的正确性、潛在缺陷與安全性風險。",
       "permission": {
@@ -45,7 +45,7 @@
       }
     },
     "debug": {
-      "mode": "subagent",
+      "mode": "primary",
       "model": "opencode/deepseek-v4.1-flash-free",
       "description": "除錯專家：重現問題、定位根本原因並驗證修復結果。",
       "permission": {

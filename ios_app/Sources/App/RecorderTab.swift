@@ -94,7 +94,7 @@ struct RecorderTab: View {
 
             controls
 
-            Text("在 iPhone 上要這樣用：設定 › 一般 › 鍵盤 › 鍵盤 › 加入新的鍵盤 › 語音輸入，之後在任何輸入框切到它，按麥克風。停下來 1 秒會自動停止。")
+            Text("在 iPhone 上要這樣用：設定 › 一般 › 鍵盤 › 鍵盤 › 加入新的鍵盤 › Hushkey，之後在任何輸入框切到它，按麥克風。停下來 1 秒會自動停止。")
                 .font(.system(size: 11))
                 .foregroundStyle(Palette.dim)
                 .multilineTextAlignment(.center)

@@ -173,7 +173,7 @@ final class KeyboardViewController: UIInputViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self else { return }
             guard SharedStore.isPaused == !paused else { return }
-            self.bar.showNotice("App 沒有回應，請先切回「語音輸入」")
+            self.bar.showNotice("App 沒有回應，請先切回「Hushkey」")
         }
     }
 
@@ -196,7 +196,7 @@ final class KeyboardViewController: UIInputViewController {
         extensionContext?.open(url) { [weak self] ok in
             guard !ok else { return }
             DispatchQueue.main.async {
-                self?.bar.showNotice("請先從主畫面開啟「語音輸入」App")
+                self?.bar.showNotice("請先從主畫面開啟 Hushkey")
             }
         }
     }

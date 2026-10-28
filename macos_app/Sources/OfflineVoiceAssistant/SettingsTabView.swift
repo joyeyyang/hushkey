@@ -78,7 +78,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
         self.exportChooseButton = ThemedButton("選擇資料夾…", kind: .secondary, theme: theme)
         self.exportNowButton = ThemedButton("匯出最近一次逐字稿…", kind: .secondary, theme: theme)
         self.resetButton = ThemedButton("重設為預設", kind: .secondary, theme: theme)
-        self.quitButton = ThemedButton("結束 Offline Voice Assistant", kind: .danger, theme: theme)
+        self.quitButton = ThemedButton("結束 Hushkey", kind: .danger, theme: theme)
         super.init(frame: .zero)
         buildUI()
         applyTheme(theme)

@@ -2,7 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDisplayName</key><string>語音輸入</string>
+    <!-- The home-screen name. The bundle identifier, the executable and the
+         URL scheme below are untouched: they are what the signature, the App
+         Group and the installed keyboard are keyed to. -->
+    <key>CFBundleDisplayName</key><string>Hushkey</string>
     <key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key><string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
@@ -27,7 +30,7 @@
          shell: without these two keys the only way to install a 100 MB
          recogniser is the app's own importer, and a user told "the folder is
          empty" had nothing to open. With them the app appears under Finder ›
-         iPhone › Files › 語音輸入 and under the Files app, and `models/` can be
+         iPhone › Files › Hushkey and under the Files app, and `models/` can be
          dragged straight in. -->
     <key>UIFileSharingEnabled</key><true/>
     <key>LSSupportsOpeningDocumentsInPlace</key><true/>

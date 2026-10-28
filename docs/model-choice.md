@@ -1,4 +1,4 @@
-# Which model, and what the A/B actually showed
+# Hushkey（HSK）：which model, and what the A/B actually showed
 
 The app's default LLM changed from Qwen2.5-1.5B to Qwen3.5-2B, but the prompts
 were tuned against the older model, and every quality claim in the README was

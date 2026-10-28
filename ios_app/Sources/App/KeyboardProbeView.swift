@@ -18,7 +18,7 @@ struct KeyboardProbeView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("鍵盤測試")
                 .font(.system(size: 22, weight: .semibold, design: .serif))
-            Text("按 🌐 切到「語音輸入」。沒有字母鍵是刻意的：要打字就切回自己的鍵盤。")
+            Text("按 🌐 切到「Hushkey」。沒有字母鍵是刻意的：要打字就切回自己的鍵盤。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 

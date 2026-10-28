@@ -95,7 +95,7 @@ enum SharedStore {
     /// The same tree inside the app's own Documents.
     ///
     /// This is the one a phone user can actually reach: with file sharing on, it
-    /// shows up under Finder › iPhone › Files › 語音輸入 and in the Files app, so
+    /// shows up under Finder › iPhone › Files › Hushkey and in the Files app, so
     /// models can be dragged in without an importer. Only the app ever reads a
     /// model -- the keyboard just inserts text -- so Documents is as good a home
     /// as the App Group, and it is the only one that can be installed into

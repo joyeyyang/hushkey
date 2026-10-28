@@ -1,8 +1,8 @@
-# 專案總覽
+# Hushkey（HSK）專案總覽
 
 > 對應 commit `747b3f8`（§5.5／§5.6 之後又改了三輪，見 §6）。程式碼 18,590 行（Rust 3,9xx＋Swift 14,6xx）。
 > 這份是入口文件；決策的來龍去脈在 `docs/todo.md`，選型在 `docs/model-choice.md`，
-> iOS 版的階段與完成定義在 `docs/milestones.md`（M0–M6，附實測 log 與重跑指令）。
+> iOS 版的階段與完成定義在 `docs/milestones.md`（M0–M7，附實測 log 與重跑指令）。
 
 ## 1. 這是什麼
 

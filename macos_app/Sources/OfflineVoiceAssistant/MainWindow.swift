@@ -94,7 +94,7 @@ final class MainWindow: NSWindow {
             backing: .buffered,
             defer: false
         )
-        self.title = "Offline Voice Assistant"
+        self.title = "Hushkey"
         // A transparent title bar keeps the traffic lights where macOS expects
         // them while letting the window's own paper run to the top edge.
         titlebarAppearsTransparent = true
@@ -213,7 +213,7 @@ final class MainWindow: NSWindow {
         let header = NSView()
         header.translatesAutoresizingMaskIntoConstraints = false
 
-        titleLabel = Ink.title("Offline Voice Assistant", theme)
+        titleLabel = Ink.title("Hushkey", theme)
         subtitleLabel = Ink.small("全程離線 · 音訊與逐字稿不會離開這台電腦", theme)
         let text = NSStackView.column([titleLabel, subtitleLabel], spacing: 2)
         statusPill = StatusPill(theme: theme)

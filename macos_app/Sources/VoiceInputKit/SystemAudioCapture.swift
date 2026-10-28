@@ -71,7 +71,7 @@ final class SystemAudioTap {
         // A global tap is "everything the Mac plays"; this app plays no audio, so
         // there is nothing of our own to exclude.
         let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
-        description.name = "Offline Voice Assistant"
+        description.name = "Hushkey"
         description.uuid = UUID()
         description.isPrivate = true
         description.muteBehavior = .unmuted
@@ -98,7 +98,7 @@ final class SystemAudioTap {
             throw error
         }
         let aggregate: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "Offline Voice Assistant Tap",
+            kAudioAggregateDeviceNameKey: "Hushkey Tap",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
             kAudioAggregateDeviceMainSubDeviceKey: outputUID,
             kAudioAggregateDeviceIsPrivateKey: true,

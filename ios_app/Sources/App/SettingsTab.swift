@@ -125,7 +125,7 @@ struct SettingsTab: View {
                 )
                 permissionRow(
                     title: "鍵盤與完全取用",
-                    detail: "設定 › 一般 › 鍵盤 › 鍵盤 › 語音輸入，並開啟「允許完全取用」。沒有完全取用，鍵盤與 App 就看不到同一個容器。",
+                    detail: "設定 › 一般 › 鍵盤 › 鍵盤 › Hushkey，並開啟「允許完全取用」。沒有完全取用，鍵盤與 App 就看不到同一個容器。",
                     ok: false
                 )
                 Button("開啟系統設定") {

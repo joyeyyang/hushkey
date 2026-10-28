@@ -94,7 +94,7 @@ struct ModelsTab: View {
                 // closed, which is what makes a 100 MB model installable without a
                 // cable and Xcode.
                 Card("也可以用 Finder 或「檔案」App 放進去",
-                     caption: "我的 iPhone › 語音輸入 › models（asr/ 與 llm/ 兩個資料夾已經建好了）") {
+                     caption: "我的 iPhone › Hushkey › models（asr/ 與 llm/ 兩個資料夾已經建好了）") {
                     Text(SharedStore.modelsRoot.path)
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(Palette.dim)

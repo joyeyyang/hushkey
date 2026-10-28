@@ -43,7 +43,7 @@ final class StatusItem {
         export.target = self
         menu.addItem(export)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "結束 Offline Voice Assistant", action: #selector(quitAction), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "結束 Hushkey", action: #selector(quitAction), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
 

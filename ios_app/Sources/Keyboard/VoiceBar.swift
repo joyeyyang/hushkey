@@ -103,7 +103,7 @@ final class VoiceBar: UIView {
         micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
         micButton.widthAnchor.constraint(equalToConstant: 52).isActive = true
         micButton.heightAnchor.constraint(equalToConstant: 52).isActive = true
-        micButton.accessibilityLabel = "語音輸入"
+        micButton.accessibilityLabel = "Hushkey 麥克風"
         row.addArrangedSubview(micButton)
 
         spinner.translatesAutoresizingMaskIntoConstraints = false

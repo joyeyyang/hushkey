@@ -182,7 +182,7 @@ final class DictationController: ObservableObject {
             DispatchQueue.main.async {
                 guard g == self.generation else { return }
                 guard granted else {
-                    self.fail("需要麥克風權限。請到 設定 › 語音輸入 開啟「麥克風」。")
+                    self.fail("需要麥克風權限。請到 設定 › Hushkey 開啟「麥克風」。")
                     return
                 }
                 self.openMicrophone(g: g)

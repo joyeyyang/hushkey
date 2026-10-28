@@ -2,10 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- The name a person reads. CFBundleExecutable and CFBundleIdentifier stay
+         as they were: the first is a path every build script and the installed
+         .app already depend on, and the second is what the Accessibility grant is
+         keyed to -- changing it silently revokes the user's permission. -->
     <key>CFBundleName</key>
-    <string>OfflineVoiceAssistant</string>
+    <string>Hushkey</string>
     <key>CFBundleDisplayName</key>
-    <string>Offline Voice Assistant</string>
+    <string>Hushkey</string>
     <key>CFBundleIdentifier</key>
     <string>com.example.offlinevoiceassistant</string>
     <key>CFBundleExecutable</key>

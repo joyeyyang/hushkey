@@ -1,6 +1,17 @@
-# Offline AI Voice Assistant (macOS)
+# Hushkey
 
-Fully offline voice input for macOS: press **Option+Space**, speak, the transcript is pasted into the focused field.
+**Hushkey（HSK）** — fully offline voice input for macOS: press **Option+Space**,
+speak, the transcript is pasted into the focused field.
+
+The project was called *Offline AI Voice Assistant* until 2026-10-28. The name a
+person reads is now **Hushkey** everywhere, but two families of strings
+deliberately keep the old shape, because changing them breaks something that is
+already installed:
+the bundle identifiers (`com.example.offlinevoiceassistant[.ios]`) and the
+executable names (`OfflineVoiceAssistant`, `liboffline_voice_core`, the
+`voiceinput` CLI, the `ovc-*` worker and every `OVC_*` environment variable).
+The Accessibility grant is keyed to the bundle identifier, the App Group on iOS
+is keyed to it too, and the build scripts address the executable by path.
 
 **`docs/PROJECT.md`** is the full picture — architecture, the C ABI, the design decisions and their measurements, and what is not done yet. The table below is the short version.
 
