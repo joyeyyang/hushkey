@@ -71,5 +71,24 @@
         "task": "allow"
       }
     }
+  },
+  "mcp": {
+    "blender-mcp": {
+      "enabled": false
+    },
+    "comfy": {
+      "enabled": false
+    }
+  },
+  "tool_output": {
+    "max_bytes": 12000,
+    "max_lines": 500
+  },
+  "compaction": {
+    "auto": true,
+    "keep": {
+      "tokens": 80000
+    },
+    "buffer": 20000
   }
 }
