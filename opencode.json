@@ -1,12 +1,12 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/deepseek-v4.1-flash-free",
-  "small_model": "opencode/deepseek-v4.1-flash-free",
+  "model": "nvidia/minimaxai/minimax-m3.1-flash",
+  "small_model": "nvidia/minimaxai/minimax-m3.1-flash",
   "subagent_depth": 2,
   "agent": {
     "build": {
       "mode": "primary",
-      "model": "opencode/deepseek-v4.1-flash-free",
+      "model": "nvidia/minimaxai/minimax-m3.1-flash",
       "description": "主要開發助手：負責實作功能、修改程式碼與執行驗證。",
       "permission": {
         "read": "allow",
@@ -20,7 +20,7 @@
     },
     "plan": {
       "mode": "primary",
-      "model": "opencode/deepseek-v4.1-flash-free",
+      "model": "nvidia/minimaxai/minimax-m3.1-flash",
       "description": "規劃分析專家：先讀懂需求與現有程式碼，再產出可執行的實作計畫。",
       "permission": {
         "read": "allow",
@@ -33,7 +33,7 @@
     },
     "review": {
       "mode": "primary",
-      "model": "opencode/deepseek-v4.1-flash-free",
+      "model": "nvidia/minimaxai/minimax-m3.1-flash",
       "description": "程式碼審查員：檢查變更的正确性、潛在缺陷與安全性風險。",
       "permission": {
         "read": "allow",
@@ -46,7 +46,7 @@
     },
     "debug": {
       "mode": "primary",
-      "model": "opencode/deepseek-v4.1-flash-free",
+      "model": "nvidia/minimaxai/minimax-m3.1-flash",
       "description": "除錯專家：重現問題、定位根本原因並驗證修復結果。",
       "permission": {
         "read": "allow",
@@ -59,7 +59,7 @@
     },
     "general": {
       "mode": "subagent",
-      "model": "opencode/deepseek-v4.1-flash-free",
+      "model": "nvidia/minimaxai/minimax-m3.1-flash",
       "description": "通用子代理：處理無法歸類到其他角色的研究與多步驟任務。",
       "permission": {
         "read": "allow",
