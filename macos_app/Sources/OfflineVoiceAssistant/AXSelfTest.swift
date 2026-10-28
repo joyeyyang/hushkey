@@ -106,9 +106,33 @@ enum AXSelfTest {
             NSApp.activate(ignoringOtherApps: true)
             fixture.window.makeKeyAndOrderFront(nil)
             fixture.focusField()
-            // The focus and the field editor's own setup are events too, so
-            // the loop needs a turn before the injector looks for them.
-            spinRunLoop(for: 0.4)
+            // The focus and the field editor's own setup are events too, so the
+            // loop needs a turn before the injector looks for them.
+            //
+            // This WAITS for the field to actually BE the system-wide focused
+            // element instead of sleeping a guessed 0.4 s. The first case of a run
+            // is the slow one -- the app is still coming to the front -- and with a
+            // fixed wait it intermittently started with `focused=<none>`: the
+            // injector then refused (correctly: there was no focused text), and the
+            // check blamed IT for a focus the test had not given it yet. Two runs
+            // in a row disagreed about the same build, which is worse than either
+            // answer.
+            //
+            // All four conditions are the injector's own preconditions, not
+            // decoration: it reads the system-wide focused element (so the field
+            // must be it), it needs the caret to say WHICH occurrence was pasted,
+            // and the paste goes through the responder chain or a posted Cmd+V --
+            // both of which need the app active and its window key.
+            guard spinRunLoop(until: {
+                NSApp.isActive && fixture.window.isKeyWindow
+                    && fixture.focusedValue == testCase.fieldText && fixture.focusedCaret != nil
+            }, timeout: 5) else {
+                failures.append("\(testCase.name): the field never became the focused, "
+                    + "key, active target (focused=\(fixture.focusedValue?.debugDescription ?? "<none>"), "
+                    + "caret=\(fixture.focusedCaret.map(String.init) ?? "<none>"), "
+                    + "key=\(fixture.window.isKeyWindow), active=\(NSApp.isActive))")
+                continue
+            }
 
             let result = TextInjector.replaceLastInsertion(
                 expected: testCase.pasted, with: testCase.replacement)
@@ -121,19 +145,27 @@ enum AXSelfTest {
             spinRunLoop(for: 1.2)
 
             let after = fixture.accessibilityText
+            // The state at the moment of the edit, kept for the failure message as
+            // well as the verbose print: "the field did not change" has several
+            // causes -- no focused text, no caret, the app not frontmost, or the
+            // injector refusing -- and a failure that does not say which one sends
+            // the reader back here with VERBOSE=1 for information the check already
+            // had in hand.
+            let diag = "focused=\(fixture.focusedValue?.debugDescription ?? "<none>") "
+                + "caret=\(fixture.focusedCaret.map(String.init) ?? "<none>") "
+                + "key=\(fixture.window.isKeyWindow) "
+                + "active=\(NSApp.isActive) "
+                + "result=\(result)"
             if ProcessInfo.processInfo.environment["OVC_SELFTEST_AX_VERBOSE"] != nil {
                 let editorSelection = fixture.field.currentEditor()?.selectedRange
-                print("ax diag [\(testCase.name)] focused=\(fixture.focusedValue ?? "<none>") "
-                    + "caret=\(fixture.focusedCaret.map(String.init) ?? "<none>") "
-                    + "key=\(fixture.window.isKeyWindow) "
-                    + "main=\(NSApp.isActive) "
-                    + "editorSel=\(editorSelection.map(String.init) ?? "<none>") "
-                    + "after=\(after) result=\(result)")
+                print("ax diag [\(testCase.name)] \(diag) "
+                    + "editorSel=\(editorSelection.map(String.init) ?? "<none>") after=\(after)")
             }
             switch testCase.expected {
             case let expected?:
                 if after != expected {
-                    failures.append("\(testCase.name): field is \(after.debugDescription), wanted \(expected.debugDescription)")
+                    failures.append("\(testCase.name): field is \(after.debugDescription), "
+                        + "wanted \(expected.debugDescription) [\(diag)]")
                 } else if !isPasted(result) {
                     failures.append("\(testCase.name): the replacement was not pasted, only copied")
                 } else {
@@ -183,6 +215,21 @@ enum AXSelfTest {
         while Date() < deadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
+    }
+
+    /// The same turn, repeated until `ready` holds or `timeout` runs out.
+    ///
+    /// For the one condition the test cannot simply wait a fixed time for: the
+    /// window becoming key and its field becoming the system-wide focused element
+    /// is the app's launch settling, and how long that takes depends on what else
+    /// the machine is doing.
+    private static func spinRunLoop(until ready: () -> Bool, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if ready() { return true }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        return ready()
     }
 
     /// A window with one editable text field in it.
