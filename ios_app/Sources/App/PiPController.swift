@@ -78,7 +78,7 @@ final class PiPController: NSObject {
             // and mixing means the user's music or call keeps playing instead of
             // being interrupted by a dictation.
             try session.setCategory(.playAndRecord, mode: .spokenAudio,
-                                    options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
+                                    options: [.mixWithOthers, .allowBluetoothHFP, .defaultToSpeaker])
             try session.setActive(true)
         } catch {
             Diagnostics.log.error("pip: audio session failed: \(error.localizedDescription, privacy: .public)")

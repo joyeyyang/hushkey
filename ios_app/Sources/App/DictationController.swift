@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import SwiftUI
 import UIKit
 
@@ -383,7 +383,10 @@ final class DictationController: ObservableObject {
         decodeTimer?.invalidate()
         decodeTimer = Timer.scheduledTimer(withTimeInterval: Self.decodeSilence, repeats: false) {
             [weak self] _ in
-            self?.decodeRanOutOfTime(g: g)
+            // The timer is scheduled on the main run loop, so the main actor is
+            // where this already is; saying so is what makes the isolation
+            // checkable instead of assumed.
+            MainActor.assumeIsolated { self?.decodeRanOutOfTime(g: g) }
         }
     }
 
@@ -432,13 +435,15 @@ final class DictationController: ObservableObject {
         recoveryTimer?.invalidate()
         recoveryTimer = Timer.scheduledTimer(withTimeInterval: Self.recoveryLimit, repeats: false) {
             [weak self] _ in
-            guard let self, self.recovering else { return }
-            // `recovering` gates `start()`: while it is true a microphone tap only
-            // queues. So it cannot be allowed to stay true because something inside
-            // the recovery never returned -- the sentence is not coming back, and
-            // the user's next tap should not pay for it.
-            Diagnostics.log.error("recovery overran its deadline; releasing the pipeline")
-            self.fail("上次的錄音來不及補回來，麥克風已經放開。", g: self.generation)
+            MainActor.assumeIsolated {
+                guard let self, self.recovering else { return }
+                // `recovering` gates `start()`: while it is true a microphone tap
+                // only queues. So it cannot be allowed to stay true because
+                // something inside the recovery never returned -- the sentence is
+                // not coming back, and the user's next tap should not pay for it.
+                Diagnostics.log.error("recovery overran its deadline; releasing the pipeline")
+                self.fail("上次的錄音來不及補回來，麥克風已經放開。", g: self.generation)
+            }
         }
     }
 
@@ -520,32 +525,35 @@ final class DictationController: ObservableObject {
     private func startRefineDeadline(g: Int) {
         refineTimer?.invalidate()
         refineTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
-            guard let self, g == self.generation, self.phase == .refining,
-                  let raw = self.pendingRaw
-            else { return }
-            Diagnostics.log.error("refine overran its deadline; publishing as heard")
-            // Thirty seconds is already inside the window iOS gives a backgrounded
-            // app, so this is the device saying the model is too slow -- for good,
-            // not once. Recorded so the next launch starts on the smaller one
-            // instead of losing the pass again.
-            //
-            // Unless the preferred model has never finished a pass here: the first
-            // cleanup after an install also pays a ~18-second Metal library
-            // compile, so an overrun *then* is the compile, not the model. A
-            // downgrade recorded there would turn one slow first run into a
-            // permanent model change -- the same mistake as before, one layer down.
-            guard LLMPolicy.preferredHasSucceeded else {
-                Diagnostics.log.notice("first pass after install overran; not recording a downgrade")
+            MainActor.assumeIsolated {
+                guard let self, g == self.generation, self.phase == .refining,
+                      let raw = self.pendingRaw
+                else { return }
+                Diagnostics.log.error("refine overran its deadline; publishing as heard")
+                // Thirty seconds is already inside the window iOS gives a
+                // backgrounded app, so this is the device saying the model is too
+                // slow -- for good, not once. Recorded so the next launch starts on
+                // the smaller one instead of losing the pass again.
+                //
+                // Unless the preferred model has never finished a pass here: the
+                // first cleanup after an install also pays a ~18-second Metal
+                // library compile, so an overrun *then* is the compile, not the
+                // model. A downgrade recorded there would turn one slow first run
+                // into a permanent model change -- the same mistake as before, one
+                // layer down.
+                guard LLMPolicy.preferredHasSucceeded else {
+                    Diagnostics.log.notice("first pass after install overran; not recording a downgrade")
+                    self.publish(raw, detail: "已辨識 · 未整理", g: g)
+                    return
+                }
+                LLMPolicy.recordDowngrade(reason: "整理超過 25 秒，未在背景時間內完成")
+                // The pass itself cannot be interrupted -- it is one blocking call
+                // into llama.cpp -- so it keeps the work queue busy and the next
+                // dictation waits behind it. The result is discarded by generation,
+                // but the wait is real: logged, not hidden.
+                Diagnostics.log.notice("the abandoned cleanup pass still occupies the work queue")
                 self.publish(raw, detail: "已辨識 · 未整理", g: g)
-                return
             }
-            LLMPolicy.recordDowngrade(reason: "整理超過 25 秒，未在背景時間內完成")
-            // The pass itself cannot be interrupted -- it is one blocking call
-            // into llama.cpp -- so it keeps the work queue busy and the next
-            // dictation waits behind it. The result is discarded by generation,
-            // but the wait is real: logged, not hidden.
-            Diagnostics.log.notice("the abandoned cleanup pass still occupies the work queue")
-            self.publish(raw, detail: "已辨識 · 未整理", g: g)
         }
     }
 
@@ -1032,7 +1040,7 @@ final class DictationController: ObservableObject {
     /// complete spool behind it never got a turn. A *conversion* failure is not
     /// that: it can be transient, and deleting the file would throw the sentence
     /// away. Only spools are touched -- never a file the test flag pointed at.
-    private static func discardIfUnreadable(_ url: URL) {
+    private nonisolated static func discardIfUnreadable(_ url: URL) {
         guard isSpool(url), (try? AVAudioFile(forReading: url)) == nil else { return }
         // A killed process never closes the file, so the header can be short while
         // the data chunk is complete -- `readMono16k` recovers those. If the salvage
@@ -1043,18 +1051,18 @@ final class DictationController: ObservableObject {
 
     /// An empty file decodes to nothing on every launch, so it goes -- otherwise
     /// it stays the newest orphan and blocks the ones behind it.
-    private static func removeSpool(_ url: URL) {
+    private nonisolated static func removeSpool(_ url: URL) {
         guard isSpool(url) else { return }
         try? FileManager.default.removeItem(at: url)
     }
 
-    private static func isSpool(_ url: URL) -> Bool {
+    private nonisolated static func isSpool(_ url: URL) -> Bool {
         url.deletingLastPathComponent().standardizedFileURL
             == AudioSpool.directory.standardizedFileURL
     }
 
     /// Any WAV/CAF/M4A at any rate, as 16 kHz mono float32.
-    private static func readMono16k(_ url: URL) throws -> [Float] {
+    private nonisolated static func readMono16k(_ url: URL) throws -> [Float] {
         let file = try AVAudioFile(forReading: url)
         // A spool whose process was killed mid-recording may still be headerless
         // in practice: AVAudioFile writes the WAV header's length when the file is
@@ -1095,11 +1103,17 @@ final class DictationController: ObservableObject {
         }
         var supplied = false
         var failure: NSError?
+        // The block is `@Sendable`, and `AVAudioPCMBuffer` is not. It is safe
+        // here because `convert(to:error:withInputFrom:)` calls the block
+        // synchronously, inside this call, and nothing else holds the buffer --
+        // which is exactly what `nonisolated(unsafe)` is for: a promise the
+        // compiler cannot check, made where it can be read.
+        nonisolated(unsafe) let inputBuffer = source
         let status = converter.convert(to: out, error: &failure) { _, state in
             if supplied { state.pointee = .endOfStream; return nil }
             supplied = true
             state.pointee = .haveData
-            return source
+            return inputBuffer
         }
         guard status != .error, failure == nil, let channel = out.floatChannelData else {
             throw CoreError.failed(-1, failure?.localizedDescription ?? "轉換失敗")
@@ -1112,7 +1126,7 @@ final class DictationController: ObservableObject {
     /// The payload is little-endian float32, which is exactly what the spool
     /// writes, so no conversion is needed -- and none is possible, because the
     /// point of this path is that the file's own description of itself is wrong.
-    private static func salvageRawWAV(_ url: URL) -> [Float]? {
+    private nonisolated static func salvageRawWAV(_ url: URL) -> [Float]? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         guard let marker = data.range(of: Data("data".utf8)),
               marker.upperBound + 4 < data.count
@@ -1148,7 +1162,7 @@ final class DictationController: ObservableObject {
     /// typed twice ("開會用 Notion 記錄開會用 Notion 記錄"). `final` covers every
     /// utterance, so it is the one to keep; `accumulated` only matters when the
     /// core returned nothing.
-    static func merge(_ accumulated: String, _ final: String) -> String {
+    nonisolated static func merge(_ accumulated: String, _ final: String) -> String {
         final.isEmpty ? accumulated : final
     }
 }

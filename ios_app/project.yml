@@ -1,4 +1,11 @@
 name: OfflineVoiceAssistant
+# `LastUpgradeCheck` is what Xcode reads to decide whether the project needs
+# "Update to recommended settings". It is a fact about when the project was last
+# checked, not a build setting, so it lives here rather than in `settings` -- and
+# it is pinned to the Xcode that builds this app (26.5), because a value left
+# behind is the whole reason the banner appears on every open.
+attributes:
+  LastUpgradeCheck: "2650"
 options:
   bundleIdPrefix: com.example
   deploymentTarget:

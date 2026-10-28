@@ -1207,3 +1207,43 @@ voiceinput: could not apply the edit (no usable result)
 （提示詞分離、三種區域）是在同一份 Rust 核心上以 `voiceinput` 與 `edit_batch` 量的。
 iOS 走的是 in-process 的 `LLM_EditText`、macOS 走 worker，兩者是同一個 C ABI 函式，
 但「在 iPhone 上按下去」仍要真機人工測一次。
+
+## 附錄 J：Xcode 的六類警告（2026-10-28）
+
+使用者貼的清單有五類（其中「物件檔版本」那類會噴幾百行，一行一個 object）：
+
+| 警告 | 根因 | 修法 |
+|---|---|---|
+| Update to recommended settings | 專案的 `LastUpgradeCheck` 停在舊版 Xcode | `project.yml` 加 `attributes: LastUpgradeCheck: "2650"`（Xcode 26.5） |
+| All interface orientations must be supported unless the app requires full screen | iPad 多工要求四個方向，或宣告 `UIRequiresFullScreen`；原本只有 iPhone 的直向 | `Info.plist` 加 `UISupportedInterfaceOrientations~ipad` 四方向。**不**宣告 full screen：Slide Over／Split View 正是它被拿來用的方式 |
+| `was built for newer 'iOS' version (26.5) than being linked (17.0)` ×N | 核心靜態庫的 object 是 clang 用 SDK 預設（26.5）編的，App 卻 link 17.0 | `IPHONEOS_DEPLOYMENT_TARGET=17.0` 重編兩個 slice（cc 與 cmake 都讀這個變數），並寫進 `scripts/build_ios.sh`；`build.rs` 加 `rerun-if-env-changed`，否則改了也不會重編 |
+| `'allowBluetooth' was deprecated in iOS 8.0` | 舊名 | `.allowBluetooth` → `.allowBluetoothHFP`（`Core.swift`、`PiPController.swift`） |
+| `Add '@preconcurrency' to suppress 'Sendable'-related warnings from module 'AVFAudio'` | SDK 把 AVFAudio 的型別標成 non-Sendable | `@preconcurrency import AVFoundation` |
+| `Call to main actor-isolated … in a synchronous nonisolated context` 等 13 條 | `@MainActor` 類別裡的 `static` 輔助函式被背景佇列呼叫；`Timer` 閉包是 `@Sendable`；`AVAudioConverter` 的 block 也是 | 四個純函式標 `nonisolated`（`merge`／`readMono16k`／`discardIfUnreadable`／`removeSpool`，連帶 `isSpool`、`salvageRawWAV`）；三個 Timer 閉包用 `MainActor.assumeIsolated`（它們本來就在 main run loop）；`AVAudioPCMBuffer` 用 `nonisolated(unsafe) let` 帶進同步呼叫的 block，並在註解寫明為什麼安全 |
+
+驗證方式是把 derived data 清空重編，數 `warning:` 的種類，而不是「看起來沒有」：
+
+```text
+$ xcodebuild … -sdk iphonesimulator … -derivedDataPath build-check build
+exit=0
+2
+   2 Metadata extraction skipped. No AppIntents.framework dependency found.
+** BUILD SUCCEEDED **
+
+$ xcodebuild … -sdk iphoneos … -derivedDataPath build-device-check CODE_SIGNING_ALLOWED=NO build
+exit=0
+2
+   2 Metadata extraction skipped. No AppIntents.framework dependency found.
+** BUILD SUCCEEDED **
+```
+
+剩下那 2 行是 `appintentsmetadataprocessor` 在沒有 AppIntents 依賴時的固定訊息，
+來自工具鏈、不是這個專案的程式碼，也沒有 build setting 可以關。
+
+重編後的 object 確認（`vtool -show-build`）：
+
+```text
+sim:    platform IOSSIMULATOR   minos 17.0
+device: platform IOS            minos 17.0
+shim:   platform IOS            minos 17.0
+```

@@ -238,7 +238,7 @@ final class MicCapture {
         // silence) would drop the window the app is living inside.
         if keepAlive {
             try session.setCategory(.playAndRecord, mode: .spokenAudio,
-                                    options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
+                                    options: [.mixWithOthers, .allowBluetoothHFP, .defaultToSpeaker])
         } else {
             try session.setCategory(.playAndRecord, mode: .measurement,
                                     options: [.duckOthers, .defaultToSpeaker])

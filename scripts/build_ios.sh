@@ -22,6 +22,14 @@ done
 cp -f "$SHERPA_IOS/sim/lib/"*.a ios_app/vendor/sim/ 2>/dev/null || true
 cp -f "$SHERPA_IOS/device/lib/"*.a ios_app/vendor/device/ 2>/dev/null || true
 
+# IPHONEOS_DEPLOYMENT_TARGET is load-bearing, not decoration: clang bakes the
+# minimum OS into every object file it produces, and the app links at 17.0. Built
+# without it, the core's objects said 26.5 (the SDK's default) and every link
+# printed "was built for newer 'iOS' version (26.5) than being linked (17.0)"
+# hundreds of times -- one per object in the archive. The cc and cmake crates
+# both read this variable, so it covers the shim and llama.cpp in one place.
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
+
 SHERPA_ONNX_DIR="$PWD/$SHERPA_IOS/sim" \
     cargo build --manifest-path core_engine/Cargo.toml --target aarch64-apple-ios-sim --release
 SHERPA_ONNX_DIR="$PWD/$SHERPA_IOS/device" \

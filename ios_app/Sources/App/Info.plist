@@ -24,8 +24,23 @@
     <dict>
       <key>UIApplicationSupportsMultipleScenes</key><false/>
     </dict>
+    <!-- Portrait only on a phone: this app is a keyboard's companion, and a
+         sentence typed into a rotated field is the one thing it must not do
+         badly. The iPad list is separate because the check Xcode runs is about
+         iPad multitasking, where an app that supports only one orientation must
+         declare `UIRequiresFullScreen` -- and Hushkey deliberately does not:
+         Slide Over and Split View are how it gets used beside the app the text
+         is going into. So the iPad list carries all four, which is the honest
+         answer for a window that can be resized. -->
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationPortrait</string></array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
     <!-- File sharing, so models can be put on the phone at all. A phone has no
          shell: without these two keys the only way to install a 100 MB
          recogniser is the app's own importer, and a user told "the folder is

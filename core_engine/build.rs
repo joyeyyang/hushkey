@@ -53,4 +53,9 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=csrc/asr_shim.c");
     println!("cargo:rerun-if-env-changed=SHERPA_ONNX_DIR");
+    // The deployment target ends up in every object's LC_BUILD_VERSION. Without
+    // this line a change to it does not re-run the script, the old objects are
+    // reused, and the app links against a core built for a newer iOS than the
+    // one it claims to support -- which the linker warns about once per object.
+    println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
 }
