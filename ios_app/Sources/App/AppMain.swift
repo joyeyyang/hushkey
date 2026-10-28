@@ -35,6 +35,10 @@ struct OVCApp: App {
             Task { @MainActor in PauseProbe.run() }
         }
 
+        if Diagnostics.probesStuck {
+            Task { @MainActor in StuckProbe.run() }
+        }
+
         if let text = Diagnostics.refineText {
             RefineProbe.run(text)
         }

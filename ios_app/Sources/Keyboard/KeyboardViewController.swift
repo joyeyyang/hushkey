@@ -140,13 +140,19 @@ final class KeyboardViewController: UIInputViewController {
             bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
             return
         }
+        // Written down before anything is attempted, on both paths. `open()` can be
+        // refused (iOS declines it while the containing app is already resident) and
+        // a Darwin notification only reaches a process that is listening, so the
+        // request is left where the app cannot miss it -- it is how a tap that
+        // arrives while the app is backgrounded still turns into a recording.
+        SharedStore.requestRecording()
+
         // Mode 2: the app is already alive inside its PiP window, so asking it to
         // record needs no app switch -- and switching is the one thing this mode
         // exists to avoid. `pipAlive` is the guard: a mode that was chosen but is
         // not running would otherwise make this button do nothing at all, and a
         // killed app leaves its flags behind.
         if SharedStore.mode == .pip, SharedStore.pipAlive {
-            SharedStore.requestRecording()
             bar.showNotice("錄音中…")
             confirmOrFallBack()
             return
@@ -191,12 +197,26 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
+    /// Asks iOS to bring the app forward.
+    ///
+    /// `open()`'s completion is NOT a statement about whether the app is running,
+    /// which is what this used to assume: iOS refuses the open when the containing
+    /// app is already resident, and the user was then told to go and open an app
+    /// that was already open -- with the tap thrown away. The refusal is real
+    /// information about the *switch*, not about the app, so that is all it is used
+    /// for now.
+    ///
+    /// The request itself was written to the group before this call, so going back
+    /// to the app by any means at all -- the app switcher, the home screen, the
+    /// icon -- is enough: the app finds the request when it becomes active and
+    /// starts recording. The notice says that instead of asking for something the
+    /// user may have already done.
     private func openApp() {
         guard let url = URL(string: "ovc://record") else { return }
         extensionContext?.open(url) { [weak self] ok in
             guard !ok else { return }
             DispatchQueue.main.async {
-                self?.bar.showNotice("請先從主畫面開啟 Hushkey")
+                self?.bar.showNotice("已送出錄音請求，切回 Hushkey 就會開始")
             }
         }
     }

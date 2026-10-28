@@ -182,6 +182,23 @@ tomorrow」），因為那一組配對才是模型真正在抄的東西。
 而且和波形疊在一起。修法兩件：幾何一律讓開左邊的圖示（`micView.isHidden ? 24 : 56`），
 以及錄音形狀不再用膠囊那一行講步驟（步驟在 pill 裡，沒有 header 時靠標題與朱紅麥克風）。
 
+### 5.7 iOS 錄音請求是持久訊號，busy 狀態一定有期限（2026-10-28）
+
+鍵盤擴充不能自己錄音，所以麥克風按鍵是「請 containing App 開始錄音」的訊息。
+`extensionContext.open()` 回 `false` 只代表 iOS 沒有切到 App；containing App 已 resident
+時本來就會拒絕 open，不能拿它猜 App 是否開著。因此鍵盤先在 App Group 寫入單調
+序號與時間戳，再發 Darwin notification；App 消費序號後才啟動錄音。URL、notification、
+activation 三通道最後都走同一個 handler，避免三份判斷各做各的。
+
+App 端也不能讓「忙碌」變成永久狀態：`.transcribing` 有 25 秒靜默上限（長音檔有進度
+就續期）、orphan recovery 有 60 秒保底、`Core.stop()` 的錯誤會被接住、`start()` 遇到
+busy 一定給出一句可行動的訊息。熱啟動的新錄音請求優先於上一輪 orphan recovery，
+否則 recovery 會占住唯一的 recogniser session，把使用者正在說的話擋掉。
+
+這條決策也示範「量測工具自己壞掉時不會失敗」的相反面：`-OVC_HANG_DECODE` 明確注入
+永不回來的 decode，`-OVC_STUCK_PROBE` 再確認 phase、按鈕 enabled 狀態與「下一次按麥克風
+有沒有被當掉」。詳細實測見 `docs/milestones.md` 附錄 H。
+
 ## 6. 2026-10-25 → 10-26 這一輪
 
 起點：使用者說「你把全部的東西都做完」。剩下兩條線——語音編輯未實作、會議模式沒搬進 Kit。

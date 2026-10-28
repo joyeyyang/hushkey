@@ -80,6 +80,28 @@ enum Diagnostics {
         ProcessInfo.processInfo.arguments.contains("-OVC_PAUSE_PROBE")
     }
 
+    /// `-OVC_STUCK_PROBE`: leave the recorder page on screen and record what the
+    /// pipeline's phase does after a decode that never comes back.
+    ///
+    /// The user's report was "the microphone will not press", which is a phase that
+    /// never ends rather than anything about the microphone. Paired with
+    /// `-OVC_HANG_DECODE` and a spool planted in the App Group, the launch does the
+    /// rest: `prepare()` → `recoverOrphan()` → `.transcribing`. Nothing about the
+    /// state is synthetic.
+    static var probesStuck: Bool {
+        ProcessInfo.processInfo.arguments.contains("-OVC_STUCK_PROBE")
+    }
+
+    /// `-OVC_HANG_DECODE`: the decode never completes.
+    ///
+    /// The fault, injected on purpose. "A `Core.stop()` that never returns" cannot
+    /// be produced from outside the process -- it either returns or the app dies --
+    /// and it is the one input the stuck-state bug needs. Behind a launch flag, so
+    /// no normal run pays for it.
+    static var hangsDecode: Bool {
+        ProcessInfo.processInfo.arguments.contains("-OVC_HANG_DECODE")
+    }
+
     /// `-OVC_LLM_RESET`: forget a recorded downgrade before anything loads.
     ///
     /// The model screen has the same button. This exists because the record lives

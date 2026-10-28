@@ -212,6 +212,18 @@ enum SharedStore {
         /// `Phase` would mean every `switch` in both processes grew a case that
         /// behaves exactly like `.recording` except in the two places it does not.
         static let paused = "s.paused"
+        /// The keyboard's record requests, and how many the app has acted on.
+        ///
+        /// A pair of monotonic counters, like `s.seq`/`s.consumedSeq` and for the
+        /// same reason: "there is a request the app has not seen" has to survive
+        /// both processes being killed at any moment, and a boolean cannot say it
+        /// -- the app clearing a flag would also erase a request that arrived in
+        /// between.
+        static let recordRequest = "s.recordRequest"
+        static let recordRequestConsumed = "s.recordRequestConsumed"
+        /// When the newest request was made, so a stale one can be told from the tap
+        /// the user is making now.
+        static let recordRequestAt = "s.recordRequestAt"
     }
 
     static func current() -> Session {
@@ -410,13 +422,68 @@ enum SharedStore {
 
     // MARK: notification
 
-    /// The keyboard's "start listening" request, used in `.pip` mode.
+    /// The keyboard asking for a dictation, written down as well as announced.
     ///
-    /// A Darwin notification rather than the URL scheme: a URL switch would leave
-    /// the app the user is typing in, which is the one thing this mode exists to
-    /// avoid.
+    /// The notification alone was not enough, and the failure it left was the one
+    /// the user reported: the keyboard tapped, the app was already running but in
+    /// the background, and nothing happened. A Darwin notification only reaches a
+    /// listening process, and `extensionContext.open(url)` -- the other channel --
+    /// returns **false** in exactly that situation (iOS declines the open when the
+    /// containing app is resident), which the keyboard used to report as "the app
+    /// is not open". It was open.
+    ///
+    /// So the request is also written to the group, with a sequence that only ever
+    /// moves forward. Whichever channel survives -- the URL, the notification, or
+    /// the app finding it the next time it becomes active -- the request is there
+    /// to be found, and any of them can be the one that arrives.
     static func requestRecording() {
+        // Written first, then announced: a handler that reacts to the notification
+        // reads the request, and a handler that ran before the write would find
+        // nothing and drop a tap the user already made.
+        if let defaults {
+            let next = max(
+                defaults.integer(forKey: Key.recordRequest),
+                defaults.integer(forKey: Key.recordRequestConsumed)
+            ) + 1
+            defaults.set(next, forKey: Key.recordRequest)
+            defaults.set(Date().timeIntervalSince1970, forKey: Key.recordRequestAt)
+        }
         post(name: recordRequestName)
+    }
+
+    /// A request young enough to act on without being asked.
+    ///
+    /// A request the app never got to -- the process was killed between the tap and
+    /// the start -- stays in the group, which is what makes it survive at all. But
+    /// the app also checks for one every time it becomes active, and opening the app
+    /// to read the history a week later must not start a recording. So the
+    /// unprompted paths (a launch, coming back to the app) only honour a request
+    /// that is still recent; the prompted ones (the URL, the notification) are being
+    /// delivered now and need no such test.
+    static func hasFreshRecordRequest(within seconds: TimeInterval = 120) -> Bool {
+        guard hasPendingRecordRequest,
+              let at = defaults?.object(forKey: Key.recordRequestAt) as? Double
+        else { return false }
+        return Date().timeIntervalSince1970 - at < seconds
+    }
+
+    /// Whether the keyboard has asked for a dictation the app has not acted on.
+    ///
+    /// The app asks this when it becomes active, which is how a request survives a
+    /// process that was not running, an `open()` iOS refused, and a notification
+    /// nobody was listening for.
+    static var hasPendingRecordRequest: Bool {
+        guard let defaults else { return false }
+        return defaults.integer(forKey: Key.recordRequest)
+            > defaults.integer(forKey: Key.recordRequestConsumed)
+    }
+
+    /// Called by whoever acts on the request, before acting: the three channels all
+    /// lead here, and without this the second one to arrive would start a second
+    /// dictation into a pipeline that already has one.
+    static func consumeRecordRequest() {
+        guard let defaults else { return }
+        defaults.set(defaults.integer(forKey: Key.recordRequest), forKey: Key.recordRequestConsumed)
     }
 
     /// Whether the microphone is open but not listening.

@@ -969,3 +969,101 @@ published     「我將繼續交五家店」  detail 已整理
 
 四件事被證明：通知跨得過行程、暫停不會結束這一句（`phase` 一直是 `recording`）、
 恢復之後狀態回得來、暫停過的聽寫仍然只發布一次而且真的整理過。
+
+---
+
+## 附錄 H：iOS 錄音鈕永久失效（2026-10-28）
+
+### H.1 根因不是麥克風，而是「請求會消失」與「busy 永不結束」
+
+鍵盤的麥克風不能自己錄音（iOS 在麥克風權限前就擋掉 App Extension 的 CoreMedia），
+所以按鍵必須讓 containing App 開始錄音。舊路徑有兩個各自會致命的問題：
+
+1. `extensionContext.open()` 的 completion 被拿來猜 App 是否開著。iOS 在 containing App
+   已經 resident 時會拒絕 open；`false` 的意思是「沒有切到 App」，**不是**「App 沒開」。
+   舊程式因此丟掉整個請求。
+2. 就算 URL 到了，`.transcribing` 沒有期限。`Core.stop()` 若不回來，phase 永遠是
+   `.transcribing`，而錄音鈕對所有 busy phase（錄音除外）都是 disabled。之後每次按
+   麥克風都走 `start()` 的 busy guard，舊版又靜默 `return`，於是看起來就是永久壞掉。
+
+熱啟動還有第三個 race：App 啟動後 1.5 秒才補回上一輪的 orphan audio；若這段時間
+鍵盤已送出新的錄音請求，補回會先占住唯一的 recogniser session，把新請求擋在後面。
+
+### H.2 修法
+
+- **A1：錄音請求改成持久訊號。** 鍵盤先在 App Group 寫入單調遞增的
+  `s.recordRequest` 與 `s.recordRequestAt`，再發 Darwin notification。App 以
+  `consumeRecordRequest()` 吃掉已處理序號，所以 URL／Darwin／activation 三個通道
+  即使同時到，也只會啟動一次錄音。
+- **A2：URL 不再被 `modelsReady` 靜默丟棄。** 三通道統一進
+  `handleRecordRequest(channel:freshOnly:)`；先切到「轉錄」分頁。沒有模型時顯示
+  「先在這一頁裝好模型」，不再假裝沒發生。
+- **A3：新的錄音請求優先於 orphan recovery。** launch／active 這兩個未被提示的通道
+  只認 120 秒內的新請求；`prepare()` 的 1.5 秒 recovery 守門也檢查 fresh request。
+- **A4：每一段 busy 都有期限與出口。**
+  - `.transcribing` 的靜默上限是 25 秒；有進度就 renew，長音檔匯入不會被砍。
+  - 逾時且已有文字就 publish；沒有文字就 fail，兩者都離開 busy。
+  - `Core.stop()` 的錯誤會被接住並記錄，不再被 `try?` 吞掉。
+  - recovery 另有 60 秒保底，超時 `fail(...)` 並放行 `recovering`。
+  - `start()` 遇到 busy 不再沉默：依序說明「上一句逾時」「正在補回上一次錄音」
+    或「上一句還在處理」。
+
+### H.3 故障注入與修好後的實測
+
+故障入口刻意只有啟動參數：`-OVC_HANG_DECODE` 讓 decode 永不完成，
+`-OVC_STUCK_PROBE` 每兩秒記一次 phase，最後代替使用者按一次麥克風。修前同一路徑
+47 秒都停在 `.transcribing`，錄音鈕 disabled；修後同一路徑的 `stuck-probe.json` 是：
+
+```json
+{
+  "leftTranscribing": true,
+  "phaseBeforePress": "failed",
+  "pressWasActedOn": true,
+  "finalPhase": "recording",
+  "finalButtonDisabled": false,
+  "finalError": ""
+}
+```
+
+時間線也對：6.24–24.97 秒仍是 `.transcribing`；27.06 秒逾時後 phase 變 `failed`、
+按鈕 enabled；27.08 秒模擬器上的按鈕動作被接受，phase 變 `recording`。截圖：
+`docs/evidence/ios-stuck-after-fix.png`。
+
+App Group 持久請求的 activation 通道（App 先開著，再把 Hushkey 切到背景、寫入 request、
+重啟 `cfprefsd`、切回 Hushkey）：
+
+```text
+record request via active
+dictation started
+s.recordRequest = 46
+s.recordRequestConsumed = 46
+```
+
+`consumed` 追上 `request` 表示這次確實被 App 處理，不是按完就消失。畫面也停在
+「轉錄」分頁；截圖：`docs/evidence/ios-record-request-via-active.png`。
+
+A3 的競爭則用「orphan spool ＋ fresh request」一起驗：啟動後 log 是
+`record request via launch` → `dictation started`，**沒有** `recovering spool`；
+預先種的 `.wav` 仍是 `.wav`，沒有被 recovery 改成 `.claimed`。也就是新的熱啟動
+錄音請求沒有被上一輪音檔搶走。
+
+### H.4 建置、測試與證據邊界
+
+| 檢查 | 真實結果 |
+|---|---|
+| `cargo test --manifest-path core_engine/Cargo.toml` | `88 passed; 0 failed`；另有 `ffi_lifecycle_and_error_paths` 1/1 通過 |
+| iOS simulator Debug build | `** BUILD SUCCEEDED **` |
+| iOS generic device Debug build | `** BUILD SUCCEEDED **`（簽署 team `7S48J3H2N2`） |
+| StuckProbe 故障注入 | 修前永久卡住；修後 `leftTranscribing=true`、按鈕可按、press 被接受 |
+| activation 持久請求 | `record request via active`，序號被 consume，轉錄分頁開始錄音 |
+| fresh request 對 orphan recovery | 新請求先開始；沒有 recovery log，spool 未被 claim |
+
+證據邊界要說清楚：
+
+- **鍵盤擴充本身無法用腳本點擊。** 模擬器不能安裝／操作這個 custom keyboard，
+  所以鍵盤側以完整 source path、兩端 build 與 App Group 持久請求的整合測試佐證；
+  真正在第三方 App 裡按麥克風仍要真機人工測一次。
+- 模擬器麥克風不可靠；這輪驗的是 phase、序號、通道與按鈕狀態，不是實際語音品質。
+- Rust 核心每個 C 入口共用同一把全域 mutex。25 秒逾時能**放行 UI**，但不能取消
+  已在 Rust 裡卡住的 `Core.stop()`；那把鎖仍可能讓下一個核心呼叫排隊。訊息已明說
+  「把 App 關掉再開一次」。要真正取消推論，必須在 Rust 端加取消點，這是另一輪工作。

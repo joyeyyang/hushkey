@@ -56,6 +56,12 @@ final class DictationController: ObservableObject {
 
     var isRecording: Bool { phase == .recording }
     var isBusy: Bool { phase == .recording || phase == .transcribing || phase == .refining }
+    /// Whether a recovery of last launch's sentence is holding the pipeline.
+    ///
+    /// Read-only view of `recovering` for the outside: while it is true a microphone
+    /// tap cannot start, and that is the difference between "the button is broken"
+    /// and "the button is waiting for last launch's sentence".
+    var isRecovering: Bool { recovering }
 
     private let work = DispatchQueue(label: "ovc.dictation", qos: .userInitiated)
 
@@ -71,6 +77,27 @@ final class DictationController: ObservableObject {
     /// the keyboard on "整理中…" forever, and the sentence -- already decoded and
     /// sitting in `pendingRaw` -- would never be handed over.
     private var refineTimer: Timer?
+    /// Bounds the decode, which had no deadline at all until a user hit it.
+    ///
+    /// The cleanup pass has had one since it was written; the decode never did, and
+    /// that asymmetry is what left the recorder button dead: `isBusy` is true for
+    /// `.transcribing`, `RecorderTab` disables the button for every busy phase
+    /// except `.recording`, and a completion that never arrives leaves the phase
+    /// there for the life of the process. The background-task expiry was not a
+    /// backstop either -- with nothing decoded yet there was no text to publish, and
+    /// that path did nothing at all.
+    ///
+    /// Renewed on progress, so a long file import is not cut off: this bounds
+    /// SILENCE, not work.
+    private var decodeTimer: Timer?
+    /// Set when a decode had to be cut off. The recogniser call that was still
+    /// running holds the core's own lock, so the next dictation has a good chance of
+    /// queuing behind it -- better said out loud than watched.
+    private var decodeTimedOut = false
+    /// Bounds a launch recovery, independently of the decode. `recovering` gates
+    /// `start()` (a microphone tap queues behind it), so it cannot be allowed to
+    /// stay true because something inside the recovery never returned.
+    private var recoveryTimer: Timer?
     /// A spool file inherited from a killed run. Removed once its words are
     /// published, so a second crash does not lose the sentence.
     private var orphanSource: URL?
@@ -165,8 +192,17 @@ final class DictationController: ObservableObject {
             // A recovery of last launch's sentence is holding the pipeline. The
             // tap outranks it, but dropping the recovery would throw away the
             // only copy of something the user already said once, so it runs as
-            // soon as the queue frees (see `resumeIfQueued`).
+            // soon as the queue frees (see `finishRecovery`).
             if recovering { startAfterRecovery = true }
+            // Never silent. A tap that does nothing is indistinguishable from a
+            // broken button -- which is exactly how this was reported: "the
+            // microphone will not press". The pipeline is fine; it is busy, and it
+            // says so.
+            error = decodeTimedOut
+                ? "上一次辨識沒有回應。如果這次也沒有開始錄音，請把 App 關掉再開一次。"
+                : (recovering
+                    ? "正在補回上一次的錄音，完成後就會開始。"
+                    : "上一句還在處理，完成後就會開始。")
             return
         }
         let g = nextGeneration()
@@ -302,12 +338,32 @@ final class DictationController: ObservableObject {
     private func decode(accumulated: String, reason: String, g: Int) {
         phase = .transcribing
         SharedStore.setPhase(.transcribing, detail: "辨識中…")
+        startDecodeDeadline(g: g)
         // The user is about to leave for the app they were typing in. This keeps
         // the process alive for the seconds the decode needs.
         beginBackground(g: g)
 
         work.async {
-            let final = (try? Core.stop()) ?? ""
+            // `-OVC_HANG_DECODE`: the fault, injected. This is what a `Core.stop()`
+            // that never returns looks like from here, and it is the only way to
+            // produce the stuck state on purpose -- the recogniser either returns or
+            // the process dies. Never reached without the launch flag.
+            if Diagnostics.hangsDecode {
+                Diagnostics.log.error("decode hung on purpose (-OVC_HANG_DECODE)")
+                return
+            }
+            let final: String
+            do {
+                final = try Core.stop()
+            } catch {
+                // No longer swallowed by `try?`. A stop that throws means this
+                // dictation's tail is missing, and the log is where that is
+                // recorded; the words already closed still go out.
+                Diagnostics.log.error(
+                    "Core.stop failed: \(error.localizedDescription, privacy: .public)"
+                )
+                final = ""
+            }
             let out = Self.merge(accumulated, final)
             DispatchQueue.main.async {
                 self.complete(out, reason: reason, g: g)
@@ -315,8 +371,87 @@ final class DictationController: ObservableObject {
         }
     }
 
+    // MARK: the decode's deadline
+
+    /// How long the decode may stay silent. The cleanup pass uses the same number
+    /// for the same reason: iOS gives a backgrounded app about thirty seconds, and a
+    /// deadline inside that window means this side decides what happens rather than
+    /// racing a kill it cannot log.
+    private static let decodeSilence: TimeInterval = 25
+
+    private func startDecodeDeadline(g: Int) {
+        decodeTimer?.invalidate()
+        decodeTimer = Timer.scheduledTimer(withTimeInterval: Self.decodeSilence, repeats: false) {
+            [weak self] _ in
+            self?.decodeRanOutOfTime(g: g)
+        }
+    }
+
+    /// Called on progress: a decode that is still producing words is working, and a
+    /// long import must not be cut off for taking a long time.
+    private func renewDecodeDeadline(g: Int) {
+        guard decodeTimer != nil, g == generation, phase == .transcribing else { return }
+        startDecodeDeadline(g: g)
+    }
+
+    private func cancelDecodeDeadline() {
+        decodeTimer?.invalidate()
+        decodeTimer = nil
+    }
+
+    /// The decode ran out of time, or the system took the background time away.
+    ///
+    /// One answer to both, because they are the same situation: nothing more is
+    /// coming. What was heard is handed over -- a rough sentence is still the user's
+    /// sentence -- and when nothing was heard the dictation fails, which is the part
+    /// that guarantees the phase leaves `.transcribing` and the microphone comes
+    /// back.
+    private func decodeRanOutOfTime(g: Int) {
+        guard g == generation, phase == .transcribing else { return }
+        cancelDecodeDeadline()
+        decodeTimedOut = true
+        let heard = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if heard.isEmpty {
+            Diagnostics.log.error("decode overran its deadline with nothing decoded")
+            fail("辨識逾時，沒有拿到文字。再說一次，靠近一點。", g: g)
+        } else {
+            Diagnostics.log.error("decode overran its deadline; publishing as heard")
+            publish(heard, detail: "已辨識 · 逾時", g: g)
+        }
+    }
+
+    // MARK: the recovery's deadline
+
+    /// How long a launch recovery may hold the pipeline. Longer than the decode's,
+    /// because it is measured across the whole run (load, read, feed, decode) rather
+    /// than across one stage of it, and the sentence it is recovering is already
+    /// late.
+    private static let recoveryLimit: TimeInterval = 60
+
+    private func startRecoveryDeadline() {
+        recoveryTimer?.invalidate()
+        recoveryTimer = Timer.scheduledTimer(withTimeInterval: Self.recoveryLimit, repeats: false) {
+            [weak self] _ in
+            guard let self, self.recovering else { return }
+            // `recovering` gates `start()`: while it is true a microphone tap only
+            // queues. So it cannot be allowed to stay true because something inside
+            // the recovery never returned -- the sentence is not coming back, and
+            // the user's next tap should not pay for it.
+            Diagnostics.log.error("recovery overran its deadline; releasing the pipeline")
+            self.fail("上次的錄音來不及補回來，麥克風已經放開。", g: self.generation)
+        }
+    }
+
+    private func cancelRecoveryDeadline() {
+        recoveryTimer?.invalidate()
+        recoveryTimer = nil
+    }
+
     private func complete(_ raw: String, reason: String, g: Int) {
         guard g == generation else { return }
+        // The decode came back, so whatever was slow is not slow now.
+        decodeTimedOut = false
+        cancelDecodeDeadline()
         guard !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             spool?.discard()
             spool = nil
@@ -420,6 +555,9 @@ final class DictationController: ObservableObject {
         pendingRaw = nil
         refineTimer?.invalidate()
         refineTimer = nil
+        cancelDecodeDeadline()
+        decodeTimedOut = false
+        cancelRecoveryDeadline()
         endBackground()
         transcript = text
         live = ""
@@ -457,6 +595,7 @@ final class DictationController: ObservableObject {
     /// asked for while it was running.
     private func finishRecovery() {
         recovering = false
+        cancelRecoveryDeadline()
         guard startAfterRecovery else { return }
         startAfterRecovery = false
         // Last launch's sentence is on its way to the keyboard, so the
@@ -498,6 +637,8 @@ final class DictationController: ObservableObject {
         startedAt = nil
         refineTimer?.invalidate()
         refineTimer = nil
+        cancelDecodeDeadline()
+        cancelRecoveryDeadline()
         skipRefine = false
         injectedAudioReady = false
         orphanWasClaimed = false
@@ -561,6 +702,8 @@ final class DictationController: ObservableObject {
         pendingRaw = nil
         refineTimer?.invalidate()
         refineTimer = nil
+        cancelDecodeDeadline()
+        cancelRecoveryDeadline()
         endBackground()
         phase = .failed
         error = message
@@ -612,10 +755,22 @@ final class DictationController: ObservableObject {
                 // time at all -- which is the one thing that path needs.
                 self.endBackground()
                 guard g == self.generation else { return }
-                if let raw = self.pendingRaw {
-                    self.publish(raw, detail: "已辨識 · 未整理", g: g)
-                } else if !self.transcript.isEmpty {
-                    self.publish(self.transcript, detail: "已辨識", g: g)
+                // One place decides what "out of time" means, and this is it: the
+                // cleanup pass keeps its own wording (its text is already decoded,
+                // only the polish is missing) and everything else goes through the
+                // decode's handler. The old version of this block had a hole with no
+                // handler at all -- out of background time with nothing decoded yet
+                // matched neither branch, and the phase stayed `.transcribing` for
+                // the life of the process, with the microphone button disabled.
+                if self.phase == .refining {
+                    let raw = self.pendingRaw ?? self.transcript
+                    if raw.isEmpty {
+                        self.fail("沒有聽到聲音。再說一次，靠近一點。", g: g)
+                    } else {
+                        self.publish(raw, detail: "已辨識 · 未整理", g: g)
+                    }
+                } else {
+                    self.decodeRanOutOfTime(g: g)
                 }
             }
         }
@@ -697,6 +852,12 @@ final class DictationController: ObservableObject {
             announcing,
             detail: treatingAsFile ? "辨識音檔…" : (recovering ? "補回上次的錄音…" : "錄音中…")
         )
+        // Armed here, not only in `decode()`: everything between this line and the
+        // recogniser -- loading the model, reading the file, feeding the samples --
+        // can be where it stops, and the phase is already `.transcribing` while it
+        // does. A launch recovery that hung in `Core.initialize` left the button
+        // dead with no timer anywhere.
+        if announcing == .transcribing { startDecodeDeadline(g: g) }
         // Set before anything can fail, not after the file has been read: this file
         // is the only copy of that sentence, and every exit (`publish`, `fail`,
         // `reset`) finds it through this property. Assigned late, an engine that
@@ -763,6 +924,10 @@ final class DictationController: ObservableObject {
                         guard g == self.generation, self.phase == announcing else { return }
                         self.live = open
                         SharedStore.setPartial(open)
+                        // Progress, so the deadline moves: a ten-minute import takes
+                        // a while to hand over, and time spent producing words is not
+                        // time spent stuck.
+                        self.renewDecodeDeadline(g: g)
                     }
                 }
             }
@@ -829,10 +994,12 @@ final class DictationController: ObservableObject {
         // candidate set, which is the old behaviour; the log says which happened.
         guard let claimed = AudioSpool.claim(newest) else {
             recovering = true
+            startRecoveryDeadline()
             runInjected(url: newest, detail: "補回上次的錄音", skipRefine: true)
             return
         }
         recovering = true
+        startRecoveryDeadline()
         // Straight to the keyboard, no cleanup pass. Whatever killed the app last
         // time happened with a sentence already decoded, so this path spends its
         // one shot on delivering rather than on polishing.
