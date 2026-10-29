@@ -259,6 +259,14 @@ private func containsWord(_ lower: String, _ needle: String) -> Bool {
 /// `config` is taken for symmetry with `refineTranscript` and to keep the run's
 /// engine settings in one place; the core reads the model from the environment
 /// `prepare()` published, so no field is consulted here.
+///
+/// The register (`config.refineTone`) is deliberately NOT applied. An edit says
+/// what to change, and rewriting the untouched lines into another register would
+/// be changing text the user did not ask about -- the whole-draft path would
+/// rewrite every line the instruction did not name. The three registers belong
+/// to `refineTranscript` (and to `LLM_RefineTextWithTone`). The segmented
+/// control next to 修改的提示詞 in the main window writes that same setting, so the
+/// register can be changed where the user is working; this path ignores it.
 public func applyVoiceEdit(_ instruction: String, to text: String,
                            config: VoiceInputConfig) -> String? {
     let current = Text.toTraditional(text.trimmingCharacters(in: .whitespacesAndNewlines))

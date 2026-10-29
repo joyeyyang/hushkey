@@ -76,13 +76,23 @@ final class MainWindow: NSWindow {
     private let resetPermissionButton = ThemedButton("重設權限（清掉舊紀錄）", kind: .ghost, theme: ThemeCatalog.current)
 
     private let transcriptView = NSTextView()
-    /// 修改提示詞: the instruction the user types, the region they pick, and the
+    /// 修改的提示詞: the instruction the user types, the region they pick, and the
     /// button that applies it. The app already had the SPOKEN path (say the
     /// instruction, the classifier applies it); this is the same core call with
     /// the instruction typed instead of spoken, because the classifier does not
     /// catch every sentence and a missed one looked like the feature was absent.
     private let editField = NSTextField()
     private let editRegionPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// 輕鬆／一般／正式, the same three registers as 設定 › 語氣.
+    ///
+    /// It is here as well as in Settings because the moment a user wants a
+    /// different register is the moment they are rewriting a sentence; making
+    /// them leave this card to change it is how a setting goes unused. Both
+    /// controls read and write `settings.tone` -- neither owns the value, so
+    /// they cannot disagree.
+    private let editToneControl = NSSegmentedControl(
+        labels: ["輕鬆", "一般", "正式"], trackingMode: .selectOne, target: nil, action: nil
+    )
     private let editButton = ThemedButton("執行修改", kind: .secondary, theme: ThemeCatalog.current)
     /// Instruction, region, the draft the region was measured against, and the
     /// selected range when the region is a selection. The draft travels with the
@@ -412,13 +422,13 @@ final class MainWindow: NSWindow {
             self.styleTranscript()
         }
 
-        // 修改提示詞
-        let editHeading = Ink.heading("修改提示詞", theme)
+        // 修改的提示詞
+        let editHeading = Ink.heading("修改的提示詞", theme)
         let editCaption = Ink.caption(
-            "把要 AI 怎麼改寫成一句話，再選要改哪一段。這是在「AI 整理」之後多跑的一次，只改你指的那一段。",
+            "把要 AI 怎麼改寫成一句話，再選要改哪一段。語氣和設定頁共用同一個值，只影響「AI 整理」。",
             theme
         )
-        editField.placeholderString = "例：把第二點改成禮拜五下午兩點／改短一點"
+        editField.placeholderString = "例：把第二點改到禮拜五／改短一點"
         editField.font = NSFont.systemFont(ofSize: 13)
         editField.setContentHuggingPriority(.init(1), for: .horizontal)
         editField.target = self
@@ -426,8 +436,19 @@ final class MainWindow: NSWindow {
         editRegionPopUp.font = NSFont.systemFont(ofSize: 12)
         editRegionPopUp.addItem(withTitle: "整段")
         editRegionPopUp.addItem(withTitle: "選取範圍")
+        editToneControl.segmentStyle = .rounded
+        editToneControl.controlSize = .small
+        editToneControl.font = NSFont.systemFont(ofSize: 11)
+        editToneControl.target = self
+        editToneControl.action = #selector(didChangeEditTone)
+        editToneControl.setToolTip("整理要用的語域；和設定頁的「語氣」是同一個值", forSegment: 0)
+        editToneControl.setToolTip("整理要用的語域；和設定頁的「語氣」是同一個值", forSegment: 1)
+        editToneControl.setToolTip("整理要用的語域；和設定頁的「語氣」是同一個值", forSegment: 2)
+        editToneControl.setAccessibilityLabel("語氣")
         button(editButton, #selector(didTapManualEdit))
-        let editRow = NSStackView.row([editField, editRegionPopUp, editButton], spacing: Metrics.space2)
+        let editRow = NSStackView.row(
+            [editField, editRegionPopUp, editToneControl, editButton], spacing: Metrics.space2
+        )
         let editBody = NSStackView.column([editHeading, editCaption, editRow], spacing: Metrics.space2)
         let editCard = card(editBody)
         refreshers.append { [weak self] in
@@ -588,7 +609,10 @@ final class MainWindow: NSWindow {
             self?.onTranslateChange?(code)
         }
         settingsView.onToneChange = { [weak self] code in
-            UserDefaults.standard.set(code, forKey: "settings.tone")
+            UserDefaults.standard.set(code, forKey: Self.toneKey)
+            // Two controls, one value: the card in this window shows the same
+            // three registers, so a change made in Settings has to move it.
+            self?.syncEditTone(code)
             self?.onToneChange?(code)
         }
         settingsView.onPolishChange = { [weak self] enabled in self?.onPolishChange?(enabled) }
@@ -610,6 +634,7 @@ final class MainWindow: NSWindow {
     private func syncSettings() {
         wireSettings()
         settingsView.syncFromDefaults()
+        syncEditTone(UserDefaults.standard.string(forKey: Self.toneKey) ?? "normal")
         keywordTable.reloadData()
     }
 
@@ -711,7 +736,7 @@ final class MainWindow: NSWindow {
         }
     }
 
-    /// The 修改提示詞 button. The window owns the draft and the selection, so it
+    /// The 修改的提示詞 button. The window owns the draft and the selection, so it
     /// hands both to the app, which owns the engine.
     @objc private func didTapManualEdit() {
         let typed = editField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -741,6 +766,25 @@ final class MainWindow: NSWindow {
         }
         onManualEdit?(typed, region, transcriptText, selection)
     }
+
+    /// The register changed in this card: write the same key the settings card
+    /// writes, then tell the controller. The settings card is updated through
+    /// `syncEditTone` when the change comes from the other direction.
+    @objc private func didChangeEditTone() {
+        let code = Self.toneCodes[min(max(editToneControl.selectedSegment, 0), 2)]
+        UserDefaults.standard.set(code, forKey: Self.toneKey)
+        onToneChange?(code)
+    }
+
+    /// Shows the stored register in this card without writing anything back.
+    private func syncEditTone(_ code: String) {
+        editToneControl.selectedSegment = Self.toneCodes.firstIndex(of: code) ?? 1
+    }
+
+    private static let toneKey = "settings.tone"
+    /// Casual first, normal in the middle, formal last -- the same order and the
+    /// same core strings as the settings card.
+    private static let toneCodes = ["casual", "normal", "formal"]
 
     @objc private func didTapCopyTranscript() {
         guard !transcriptText.isEmpty else { return }

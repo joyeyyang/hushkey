@@ -1129,7 +1129,7 @@ final class AppController {
         }
     }
 
-    /// The 修改提示詞 button: the same core call the spoken path makes, with the
+    /// The 修改的提示詞 button: the same core call the spoken path makes, with the
     /// instruction typed and the region picked by hand.
     ///
     /// A separate entry point from `present(_:)` on purpose. The spoken path has
