@@ -74,6 +74,12 @@ struct OVCApp: App {
             }
         }
 
+        // `-OVC_MINUTES_PROBE`: the same 摘要／決議／待辦 pass the 歷史 page runs,
+        // over whatever the history on this device holds.
+        if ProcessInfo.processInfo.arguments.contains("-OVC_MINUTES_PROBE") {
+            MeetingMinutesProbe.run()
+        }
+
         if ProcessInfo.processInfo.arguments.contains("-OVC_MODEL_VERIFY") {
             Self.runModelVerifyProbe(id: Diagnostics.modelVerify ?? "")
         }

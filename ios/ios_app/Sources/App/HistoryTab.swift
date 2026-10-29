@@ -14,6 +14,11 @@ struct HistoryTab: View {
     @State private var share: URL?
     @State private var confirmingClear = false
     @State private var copied: UUID?
+    /// 會議紀錄: one value for the three states, because they are one sheet.
+    /// Two sheets (busy, then result) is a presentation racing a dismissal --
+    /// SwiftUI drops the second sheet often enough that the summary silently never
+    /// appears.
+    @State private var minutes: MinutesState?
 
     private var shown: [HistoryEntry] { History.matching(query) }
 
@@ -37,6 +42,46 @@ struct HistoryTab: View {
             set: { if $0 == nil { share = nil } }
         )) { item in
             ShareSheet(items: [item.url])
+        }
+        .sheet(isPresented: Binding(
+            get: { minutes != nil },
+            set: { if !$0 { minutes = nil } }
+        )) {
+            if let minutes {
+                MeetingMinutesSheet(
+                    state: minutes,
+                    onShare: { share = Export.minutes($0) },
+                    onClose: { self.minutes = nil }
+                )
+            }
+        }
+    }
+
+    /// The three states of the 會議紀錄 sheet.
+    enum MinutesState: Equatable {
+        case busy(Int)
+        case done(String)
+        case failed(String)
+    }
+
+    /// Runs the summary pass over the list on screen.
+    ///
+    /// The list, not the whole history: a search for one project is the usual way a
+    /// meeting's sentences are found here, and `History.matching` is already the
+    /// answer to "which sentences". The sheet says out loud that it takes a while —
+    /// three section calls, each running a 2B model on this phone.
+    private func minutesOfShown() {
+        let entries = History.matching(query)
+        guard !entries.isEmpty else { return }
+        minutes = .busy(entries.count)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try MeetingMinutes.minutes(of: entries) }
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let text): minutes = .done(text)
+                case .failure(let error): minutes = .failed(error.localizedDescription)
+                }
+            }
         }
     }
 
@@ -185,6 +230,10 @@ struct HistoryTab: View {
                     .disabled(shown.isEmpty)
             }
 
+            Button("整理成會議紀錄") { minutesOfShown() }
+                .buttonStyle(QuietButton())
+                .disabled(shown.isEmpty)
+
             Button("全部清空") { confirmingClear = true }
                 .buttonStyle(QuietButton())
                 .disabled(entries.isEmpty)
@@ -198,5 +247,84 @@ struct HistoryTab: View {
         } message: {
             Text("這個動作無法復原。逐字稿已經貼到別的 App 的話，那個副本不受影響。")
         }
+    }
+}
+
+/// 會議紀錄: the wait, the answer, and the two things to do with it.
+///
+/// The wait is a screen rather than a spinner on the button, and it says what it
+/// is doing and that it cannot be stopped — the pass runs three sections through
+/// the model, and a 取消 button would either lie about cancelling or leave the
+/// model generating into nothing.
+///
+/// **No 我：/對方： here.** The Mac's meeting mode captures system audio as well as
+/// the microphone, which is what makes the two speakers tellable apart. iOS cannot
+/// read another app's audio without a ReplayKit broadcast extension and this build
+/// has none, so the sentences go in without labels rather than with invented ones.
+struct MeetingMinutesSheet: View {
+    let state: HistoryTab.MinutesState
+    let onShare: (String) -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                switch state {
+                case .busy(let count):
+                    HStack(spacing: 10) {
+                        ProgressView().tint(Palette.seal)
+                        Text("整理中…")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(Palette.ink)
+                    }
+                    Text("把這 \(count) 句當成一份會議逐字稿，跑三次模型：摘要、決議、待辦。手機上一次要 30 秒以上，跑起來就不能中途取消。請讓 App 留在前景。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .failed(let message):
+                    Text("沒有生出會議紀錄")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Text(message)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.seal)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .done(let text):
+                    Text("會議紀錄")
+                        .font(.system(size: 22, weight: .semibold, design: .serif))
+                        .foregroundStyle(Palette.ink)
+                    Text(text)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Palette.ink)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("只用了逐字稿裡的事實。決議與待辦是模型的判讀，貼出去之前先看一眼。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Divider().overlay(Palette.dim.opacity(0.25))
+                HStack(spacing: 10) {
+                    if case .done(let text) = state {
+                        Button("複製") { UIPasteboard.general.string = text }
+                            .buttonStyle(QuietButton())
+                        Button("分享 .md") { onShare(text) }
+                            .buttonStyle(QuietButton())
+                    }
+                    Spacer(minLength: 0)
+                    Button("關閉", action: onClose)
+                        .buttonStyle(QuietButton())
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+        }
+        .background(Palette.paper.ignoresSafeArea())
+        .interactiveDismissDisabled(isBusy)
+    }
+
+    private var isBusy: Bool {
+        if case .busy = state { return true }
+        return false
     }
 }
