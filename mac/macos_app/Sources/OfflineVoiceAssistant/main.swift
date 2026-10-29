@@ -246,6 +246,23 @@ final class AppController {
             // HUD regression without audio: exercise the editable-show path (the
             // one that used to crash) and the auto-paste path, then exit.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.deliver("HUD 自我測試") }
+        } else if isAXSelfTest {
+            // The Accessibility check owns the run: no model loading, because
+            // it needs none. Loading the models here spawned the LLM worker and
+            // initialised Metal for nothing, and on this machine that startup
+            // intermittently crashed or hung before the first case ran -- a
+            // check about paste handling failing (or hanging) for a reason that
+            // has nothing to do with pasting is exactly the kind of flake that
+            // makes a check useless.
+            //
+            // The main window is still shown, though. It is what makes the app
+            // ACTIVE: a process started from a shell script is not frontmost,
+            // and `NSApp.activate` from the check alone was not enough -- the
+            // field became the system-wide focused element while the app stayed
+            // in the background, and the posted Cmd+V went nowhere.
+            window.center()
+            showMainWindow()
+            ModelInstaller.log("AX self-test: no model load")
         } else {
             window.center()
             showMainWindow()

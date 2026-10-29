@@ -19,6 +19,10 @@ cd "$ROOT"
 WAV="${1:-/tmp/ovc-bench/b0.wav}"
 APP="$ROOT/dist/OfflineVoiceAssistant.app/Contents/MacOS/OfflineVoiceAssistant"
 FAILED=()
+# Skips are kept apart from failures: a check that could not run because the
+# machine is not set up (no microphone, no Accessibility grant) must be named,
+# not silently counted as a pass. PROJECT.md section 8 is about exactly this.
+SKIPPED=()
 
 export OVC_MODELS="${OVC_MODELS:-$ROOT/models}"
 export OVC_LLM_WORKER="${OVC_LLM_WORKER:-$ROOT/rust/core_engine/target/release/ovc-llm-worker}"
@@ -201,14 +205,31 @@ fi
 step "accessibility replacement (against a real text field)"
 if [ -x /Applications/OfflineVoiceAssistant.app/Contents/MacOS/OfflineVoiceAssistant ]; then
     ./scripts/ax_check.sh >/tmp/ovc-verify-ax.log 2>&1
-    record "accessibility replacement" $?
+    AX_STATUS=$?
+    if [ "$AX_STATUS" -eq 77 ]; then
+        # 77 is ax_check.sh's "the app has no Accessibility permission". That is
+        # an environment fact, not a code fact: the grant is keyed to the
+        # signature, so a rebuild with a different identity leaves the switch
+        # reading ON while the new build is untrusted. Counting it as a failure
+        # would make every such rebuild look like a regression.
+        printf 'SKIP  accessibility replacement (the app has no Accessibility permission)\n'
+        printf '      scripts/ax_check.sh --reset, then enable the app in\n'
+        printf '      System Settings > Privacy & Security > Accessibility\n'
+        SKIPPED+=("accessibility replacement")
+    else
+        record "accessibility replacement" "$AX_STATUS"
+    fi
 else
     printf 'SKIP  accessibility replacement (the app is not installed)\n'
+    SKIPPED+=("accessibility replacement")
 fi
 
 printf '\n'
 if [ ${#FAILED[@]} -eq 0 ]; then
     printf 'ALL CHECKS PASSED\n'
+    if [ ${#SKIPPED[@]} -gt 0 ]; then
+        printf 'SKIPPED (environment, not a pass): %s\n' "${SKIPPED[*]}"
+    fi
     exit 0
 fi
 printf 'FAILED: %s\n' "${FAILED[*]}"

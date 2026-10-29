@@ -124,13 +124,27 @@ enum AXSelfTest {
             // and the paste goes through the responder chain or a posted Cmd+V --
             // both of which need the app active and its window key.
             guard spinRunLoop(until: {
-                NSApp.isActive && fixture.window.isKeyWindow
+                // Activation is asked for AGAIN inside the wait, not only before
+                // it: on a machine where another app took the front just as the
+                // run started, the single call above is answered with "no", and
+                // the check then failed for a focus the test never had. Asking
+                // again on every turn costs nothing when it already worked.
+                if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+                return NSApp.isActive && fixture.window.isKeyWindow
                     && fixture.focusedValue == testCase.fieldText && fixture.focusedCaret != nil
             }, timeout: 5) else {
+                // The frontmost app is in the message because "the app never
+                // became active" has one common cause worth naming: something
+                // else is in front and macOS refused the activation, so the
+                // posted Cmd+V would have gone THERE. Without it the log says
+                // only that the app is not active, which does not tell you
+                // whether to fix the app or close the thing that took the front.
+                let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "<none>"
                 failures.append("\(testCase.name): the field never became the focused, "
                     + "key, active target (focused=\(fixture.focusedValue?.debugDescription ?? "<none>"), "
                     + "caret=\(fixture.focusedCaret.map(String.init) ?? "<none>"), "
-                    + "key=\(fixture.window.isKeyWindow), active=\(NSApp.isActive))")
+                    + "key=\(fixture.window.isKeyWindow), active=\(NSApp.isActive), "
+                    + "front=\(front))")
                 continue
             }
 
