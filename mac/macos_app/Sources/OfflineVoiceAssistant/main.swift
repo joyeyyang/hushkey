@@ -1513,6 +1513,12 @@ final class AppController {
             .appendingPathComponent("ovc-worker-trace-\(UUID().uuidString).log")
         let worker = Self.installWorkerTrace(at: trace)
         setenv("OVC_LLM_WORKER", worker.path, 1)
+        // The trace wrapper records the worker's first argument. A resident
+        // worker is started once with `serve` and then receives its task names
+        // over a socket, so the wrapper would see one word and this check would
+        // be blind. Opt out of the resident path here: the task names ARE what
+        // is being measured.
+        setenv("OVC_LLM_RESIDENT", "0", 1)
         coreQueue.async {
             do {
                 let dir = try Self.modelsDirectory { ModelInstaller.log($0) }

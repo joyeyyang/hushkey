@@ -227,8 +227,13 @@ enum Core {
     /// user stops, in the middle of the pause they are waiting out. Best-effort:
     /// a failure here is not reported, because the next real task will fail with
     /// the same reason and a message the user can act on.
+    ///
+    /// Returns immediately. The load takes seconds and must never be the reason
+    /// the microphone is slow to open, so the work goes to a background queue --
+    /// the core serialises model work anyway, so a dictation that starts while
+    /// this is still loading simply waits for it.
     static func prewarmModel() {
-        _ = LLM_Prewarm()
+        DispatchQueue.global(qos: .utility).async { _ = LLM_Prewarm() }
     }
 
     /// Gives the model's memory back: background, or a memory warning.
@@ -236,8 +241,13 @@ enum Core {
     /// The next dictation loads again. Nothing is left half-initialised, so this
     /// is safe to call at any time; it is the counterpart of `prewarmModel`, and
     /// the reason the app does not sit on a gigabyte while it is not being used.
+    ///
+    /// Also returns immediately, for a sharper reason: releasing waits for any
+    /// generation in flight, and this is called from a scene-phase change on the
+    /// main thread. Blocking there for the length of a refinement would freeze
+    /// the screen on the way out.
     static func releaseModel() {
-        _ = LLM_ReleaseModel()
+        DispatchQueue.global(qos: .utility).async { _ = LLM_ReleaseModel() }
     }
 
     /// The file that actually answered the last LLM task.

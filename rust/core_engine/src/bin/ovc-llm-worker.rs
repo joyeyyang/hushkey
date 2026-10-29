@@ -145,7 +145,10 @@ fn serve(socket: &Path, model: &Path) -> ExitCode {
     // Explicit, so the memory is gone before the process is reaped rather than
     // whenever the OS gets around to it.
     offline_voice_core::llm::release_session();
-    let _ = std::fs::remove_file(socket);
+    // The socket file is deliberately left behind. Unlinking it here would race
+    // with a replacement worker that bound the same path while this one was
+    // shutting down, and a leftover file costs nothing: the next start connects,
+    // finds nobody listening, and unlinks it itself (see the top of `serve`).
     ExitCode::SUCCESS
 }
 

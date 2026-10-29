@@ -1361,6 +1361,13 @@ fn run_task_once(task: &str, model: &Path, text: &str, instruction: &str) -> Res
     #[cfg(not(target_os = "ios"))]
     {
         let worker = worker_path()?;
+        // `OVC_LLM_RESIDENT=0` forces the one-shot worker. The meeting self-test
+        // needs it: its trace wrapper records the worker's first argument, and a
+        // resident worker is started once with `serve` and then receives task
+        // names over the socket, where the wrapper cannot see them.
+        if std::env::var("OVC_LLM_RESIDENT").map(|v| v.trim() == "0").unwrap_or(false) {
+            return run_worker(&worker, task, model, text, instruction);
+        }
         match run_resident(&worker, task, model, text, instruction) {
             Ok(out) => Ok(out),
             // The worker answered and the answer was a failure. Running the same
@@ -1417,6 +1424,14 @@ fn run_resident(
     let response = match first {
         Ok(response) => response,
         Err(e) if crate::ipc::unreachable(&e) => {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                // The worker is wedged (a stalled Metal backend has done this).
+                // A second connection would queue behind the same stuck
+                // generation, so replace it instead of waiting out another
+                // timeout. Only our own child is killed: a worker another
+                // process started is that process's to restart.
+                stop_resident(&socket);
+            }
             if let Err(start) = spawn_resident(worker, &socket, model) {
                 return Err(ResidentError::Unreachable(start));
             }
@@ -1436,6 +1451,21 @@ fn run_resident(
             format!("LLM worker failed: {}", response.body),
         )))
     }
+}
+
+/// Kills the worker this process started, if any, and clears its socket.
+///
+/// Called only when a request timed out. Removing the socket is safe here
+/// because the owner was just killed; a worker owned by another process is left
+/// alone, and its clients get the same timeout and the same decision.
+#[cfg(not(target_os = "ios"))]
+fn stop_resident(socket: &Path) {
+    let mut guard = WORKER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(mut child) = guard.take() else { return };
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(socket);
+    eprintln!("ovc-llm: stopped a resident worker that stopped answering");
 }
 
 /// Starts the resident worker and waits until it is listening.
@@ -1458,10 +1488,18 @@ fn spawn_resident(worker: &Path, socket: &Path, model: &Path) -> std::result::Re
             .arg(socket)
             .arg(model)
             // Nothing on stdin/stdout: the socket is the whole channel. stderr is
-            // inherited so the worker's own log lines land wherever the app's do.
+            // dropped too, as the one-shot worker's always was -- llama.cpp
+            // narrates every tensor it repacks, and a resident worker would put
+            // that in the app's log on every launch. Errors come back through the
+            // protocol; `OVC_LLM_WORKER_STDERR=1` puts the chatter back when a
+            // worker is being debugged.
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(if std::env::var("OVC_LLM_WORKER_STDERR").is_ok() {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            })
             .spawn()
             .map_err(|e| format!("spawn {}: {e}", worker.display()))?;
         *guard = Some(child);

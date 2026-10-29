@@ -103,6 +103,15 @@ int32_t LLM_Translate(const char *text, const char *target, char **out_text);
 /* Applies a spoken edit instruction ("把第二點改成禮拜五") to an existing text and
  * returns the whole edited text. The core numbers the lines itself. */
 int32_t LLM_EditText(const char *text, const char *instruction, char **out_text);
+/* Loads the LLM now instead of on the next task. Call it when a recording starts:
+ * the seconds of loading then happen while the user is still speaking. Idempotent,
+ * and a no-op when the model is already resident. On macOS this starts the
+ * resident worker; on iOS it loads the model in-process. */
+int32_t LLM_Prewarm(void);
+/* Drops the loaded model and returns its memory to the OS (iOS background,
+ * memory warnings). The next task loads again; nothing is left half-initialised.
+ * Always succeeds. */
+int32_t LLM_ReleaseModel(void);
 
 #ifdef __cplusplus
 }
