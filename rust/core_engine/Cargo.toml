@@ -14,6 +14,21 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 libc = "0.2"
 llama-cpp-2 = { version = "0.1.159", default-features = false }
 
+# Platform switches. `apple` is the pair the two shipped apps use, spelled as
+# two features so a conditional-compilation site can ask about one platform
+# without asking about the bundle. `windows` and `android` are declared empty on
+# purpose: a platform that has no code path yet still needs a name to pass to
+# `--features`, or the build script has to grow a special case for "the flag
+# nobody defined". Nothing reads any of these today; they exist so the three
+# ports can be built from one command line instead of three patched manifests.
+[features]
+default = []
+apple = ["ios", "macos"]
+ios = []
+macos = []
+windows = []
+android = []
+
 [build-dependencies]
 cc = "1"
 
