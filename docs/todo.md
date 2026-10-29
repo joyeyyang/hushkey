@@ -798,3 +798,46 @@ noise (must be empty): ''
 實測（模擬器）：ack 0.27 s，答案 40.25 s，`明天下午三點跟小林開會…` →
 `明天下午四點跟大衛開會…`。Mode 2 的零跳轉只能真機驗證，見
 `docs/evidence/ios-pip-device-checklist.md`。
+
+### 8.10 一輪 P0–P3：幻覺、鍵盤版面、常駐 worker、HUD 送出（2026-10-29）
+
+八個獨立的小題，一次做完。完整說明在 `docs/milestones.md` 的附錄 N，這裡只留
+「改了什麼、怎麼驗的」。
+
+| 題 | 改了什麼 | 怎麼驗的 |
+|---|---|---|
+| A | `guardrail.rs` 的 `Kind::Edit` 分支補 `INSTRUCTION_PHRASES`、`check_language`；`META_PREFIXES` 改成任意位置 | `cargo test --lib` |
+| B | `EDIT_SYSTEM` 列出失敗詞彙，寫明「指令在第 1 行，空行後是原文；輸出只能是改寫後文字」 | `edit_batch` 15/15 |
+| C | 短輸入（< 50 字）的保留率下限 15% → 10% | `cargo test --lib` |
+| D | guardrail 退回時寫 `Documents/hallucination_log.json`（兩平台四個點） | `swift test`（3 個新測試） |
+| E | VoiceBar 216pt／展開 304pt、按鈕統一 44×44 | 截圖 `ios-keyboard-216.png` |
+| F | 麥克風右側三段式語氣，與 `SharedStore.refineTone` 雙向同步 | 截圖、`xcodebuild` |
+| G | 修改的提示詞：整段／第 N 行／選取範圍，長按語音填指令 | 截圖 `ios-keyboard-edit-panel.png` |
+| H | `isVoiceEditInstruction` 移植到 iOS，聽起來像指令的聽寫改成開面板預填 | 同上 |
+| I | macOS 修改的提示詞卡片加三段式，與設定頁共用 `settings.tone` | 截圖 `macos-edit-tone.png` |
+| J | 常駐 worker（Unix socket）、KV 前綴快取、兩平台預設 Metal、iOS 預熱／釋放 | 見下 |
+| K | HUD：標頭改「AI 整理：開／關」，送出前整理，複製整理後文字 | 截圖 `macos-hud-ai-organize.png` |
+| L | `rust/platform_interfaces/offline_voice_core.h`＋`Cargo.toml` 的 features | `cargo check --features apple`／`--features windows` |
+
+J 的數字（debug build，`tests/edit_expected.tsv` 15 題，答案逐字相同）：
+
+```
+一次性 spawn + CPU   15 題 15 次載入   23.1 秒
+常駐 + CPU           15 題  1 次載入   23.1 秒
+常駐 + Metal         15 題  1 次載入   13.2 秒
+```
+
+三個取捨寫在這裡，免得下次有人以為是漏掉的：
+
+1. **`verify.sh` 固定 `OVC_LLM_GPU_LAYERS=0`**。那些檢查比對精確字串，期望值是在
+   CPU 上量的；Metal 的累加順序可以讓 greedy 的答案差一個 token。App 仍然走 GPU。
+2. **常駐 worker 閒置 300 秒收工**（`OVC_LLM_IDLE_SECS`，`0` = 不收工）。夠長到
+   「暫停一下再講」不用重載，夠短到忘了關的 worker 不會握著 1 GB 一整個下午。
+3. **iOS 錄音開始就預熱**，代表錄音時多 1.3 GB 的權重。離開前景與記憶體警告會
+   立刻釋放，所以代價只在「正在錄音」這段時間。
+
+還沒做：
+
+- 真機驗證（Mode 2 零跳轉、真人念一次語音編輯、預熱對第一次聽寫延遲的實際改善）。
+- 2B 的正式語域仍會把 `QA isn't done yet` 寫成 `the QA team is not yet complete`。
+- guardrail 不檢查行數；簡體偵測是相對的。

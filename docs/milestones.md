@@ -1580,3 +1580,165 @@ height constraint 而疊在一起，補 `sizeThatFits` 之後才分開）。
   不是待修的問題。
 - `replaceDraft` 只認「游標緊接在 `lastText` 之後」：使用者在原文後面接著打字時，
   答案會走剪貼簿而不是原地替換。
+
+## 附錄 N：一輪 P0–P3（幻覺、鍵盤、macOS、常駐 worker、HUD，2026-10-29）
+
+這一輪沒有新功能，是把「已經會的東西在該對的地方對」收乾淨。分成四段：模型說錯話
+的四個入口（P0）、iOS 鍵盤的版面與三種回答模式（P1）、macOS 對齊與效能（P2）、
+會議紀錄的送出流程與移植用的平台標頭（P3）。
+
+### N.1 幻覺是四個入口，不是一個判斷（P0 A–C）
+
+`guardrail.rs` 原本只守「整理」那條路，而且只認開頭的 meta 片語。實測踩到三種：
+
+| 入口 | 症狀 | 修法 |
+|---|---|---|
+| 語音編輯（`Kind::Edit`） | 模型把「幫我改短一點」也寫進答案 | Edit 分支補上 `INSTRUCTION_PHRASES`、`check_language`、任意位置的 `META_PREFIXES` |
+| 提示詞（`EDIT_SYSTEM`） | 模型回「好的，我改好了」 | 提示詞列出失敗詞彙，並寫明「指令在第 1 行，空行後是原文；輸出只能是改寫後文字」 |
+| 短輸入的保留率 | 20 字的一句話被砍成 12 字仍算合格 | 輸入 < 50 字時下限從 15% 降到 10% |
+
+`META_PREFIXES` 的判斷改成 `refined.contains(prefix) && !raw.contains(prefix)`：講者
+自己說的「總結來說」放行，模型自己加的才拒。這是「同一句話是不是模型加的」唯一
+能在純字串層回答的問法。
+
+「沒問題」「收到」這種短回覆**只留在提示詞裡**，沒有進 guard：它們也是人會說的句子，
+放進規則就會擋掉真的只講了「沒問題」的那一次聽寫。
+
+### N.2 被擋下來的答案要留下來（P0 D）
+
+guardrail 退回時，兩平台各寫一筆到 `Documents/hallucination_log.json`：`raw`、
+`refined`、`mode`、`tone`、`reason`、`timestamp`。iOS 在 `RefineChain.polishOnce` 與
+`KeyboardEdit`，macOS 在 `VoiceEdit.applyVoiceEdit` 與 `Refiner.refine`。
+
+寫入是序列佇列、非同步，保留最新 200 筆；`OVC_HALLUCINATION_LOG` 可以覆寫路徑，
+`flush()` 給測試與結束前用。**不寫進 `ova.log`**：這是可以拿來回放模型行為的資料，
+不是一行事件。
+
+### N.3 鍵盤的 216pt 與三段式（P1 E、F）
+
+`VoiceBar` 的高度改成 216pt（含 44pt 的候選列），展開 304pt；左右 12、上下 8、底部
+貼安全區；🌐 保留；所有按鈕統一 44×44。原本的高度是「內容撐出來的」，所以候選字
+一多就把輸入列推出螢幕。
+
+麥克風右側多了 `輕鬆`／`一般`／`正式` 三段式，寫的是 `SharedStore.refineTone`，
+VoiceBar 只負責畫，controller 每 0.4 秒讀回來，所以鍵盤與 App 兩邊不會各記一份。
+預設 `normal`。
+
+### N.4 修改的提示詞：區域、長按語音、指令預判（P1 G、H）
+
+- 區域用三顆 chip：整段／第 N 行／選取範圍。`UISegmentedControl` 沒有 `setMenu`，
+  所以第 N 行那顆是 `UIButton.menu`。
+- 長按走 ASR 把指令念進去，送出時走 `LLM_EditText`，**不經 Refine**。
+- `SharedStore.EditRequest` 多了 optional 的 `region`／`line`／`selection`；
+  `KeyboardEdit.run` 依區域前置「第 N 點」或只改切片再拼回。
+- `isVoiceEditInstruction` 從 macOS 的 `VoiceEdit.swift` 移植過來，放在
+  `VoiceBar.swift` 檔尾的自由函式。整合點是 `insertPending`：聽起來像指令的聽寫
+  改成**開面板預填**，不自動套用——誤判成指令比多按一次貴。
+
+截圖：`docs/evidence/ios-keyboard-216.png`、`ios-keyboard-edit-panel.png`。
+
+### N.5 macOS 的兩件事（P2 I）
+
+`修改的提示詞` 卡片加上同一個三段式（輕鬆／一般／正式），寫同一個 `settings.tone`；
+設定頁改了會 `syncEditTone` 回來。兩個控制項都不擁有這個值，所以不會不一致。
+
+`applyVoiceEdit` 走 `LLM_EditText`，**不吃語氣**：指令只指到某一行時，把整份草稿
+重寫成另一個語域是改了使用者沒指的地方。這條寫在 `VoiceEdit.swift` 的註解裡。
+
+截圖：`docs/evidence/macos-edit-tone.png`。
+
+### N.6 常駐 worker、KV 前綴、Metal（P2 J）
+
+三筆成本，各自有各自的修法：
+
+| 成本 | 原本 | 現在 |
+|---|---|---|
+| 載入 1.3 GB 權重 | 每個任務一個行程，載入一次 | `ovc-llm-worker serve`：模型只載一次，Unix socket 收任務 |
+| 每個提示詞重解共用的開頭 | 每次都從第 0 個 token 解 | `Session` 只重解與上一個提示詞不同的那一段，最後一個 token 一定重解（取樣需要它的 logit） |
+| 解碼 | macOS 走 CPU | 兩平台預設全 offload（`gpu_layers=99`），模擬器除外 |
+
+`Session` 的形狀：`Box<LlamaModel>` 加 `LlamaContext<'static>`，欄位順序是 ctx 先於
+model——Rust 依宣告順序 drop，context 必須先走；Box 讓模型位址在搬進全域槽時不變。
+`'static` 是 `unsafe` 的借用轉換，理由寫在建構處，且它從不離開那把鎖。
+
+常駐 worker 的 stderr 預設丟掉（`OVC_LLM_WORKER_STDERR` 可以要回來）：llama.cpp
+會把每個 repack 過的 tensor 唸一遍，常駐之後這些會變成每次啟動都進 App 的日誌。錯誤
+本身走協定回傳，所以少了日誌不等於少了訊息。
+
+`OVC_LLM_RESIDENT=0` 強制走一次性 worker。會議的自我測試需要它：那個 harness 的
+trace wrapper 記的是 worker 的第一個參數，而常駐 worker 只被啟動一次（`serve`），
+任務名稱改走 socket，wrapper 就看不見了。**這是唯一為測試開的後門**，理由寫在
+`state.rs` 與 `main.swift` 的呼叫點。
+
+worker 的兩個結束條件是兩種漏：App 被關掉（父行程消失，`getppid()` 變了）與使用者
+一小時沒講話（閒置 300 秒，`OVC_LLM_IDLE_SECS` 可改，`0` = 不收工）。socket 名帶
+模型路徑的 hash，換模型就換 socket，舊 worker 不會拿舊權重回答新模型。
+
+核心端：先連常駐 worker，連不到才啟動一個；只有「連不到」才退回一次性 spawn。
+worker 自己回報的錯誤不重跑——重跑只會慢一倍、錯一樣。
+
+**數字**（release build，`tests/edit_expected.tsv` 15 題，同一台 M1／8 GB）：
+
+| 跑法 | 載入次數 | 總時間 |
+|---|---|---|
+| 一次性 spawn + CPU | 15 | 48.0 秒 |
+| 常駐 + CPU | 1 | 32.3 秒 |
+| 常駐 + Metal | 1 | 12.2 秒 |
+
+三種跑法都是 15/15，答案逐字相同——這一輪的改動沒有動到產品行為。載入模型大約
+兩秒一次，所以一次性 spawn 的 48 秒裡有 30 秒是重複載入；剩下的差距才是 GPU。
+
+`verify.sh` 因此固定 `OVC_LLM_GPU_LAYERS=0`：那些檢查比對精確字串，期望值是在 CPU
+上量的，Metal 的累加順序可以讓 greedy 的答案差一個 token。
+
+iOS 走同一條 `Session`，但沒有 worker（行程不能 fork）。新增 `LLM_Prewarm`／
+`LLM_ReleaseModel`：錄音開始在自己的佇列上預熱（不佔錄音那條序列佇列），離開前景
+與記憶體警告時釋放。實測（Metal，同一台機器）：預熱後第一次整理 8.6 秒（含 Metal
+pipeline 編譯），第二次 4.5 秒。
+
+### N.7 HUD 的送出前整理（P3 K）
+
+會議逐字稿在錄音中刻意不整理（附錄 H 的 8.4.6：那些字是紀錄本身），所以整理只能
+發生在「送出」這個使用者明確要求文件的時刻。
+
+HUD 標頭原本的「複製」換成「AI 整理：開／關」（`hud.polishOnSend`，預設開）。按
+「貼上」時若開關為開（且設定裡的 AI 整理沒關），先跑一次既有的 `polish`（同一條
+guardrail、同一個語氣），再把整理後的文字貼出去，主視窗的「最近一次結果」也換成
+送出的那一份。
+
+「複製整理後」改放在結果膠囊上，只在送出真的整理過時出現（`offerCopy`）；按下去
+取消自動淡出。這樣「複製」不再是輸入區裡一個不知道複製什麼的動詞。
+
+**不做自動寄信**：使用者明確排除。整理是為了「貼出去的那份是乾淨的」，不是為了
+寄送。
+
+截圖：`docs/evidence/macos-hud-ai-organize.png`、`macos-hud-copy-organized.png`。
+
+### N.8 移植用的平台設定標頭（P3 L）
+
+`rust/platform_interfaces/offline_voice_core.h`：`OVCAudioConfig`（取樣率、聲道、
+每塊 frame 數、VAD）、`OVCModelConfig`（models 目錄、gpu_layers、context、threads）、
+`OVCResult`（status／text／detail）。
+
+**這不是第二份 ABI**。進入點仍然在 `rust/core_engine/include/`；這裡只寫「平台層
+要填的東西長什麼形狀」。混進 ABI 標頭會讓設計稿看起來像已實作的呼叫。struct 內的
+`char *` 由 core 擁有、用 `Core_FreeString` 釋放。
+
+`Cargo.toml` 加 `[features]`：`apple = ["ios", "macos"]`，`windows`／`android` 先
+宣告成空的——一個還沒有程式碼路徑的平台仍然需要一個能傳給 `--features` 的名字，
+否則 `build.rs` 得為「沒人定義的旗標」長出特例。
+
+### N.9 驗收
+
+- `cargo test --lib`：109 passed。
+- `swift test`：26 passed。
+- `xcodebuild`（simulator）：BUILD SUCCEEDED。
+- `edit_batch`：15/15，改動前後逐字相同。
+- `scripts/verify.sh`：ALL CHECKS PASSED。
+
+### N.10 還沒做的
+
+- **真機**：Mode 2 零跳轉（`docs/evidence/ios-pip-device-checklist.md` 未填）、真人
+  用麥克風走一次語音編輯、預熱對第一次聽寫延遲的實際改善。
+- **已知限制**：2B 的正式語域仍會把 `QA isn't done yet` 寫成
+  `the QA team is not yet complete`；guardrail 不檢查行數；簡體偵測是相對的。

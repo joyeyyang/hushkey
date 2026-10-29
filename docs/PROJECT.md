@@ -67,10 +67,14 @@ LLM_CheckOutput           ★ guardrail：模型輸出能不能用（純啟發�
 LLM_Summarize             會議摘要
 LLM_Translate             翻譯
 LLM_EditText              ★ 語音編輯
+LLM_Prewarm               ★ 先載模型（錄音開始時呼叫）
+LLM_ReleaseModel          ★ 釋放模型（背景、記憶體警告）
 ```
 
-規則：回傳的字串由呼叫端負責釋放（`Core_FreeString`）。每個進入點都在同一把全域
-mutex 上序列化。錯誤碼是 ABI 的一部分。
+規則：回傳的字串由呼叫端負責釋放（`Core_FreeString`）。LLM 的生成在同一把鎖上
+序列化（一個行程只有一個 context，並行解碼不是加速而是 bug）；ASR 與 LLM 是兩個
+互不相干的子系統，可以同時進行——錄音開始時預熱模型就是靠這一點。錯誤碼是 ABI
+的一部分。
 
 `ASR_SubmitTagged` 的 `speaker` 參數：`1` = 系統音訊。
 
@@ -94,21 +98,26 @@ Kit 是這個專案的產品目標之一：「把整套語音輸入方式打包�
 
 ## 5. 核心設計決定
 
-### 5.1 LLM 跑在獨立 worker 行程
+### 5.1 LLM 跑在獨立 worker 行程，而且現在是常駐的
 
-`ovc-llm-worker`。每次 LLM 呼叫都是開一個行程、載入 GGUF、做完、退出。
+`ovc-llm-worker`。權重仍然不在 App 行程裡：M1／8 GB，Qwen3.5-2B 峰值
+1,415–1,528 MB，常駐在 App 裡會把 ASR 擠出去。
 
-理由：M1／8 GB。量測 Qwen3.5-2B 峰值 1,415–1,528 MB；常駐在 App 裡會把 ASR 擠出去。
-每次呼叫後記憶體還給 OS。
+改變的是**載入的次數**。原本每次呼叫都開一個行程、載入 GGUF、做完、退出，
+代價是每個工作階段 16–34 秒。現在 `ovc-llm-worker serve <socket> <model>`
+只載一次，用 Unix socket 收送任務（`ipc.rs`：長度前綴的三個字串，沒有 serde），
+閒置 300 秒（`OVC_LLM_IDLE_SECS`）或父行程消失就自己收工並釋放模型。核心端
+先連常駐 worker，連不到才啟動一個；只有「連不到」才退回一次性 spawn——worker
+自己回報的錯誤不重跑，重跑只會慢一倍、錯一樣。
 
-代價：每個工作階段要重新載入模型（16–34 秒／三段摘要）。
-
-**iOS 沒有這個選項**：行程不能 fork。所以 iOS 的 `run_task` 走 `run_in_process`，
-LLM 與 ASR 同行程，靠 `gpu_layers` 與逾時保底（25 秒，低於 iOS 約 30 秒的背景時間）
-控制風險。兩層降級——同一執行內重試（`llm_fallback_path`）與跨啟動記憶
-（`LLMPolicy` 寫 App Group，下次 `Core.initialize` 時 `setenv`）——**macOS 也適用**，
-只是 macOS 的降級訊息只寫 stderr，App 不顯示。細節與實測見
-`docs/milestones.md` 的 M3。
+行程內另有一層快取：`llm.rs` 的 `Session` 讓同一個 model + context 活著，
+每次生成只重解「與上一個提示詞不同的那一段」，共用的開頭（系統段落加範例）
+留在 KV cache 裡。iOS 沒有 worker 這個選項（行程不能 fork），所以它用同一個
+`Session` 直接跑在 App 行程內，並由 `LLM_Prewarm`／`LLM_ReleaseModel` 決定
+什麼時候在：錄音開始預熱、背景與記憶體警告釋放。兩層降級——同一執行內重試
+（`llm_fallback_path`）與跨啟動記憶（`LLMPolicy` 寫 App Group，下次
+`Core.initialize` 時 `setenv`）——**macOS 也適用**，只是 macOS 的降級訊息只寫
+stderr，App 不顯示。細節與實測見 `docs/milestones.md` 的 M3 與附錄 N。
 
 ### 5.2 ASR 用 Dolphin base int8
 
@@ -337,6 +346,11 @@ accessibility replacement
 | `OVC_LLM_WORKER` | worker 路徑。App bundle 內自動找 `Contents/Frameworks` |
 | `OVC_MODELS` | 模型樹根目錄 |
 | `OVC_REFINE_STAGES` | 整理段數 `0`/`1`/`2` |
+| `OVC_LLM_GPU_LAYERS` | 給 GPU 的層數；預設除了模擬器以外都是 99（全 offload），`0` 強制純 CPU。`scripts/verify.sh` 固定 `0`，因為那些檢查比對精確字串 |
+| `OVC_LLM_THREADS` | CPU 路徑的執行緒數，預設核心數一半 |
+| `OVC_LLM_IDLE_SECS` | 常駐 worker 閒置幾秒後收工，預設 300；`0` = 不收工 |
+| `OVC_LLM_RESIDENT` | `0` 強制走一次性 worker（會議自我測試用：它的 trace wrapper 只看得到 worker 的第一個參數） |
+| `OVC_LLM_WORKER_STDERR` | 設了就讓常駐 worker 的 stderr 跟著 App（llama.cpp 的載入日誌），預設丟掉 |
 
 預設模型：`Qwen3.5-2B-Q4_K_M.gguf`（約 1.1 GB）。
 
