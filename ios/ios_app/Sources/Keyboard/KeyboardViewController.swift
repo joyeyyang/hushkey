@@ -27,6 +27,11 @@ final class KeyboardViewController: UIInputViewController {
     /// generation on one queue, so a second request would queue behind the first
     /// and the user would be looking at an answer to the older one.
     private var editSeq: Int?
+    /// The sequence of the sentence the confirm panel is holding, while 貼上前確認
+    /// is on. Kept so 丟棄 can tell "the sentence I am holding is still the
+    /// current one" from "a new dictation has already replaced it" -- without that
+    /// check a discard would clear a session the user has since spoken into.
+    private var heldSeq: Int?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -88,7 +93,12 @@ final class KeyboardViewController: UIInputViewController {
 
         // The panel's status line is the one the user is acting on, so a phase
         // update must not paint over "修改中…" or "請先開啟 Hushkey 一次".
-        if editSeq == nil {
+        //
+        // A held sentence is the same rule with more at stake: it is what the user
+        // is about to accept or throw away, and the tick would replace it with the
+        // very text it is already showing -- or, a beat later, with the next
+        // dictation's.
+        if editSeq == nil, !bar.isConfirming {
             bar.apply(
                 phase: session.phase,
                 text: text,
@@ -137,11 +147,105 @@ final class KeyboardViewController: UIInputViewController {
             openInstructionPanel(prefill: pending.text)
             return
         }
+        // 貼上前確認: hold it instead of typing it.
+        //
+        // The request is consumed here, not at 插入: what the group is for is
+        // "text the keyboard has not typed yet", and the moment this panel opens
+        // the sentence is no longer waiting on the keyboard -- it is waiting on the
+        // user, who can look at it for as long as they like. Leaving it pending
+        // would also mean that a keyboard recreation (the app switching away, the
+        // extension being reloaded) typed the sentence the user was still reading.
+        if SharedStore.confirmBeforeInsert {
+            SharedStore.markConsumed(pending.seq)
+            heldSeq = pending.seq
+            bar.showConfirmPanel(text: pending.text)
+            return
+        }
         textDocumentProxy.insertText(pending.text)
         SharedStore.markConsumed(pending.seq)
         lastText = pending.text
         bar.apply(phase: .done, text: "已插入 \(pending.text.count) 字",
                   needsSwitch: true, paused: false)
+    }
+
+    // MARK: 貼上前確認
+
+    /// 插入: types the sentence the panel was holding.
+    ///
+    /// `lastText` is deliberately NOT used as the source. It is "the last text this
+    /// keyboard saw", which the phase tick has usually already set to the same
+    /// sentence -- but they are not the same claim, and typing the wrong one is the
+    /// failure this whole state exists to prevent.
+    private func insertHeld(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            bar.showNotice("沒有文字可以插入。")
+            return
+        }
+        bar.hideConfirmPanel()
+        heldSeq = nil
+        textDocumentProxy.insertText(trimmed)
+        SharedStore.markConsumed()
+        lastText = trimmed
+        bar.apply(phase: .done, text: "已插入 \(trimmed.count) 字",
+                  needsSwitch: true, paused: false)
+    }
+
+    /// 丟棄: nothing was typed, so this is only about the state the two processes
+    /// keep. The session is cleared only while it is still holding this sentence --
+    /// a newer dictation is left alone -- and `lastText` goes with it, because the
+    /// strip reads it back on the next tick and would otherwise show a sentence
+    /// that was never inserted as if it had been.
+    private func discardHeld() {
+        bar.hideConfirmPanel()
+        if let seq = heldSeq, SharedStore.current().seq == seq {
+            SharedStore.clear()
+            lastText = ""
+        }
+        heldSeq = nil
+        bar.showNotice("已丟棄，沒有插入。")
+    }
+
+    /// 重說一次: another dictation, whose result lands back in this panel.
+    ///
+    /// No flag is needed to make that happen: 貼上前確認 is on, and that is exactly
+    /// what `insertPending` does with any result. The panel is closed first so the
+    /// strip can show 錄音中… and the words as they arrive, which is the only
+    /// feedback live dictation has.
+    private func reRecord() {
+        bar.hideConfirmPanel()
+        startDictation(working: "重說一次…")
+    }
+
+    /// 用說的 or a long press on the pencil: a dictation that becomes the
+    /// instruction rather than text for the cursor.
+    private func speakInstruction() {
+        guard SharedStore.sharedContainer != nil else {
+            bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
+            return
+        }
+        SharedStore.instructionDictationDraft = lastText
+        SharedStore.instructionDictation = true
+        startDictation(working: "說出要怎麼改…")
+    }
+
+    /// The request, and the two ways of getting the app to honour it.
+    ///
+    /// Mode 2 first: the app is already alive inside its PiP window, so asking it
+    /// to record needs no app switch -- and switching is the one thing that mode
+    /// exists to avoid. Otherwise the request is in the group already, so opening
+    /// the app is enough for it to be found when it becomes active.
+    private func startDictation(working: String) {
+        guard SharedStore.sharedContainer != nil else {
+            bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
+            return
+        }
+        SharedStore.requestRecording()
+        if SharedStore.mode == .pip, SharedStore.pipAlive {
+            bar.showWorking(working)
+            return
+        }
+        openApp()
     }
 
     // MARK: ui
@@ -153,7 +257,14 @@ final class KeyboardViewController: UIInputViewController {
         bar.onPause = { [weak self] in self?.togglePause() }
         bar.onNext = { [weak self] in self?.advanceToNextInputMode() }
         bar.onEdit = { [weak self] in self?.toggleEditPanel() }
-        bar.onVoiceInstruction = { [weak self] in self?.speakInstruction() }
+        // 用說的 in the instruction panel, 重說一次 in the confirm panel: the same
+        // button, and the panel it is on says which dictation the user wants.
+        bar.onVoiceInstruction = { [weak self] in
+            guard let self else { return }
+            if self.bar.isConfirming { self.reRecord() } else { self.speakInstruction() }
+        }
+        bar.onInsertHeld = { [weak self] text in self?.insertHeld(text) }
+        bar.onDiscardHeld = { [weak self] in self?.discardHeld() }
         bar.onEditApply = { [weak self] instruction, region, line in
             self?.applyEdit(instruction, region: region, line: line)
         }
@@ -181,6 +292,13 @@ final class KeyboardViewController: UIInputViewController {
     // MARK: 修改的提示詞
 
     private func toggleEditPanel() {
+        // The confirm panel is already a panel, and it is holding a sentence that
+        // has been consumed from the group -- so closing it is discarding it, and
+        // opening the instruction panel on top of it would ask the model about
+        // text that is not in the document yet. Neither is what a pencil tap
+        // means, so the tap does nothing: the two ways out are on the panel
+        // itself, and the long press (重說一次) still works.
+        if bar.isConfirming { return }
         if bar.isEditing {
             bar.hideEditPanel()
             return
@@ -204,28 +322,6 @@ final class KeyboardViewController: UIInputViewController {
     private func openInstructionPanel(prefill: String) {
         bar.setDraftLines(VoiceBar.lines(of: lastText))
         bar.showEditPanel(prefill: prefill)
-    }
-
-    /// 用說的: the instruction is dictated like any other sentence, but its
-    /// result goes into the panel instead of the cursor.
-    ///
-    /// It exists because a keyboard extension cannot present a system keyboard --
-    /// so on a phone there is no way to TYPE into the panel's field. Speaking the
-    /// instruction is the route that works there; the field stays for a hardware
-    /// keyboard, and for fixing a word the recogniser got wrong.
-    private func speakInstruction() {
-        guard SharedStore.sharedContainer != nil else {
-            bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
-            return
-        }
-        SharedStore.instructionDictationDraft = lastText
-        SharedStore.instructionDictation = true
-        SharedStore.requestRecording()
-        if SharedStore.mode == .pip, SharedStore.pipAlive {
-            bar.showWorking("說出要怎麼改…")
-            return
-        }
-        openApp()
     }
 
     /// 套用: one request to the app, then wait for its acknowledgement and its

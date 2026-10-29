@@ -619,6 +619,18 @@ enum SharedStore {
         set { defaults?.set(newValue, forKey: "refineTone") }
     }
 
+    /// 貼上前確認: hold the dictated sentence until the user taps 插入, instead of
+    /// typing it at the cursor the moment it comes back.
+    ///
+    /// In the App Group, not the app's own defaults, because the keyboard is the
+    /// side that acts on it -- and a keyboard extension reads nothing else. Off by
+    /// default, the same as the Mac's `settings.confirmInsert`: a product whose
+    /// first dictation does nothing visible until a second tap would look broken.
+    static var confirmBeforeInsert: Bool {
+        get { defaults?.bool(forKey: "confirmBeforeInsert") ?? false }
+        set { defaults?.set(newValue, forKey: "confirmBeforeInsert") }
+    }
+
     /// Which paper the app draws with: "paper", "night", "slate", "moss",
     /// "clay", or "system" (the default, as on the Mac) to follow the phone's
     /// appearance.

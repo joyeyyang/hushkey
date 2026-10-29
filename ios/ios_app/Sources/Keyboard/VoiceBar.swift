@@ -48,6 +48,11 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     /// argument is the region the instruction is about ("whole" / "line" /
     /// "selection"); the third is the line number, 0 unless the region is a line.
     var onEditApply: ((String, String, Int) -> Void)?
+    /// 插入: type the sentence the confirm panel was holding.
+    var onInsertHeld: ((String) -> Void)?
+    /// 丟棄: drop it. Nothing was typed, so this only has to clear the state the
+    /// two processes keep about it.
+    var onDiscardHeld: (() -> Void)?
     /// The register was changed here: "casual" / "normal" / "formal". The
     /// controller writes it to the App Group, which is what the app reads.
     var onToneChange: ((String) -> Void)?
@@ -116,8 +121,25 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     /// is acting on.
     var isEditing: Bool { !panel.isHidden }
 
+    /// True while the panel is holding a sentence for 插入.
+    ///
+    /// Separate from `isEditing` because the two need opposite treatment from the
+    /// phase tick: an instruction panel can live *through* a recording (Mode 2
+    /// records while the app stays in its small window), so its strip still has to
+    /// show the words as they come, whereas a held sentence is the thing being
+    /// confirmed and must not be painted over by anything.
+    var isConfirming: Bool { !panel.isHidden && mode == .confirm }
+
+    /// The text the confirm panel is holding.
+    private var held = ""
+
     /// The register the bar is showing, as the core's own string.
     private(set) var tone = "normal"
+
+    /// What the panel is for. The same stack view serves both, because a keyboard
+    /// extension has no room for two of anything -- see `configurePanel`.
+    private enum PanelMode { case edit, confirm }
+    private var mode: PanelMode = .edit
 
     private var look: Look = .idle
     private var paused = false
@@ -387,8 +409,8 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     /// pencil is tapped and when a dictation that was meant to be an instruction
     /// comes back to a keyboard that had to be recreated in the meantime.
     func showEditPanel(prefill: String = "") {
+        configurePanel(.edit)
         panel.isHidden = false
-        openButton.isHidden = true
         heightConstraint.constant = Self.expandedHeight
         if !prefill.isEmpty { instructionField.text = prefill }
         instructionField.becomeFirstResponder()
@@ -397,13 +419,71 @@ final class VoiceBar: UIView, UITextFieldDelegate {
 
     func hideEditPanel() {
         panel.isHidden = true
-        openButton.isHidden = true
+        mode = .edit
         heightConstraint.constant = Self.height
         instructionField.resignFirstResponder()
         instructionField.text = ""
         region = "whole"
         paintRegion()
         superview?.layoutIfNeeded()
+    }
+
+    /// 貼上前確認: holds `text` -- shown in the strip, not typed -- until 插入.
+    ///
+    /// This is the phone's version of the Mac's editable HUD. The field is hidden
+    /// on purpose: iOS will not present a system keyboard for a field inside a
+    /// keyboard extension, so on a phone it is a box nobody can type into -- and
+    /// the one thing this state needs is to be READ. The strip is the multi-line
+    /// label (the field is one line, and truncated a sentence to "下週一上午十點
+    /// 前把預算…"), and 重說一次 is the phone's way of fixing a word the
+    /// recogniser got wrong.
+    func showConfirmPanel(text: String) {
+        held = text
+        configurePanel(.confirm)
+        panel.isHidden = false
+        heightConstraint.constant = Self.expandedHeight
+        statusLabel.text = text
+        statusLabel.textColor = ink
+        look = .done
+        // ⧉ has to stay live here: the held sentence is the one text on this
+        // keyboard the user is most likely to want somewhere else, and 複製 is the
+        // way out that does not commit to inserting it.
+        hasText = true
+        paint(needsSwitch: false)
+        superview?.layoutIfNeeded()
+    }
+
+    func hideConfirmPanel() {
+        panel.isHidden = true
+        mode = .edit
+        held = ""
+        heightConstraint.constant = Self.height
+        superview?.layoutIfNeeded()
+    }
+
+    /// The panel's two lives, told apart by one enum rather than a spare bool.
+    ///
+    /// edit:    region chips + field + 用說的／取消／套用. The instruction route,
+    ///          which sends words to the model.
+    /// confirm: the button row only -- 重說一次／丟棄／插入 -- with the sentence
+    ///          in the strip above it. Nothing here calls the model, which is the
+    ///          whole point of the state: what was heard is what gets typed, and
+    ///          only after the user has looked at it.
+    private func configurePanel(_ next: PanelMode) {
+        mode = next
+        let confirming = next == .confirm
+        openButton.isHidden = true
+        regionRow.isHidden = confirming
+        instructionField.isHidden = confirming
+        if confirming {
+            style(voiceButton, title: "重說一次", symbol: "mic")
+            style(cancelButton, title: "丟棄", symbol: nil)
+            style(applyButton, title: "插入", symbol: nil)
+        } else {
+            style(voiceButton, title: "用說的", symbol: "mic")
+            style(cancelButton, title: "取消", symbol: nil)
+            style(applyButton, title: "套用", symbol: nil)
+        }
     }
 
     /// The instruction as it stands, trimmed.
@@ -615,7 +695,15 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     }
 
     @objc private func voiceInstructionTapped() { onVoiceInstruction?() }
-    @objc private func cancelTapped() { hideEditPanel() }
+
+    /// 取消 in the instruction panel, 丟棄 in the confirm panel: two different
+    /// outcomes for the same place on screen. Cancelling an instruction abandons a
+    /// request that was never sent; discarding a held sentence is a decision about
+    /// text that exists, so it is the controller's to complete (it is the side
+    /// that knows whether the sentence is still the current one).
+    @objc private func cancelTapped() {
+        if mode == .confirm { onDiscardHeld?() } else { hideEditPanel() }
+    }
     @objc private func openTapped() { onOpenApp?() }
 
     @objc private func wholeTapped() {
@@ -661,6 +749,12 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     }
 
     @objc private func applyTapped() {
+        // 插入 confirms; 套用 asks the model. The same button, and the only place
+        // the two panels differ in what a tap means.
+        if mode == .confirm {
+            onInsertHeld?(held)
+            return
+        }
         guard !instructionText.isEmpty else {
             statusLabel.text = "先輸入修改的提示詞。"
             statusLabel.textColor = seal

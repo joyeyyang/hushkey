@@ -15,16 +15,18 @@ struct KeyboardProbeView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        // `-OVC_KB_PROBE_PANEL` draws the 修改的提示詞 bar on its own, at real
-        // size. It exists because the system keyboard covers the bottom of this
-        // screen -- and a keyboard extension cannot dismiss it -- so the expanded
-        // bar is otherwise only visible on a phone.
-        if ProcessInfo.processInfo.arguments.contains("-OVC_KB_PROBE_PANEL") {
+        // `-OVC_KB_PROBE_PANEL` / `-OVC_KB_PROBE_CONFIRM` draw one expanded bar on
+        // its own, at real size. They exist because the system keyboard covers the
+        // bottom of this screen -- and a keyboard extension cannot dismiss it -- so
+        // an expanded bar is otherwise only visible on a phone.
+        if let solo = soloPanel {
             VStack(alignment: .leading, spacing: 6) {
-                Text("按鉛筆後的樣子（修改的提示詞）")
+                Text(solo == .confirm
+                     ? "貼上前確認（按「插入」前的樣子）"
+                     : "按鉛筆後的樣子（修改的提示詞）")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                VoiceBarPreview(expanded: true)
+                VoiceBarPreview(state: solo)
                 Spacer()
             }
             .padding(20)
@@ -33,6 +35,13 @@ struct KeyboardProbeView: View {
         } else {
             fullProbe
         }
+    }
+
+    private var soloPanel: VoiceBarPreview.State? {
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("-OVC_KB_PROBE_CONFIRM") { return .confirm }
+        if args.contains("-OVC_KB_PROBE_PANEL") { return .editPanel }
+        return nil
     }
 
     private var fullProbe: some View {
@@ -68,7 +77,7 @@ struct KeyboardProbeView: View {
                 Text("按鉛筆後的樣子（修改的提示詞）")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-                VoiceBarPreview(expanded: true)
+                VoiceBarPreview(state: .editPanel)
             }
         }
         .padding(20)
@@ -89,9 +98,19 @@ struct KeyboardProbeView: View {
 
 /// The real keyboard bar, in the app, at real size.
 struct VoiceBarPreview: UIViewRepresentable {
-    /// Draws the 修改的提示詞 panel open, which is the state whose height and
-    /// button row are otherwise only visible on a phone with the keyboard up.
-    var expanded = false
+    /// Which state to draw. All of them exist in the extension and none of them can
+    /// be reached from this screen -- the probe is a photograph, not a demo.
+    enum State {
+        /// What the user sees before tapping.
+        case idle
+        /// 修改的提示詞 open: the height and the button row are otherwise only
+        /// visible on a phone with the keyboard up.
+        case editPanel
+        /// 貼上前確認 holding a sentence.
+        case confirm
+    }
+
+    var state: State = .idle
 
     func makeUIView(context: Context) -> VoiceBar {
         let bar = VoiceBar()
@@ -99,13 +118,18 @@ struct VoiceBarPreview: UIViewRepresentable {
         // idle prompt is what a user sees before tapping, which is the one that
         // has to fit.
         bar.apply(phase: .idle, text: "", needsSwitch: true, paused: false)
-        if expanded {
+        switch state {
+        case .idle:
+            break
+        case .editPanel:
             bar.showEditPanel(prefill: "把三點改成四點")
             // The field must not take focus here: the probe screen already has
             // one, and a keyboard inside the app's own screen is not the picture
             // this is for. Resigning has to happen after the view joins the
             // window, which is where `becomeFirstResponder` finally takes.
             DispatchQueue.main.async { bar.endEditing(true) }
+        case .confirm:
+            bar.showConfirmPanel(text: "下週一上午十點前把預算表寄給王經理，副本給財務部。")
         }
         return bar
     }
@@ -118,7 +142,7 @@ struct VoiceBarPreview: UIViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: VoiceBar, context: Context) -> CGSize? {
         CGSize(
             width: proposal.width ?? UIScreen.main.bounds.width,
-            height: expanded ? VoiceBar.expandedHeight : VoiceBar.height
+            height: state == .idle ? VoiceBar.height : VoiceBar.expandedHeight
         )
     }
 }

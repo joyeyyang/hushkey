@@ -17,6 +17,7 @@ struct SettingsTab: View {
     @State private var stages = Preferences.refineStages
     @State private var tone = SharedStore.refineTone
     @State private var refine = SharedStore.refineEnabled
+    @State private var confirmInsert = SharedStore.confirmBeforeInsert
     @State private var micGranted: Bool?
     @State private var copiedPath = false
 
@@ -25,6 +26,7 @@ struct SettingsTab: View {
             VStack(alignment: .leading, spacing: 14) {
                 translateCard
                 cleanupCard
+                insertCard
                 appearanceCard
                 permissionsCard
                 aboutCard
@@ -39,6 +41,7 @@ struct SettingsTab: View {
             stages = Preferences.refineStages
             tone = SharedStore.refineTone
             refine = SharedStore.refineEnabled
+            confirmInsert = SharedStore.confirmBeforeInsert
         }
     }
 
@@ -143,6 +146,27 @@ struct SettingsTab: View {
                         .foregroundStyle(Palette.dim)
                 }
             }
+        }
+    }
+
+    // MARK: insert
+
+    /// 貼上前確認, the phone's half of it.
+    ///
+    /// On the Mac the result waits in an editable HUD with an Enter key in front of
+    /// it. A keyboard extension has no such key and no room for a second window, so
+    /// the sentence waits in the keyboard's own panel and 插入 is the Enter. The
+    /// value lives in the App Group because the keyboard is the side that reads it.
+    private var insertCard: some View {
+        Card("插入",
+             caption: "開啟後，聽寫完的字會先留在鍵盤上；按「插入」才進到游標處，「重說一次」重講一遍，「丟棄」就什麼都不插入。和電腦版的「貼上前確認」同一個意思，只是手機上沒有 Enter，確認鍵就是「插入」。") {
+            Toggle(isOn: Binding(
+                get: { confirmInsert },
+                set: { confirmInsert = $0; SharedStore.confirmBeforeInsert = $0 }
+            )) {
+                Text("貼上前確認").font(.system(size: 14)).foregroundStyle(Palette.ink)
+            }
+            .tint(Palette.seal)
         }
     }
 
