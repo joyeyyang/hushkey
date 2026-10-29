@@ -22,6 +22,11 @@ FAILED=()
 
 export OVC_MODELS="${OVC_MODELS:-$ROOT/models}"
 export OVC_LLM_WORKER="${OVC_LLM_WORKER:-$ROOT/rust/core_engine/target/release/ovc-llm-worker}"
+# The numeric checks below compare exact strings. Both apps run the model on the
+# GPU, but Metal's accumulation order can move a greedy answer by a token, and the
+# expected strings were measured on the CPU path. Pin it here so a machine whose
+# Metal behaves differently fails on a real regression, not on rounding.
+export OVC_LLM_GPU_LAYERS="${OVC_LLM_GPU_LAYERS:-0}"
 
 step() {
     printf '\n=== %s ===\n' "$1"

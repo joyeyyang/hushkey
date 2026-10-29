@@ -1263,6 +1263,44 @@ fn record_served_model(model: &Path) {
     }
 }
 
+/// Load the LLM before the first task needs it.
+///
+/// The load is the single largest cost in a dictation (1.3 GB of weights), and it
+/// is paid after the user stops speaking unless something starts it earlier. The
+/// app calls this when recording starts.
+///
+/// Deliberately NOT routed through `run_task`: prewarming must not downgrade. A
+/// model that cannot load is the next task's problem to report, with the failure
+/// and the fallback in one place, instead of half a load here and an error the
+/// user sees before they have said anything.
+pub fn prewarm_llm() -> Result<()> {
+    let model = llm_model_path()?;
+    #[cfg(target_os = "ios")]
+    {
+        crate::llm::warm_session(&model)
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        // The worker owns the weights, so "load" is a request like any other.
+        match run_resident(&worker_path()?, "warm", &model, "", "") {
+            Ok(_) => Ok(()),
+            Err(ResidentError::Failed(e)) => Err(e),
+            Err(ResidentError::Unreachable(e)) => Err(EngineError::new(ErrorCode::ModelLoad, e)),
+        }
+    }
+}
+
+/// Drop the loaded model and give the memory back.
+///
+/// iOS only in practice: the app calls it when it goes to the background or gets a
+/// memory warning, and the next dictation loads again. On macOS the weights live in
+/// the worker, which releases them on its own idle limit, so there is nothing to do
+/// here -- killing a worker mid-answer would cost the user their sentence.
+pub fn release_llm() {
+    #[cfg(target_os = "ios")]
+    crate::llm::release_session();
+}
+
 fn run_task(task: &str, model: &Path, text: &str, instruction: &str) -> Result<String> {
     match run_task_once(task, model, text, instruction) {
         Ok(out) => {
@@ -1322,8 +1360,122 @@ fn run_task_once(task: &str, model: &Path, text: &str, instruction: &str) -> Res
     }
     #[cfg(not(target_os = "ios"))]
     {
-        run_worker(&worker_path()?, task, model, text, instruction)
+        let worker = worker_path()?;
+        match run_resident(&worker, task, model, text, instruction) {
+            Ok(out) => Ok(out),
+            // The worker answered and the answer was a failure. Running the same
+            // task again in a second process would fail the same way, more slowly.
+            Err(ResidentError::Failed(e)) => Err(e),
+            Err(ResidentError::Unreachable(e)) => {
+                eprintln!("ovc-llm: resident worker unavailable ({e}); running one-shot");
+                run_worker(&worker, task, model, text, instruction)
+            }
+        }
     }
+}
+
+/// Why a resident-worker attempt did not produce an answer.
+#[cfg(not(target_os = "ios"))]
+enum ResidentError {
+    /// No worker could be reached (not running, would not start, died mid-answer).
+    /// Worth one retry somewhere else.
+    Unreachable(String),
+    /// The worker ran the task and reported a failure. Not worth retrying.
+    Failed(EngineError),
+}
+
+/// The model's worker, spawned once and kept.
+///
+/// A child `Child` handle whose process has exited stays a zombie until someone
+/// waits on it, and a resident worker exits on its own (idle, or the app going
+/// away). Holding the handle here and calling `try_wait` on every spawn is enough
+/// to reap it without a reaper thread.
+#[cfg(not(target_os = "ios"))]
+static WORKER: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+/// Sends one task to the resident worker, starting it if nobody is listening.
+///
+/// The socket path is derived from the model, so a model switch (a downgrade, a
+/// new install) talks to a worker holding the weights the task names -- and a
+/// request for the old model would find that worker, not this one.
+#[cfg(not(target_os = "ios"))]
+fn run_resident(
+    worker: &Path,
+    task: &str,
+    model: &Path,
+    text: &str,
+    instruction: &str,
+) -> std::result::Result<String, ResidentError> {
+    let socket = crate::ipc::socket_path(model);
+    let request = crate::ipc::Request {
+        task: task.to_string(),
+        instruction: instruction.to_string(),
+        text: text.to_string(),
+    };
+
+    let first = crate::ipc::request(&socket, &request);
+    let response = match first {
+        Ok(response) => response,
+        Err(e) if crate::ipc::unreachable(&e) => {
+            if let Err(start) = spawn_resident(worker, &socket, model) {
+                return Err(ResidentError::Unreachable(start));
+            }
+            match crate::ipc::request(&socket, &request) {
+                Ok(response) => response,
+                Err(e) => return Err(ResidentError::Unreachable(e.to_string())),
+            }
+        }
+        Err(e) => return Err(ResidentError::Unreachable(e.to_string())),
+    };
+
+    if response.ok {
+        Ok(response.body)
+    } else {
+        Err(ResidentError::Failed(EngineError::new(
+            ErrorCode::Inference,
+            format!("LLM worker failed: {}", response.body),
+        )))
+    }
+}
+
+/// Starts the resident worker and waits until it is listening.
+///
+/// Loading happens on the first request, not at startup, so the wait is just the
+/// bind. A worker that loses the race to another one exits immediately; the
+/// connect below then finds the winner, which is the same model by construction.
+#[cfg(not(target_os = "ios"))]
+fn spawn_resident(worker: &Path, socket: &Path, model: &Path) -> std::result::Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    {
+        let mut guard = WORKER.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(child) = guard.as_mut() {
+            // Reap a worker that has exited, so it does not sit as a zombie.
+            let _ = child.try_wait();
+        }
+        let child = Command::new(worker)
+            .arg("serve")
+            .arg(socket)
+            .arg(model)
+            // Nothing on stdin/stdout: the socket is the whole channel. stderr is
+            // inherited so the worker's own log lines land wherever the app's do.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("spawn {}: {e}", worker.display()))?;
+        *guard = Some(child);
+    }
+
+    // The worker binds before it loads anything, so this is a handful of
+    // milliseconds; the bound is for a machine under load, not for the model.
+    for _ in 0..100 {
+        if crate::ipc::ping(socket).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err(format!("{} did not start listening on {}", worker.display(), socket.display()))
 }
 
 fn file_label(path: &Path) -> String {

@@ -8,6 +8,10 @@ mod asr;
 pub mod chunking;
 mod error;
 pub mod guardrail;
+/// The resident worker's socket protocol. Unix only: the worker is a macOS
+/// detail, and iOS runs the same code in-process.
+#[cfg(unix)]
+pub mod ipc;
 pub mod llm;
 mod memory;
 pub mod segmentation;
@@ -479,6 +483,26 @@ pub unsafe extern "C" fn LLM_EditText(
         let edited = state::edit_text(input, instruction)?;
         write_out(out, &edited)
     })())
+}
+
+/// Load the LLM ahead of the first task.
+///
+/// Called when a recording starts. On iOS this loads the model in-process (and
+/// keeps its KV prefix warm for the next prompt); on macOS it starts the resident
+/// worker. Either way the load happens while the user is still speaking.
+#[no_mangle]
+pub extern "C" fn LLM_Prewarm() -> c_int {
+    status(state::prewarm_llm())
+}
+
+/// Drop the loaded model and give its memory back.
+///
+/// For the app's lifecycle hooks: going to the background, and a memory warning.
+/// The next task loads again, so this is always safe to call.
+#[no_mangle]
+pub extern "C" fn LLM_ReleaseModel() -> c_int {
+    state::release_llm();
+    status(Ok(()))
 }
 
 // The RAG_* pair used to sit here as placeholders for a planned entry point. The

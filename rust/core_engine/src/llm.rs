@@ -12,15 +12,17 @@
 //!    is noise. Interior punctuation and a question's `？` stay.
 
 use std::num::NonZeroU32;
-use std::path::Path;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
 
 use crate::error::{EngineError, ErrorCode};
 
@@ -45,28 +47,26 @@ fn backend() -> Result<&'static LlamaBackend> {
 
 /// How many model layers go to the GPU.
 ///
-/// iOS defaults to all of them. The app has roughly thirty seconds of background
-/// time after the user leaves, and the CPU path there is effectively one thread:
-/// a 2B model measured minutes per reply, so the cleanup pass lost that race and
-/// the user got their sentence back unedited. Metal finishes the same reply in a
-/// few seconds, and on a phone it also draws less power than the CPU at full
+/// Both shipped apps default to all of them, and that is the whole reason the
+/// cleanup fits: a 2B model on the CPU measured minutes per reply on a phone
+/// (where the app has roughly thirty seconds of background time after the user
+/// leaves), and the desktop paid several seconds per sentence. Metal finishes the
+/// same reply in a few, and on a phone it draws less power than the CPU at full
 /// tilt.
 ///
-/// macOS keeps the CPU it has always used, so the desktop binary's behaviour does
-/// not change underneath its verified tests. `OVC_LLM_GPU_LAYERS` overrides both
-/// (`0` forces pure CPU, which is the way back in on a simulator whose Metal
-/// backend misbehaves).
+/// `OVC_LLM_GPU_LAYERS` overrides both (`0` forces pure CPU). `scripts/verify.sh`
+/// sets `0` on purpose: the correctness checks compare exact strings, and Metal's
+/// accumulation order can move a greedy answer by a token, so the numeric gate
+/// runs on the path whose numbers were measured.
 fn gpu_layers() -> u32 {
     match std::env::var("OVC_LLM_GPU_LAYERS").ok().and_then(|v| v.parse::<u32>().ok()) {
         Some(n) => n,
-        // A real phone, where Metal is the whole reason the cleanup fits in the
-        // background window.
-        None if cfg!(all(target_os = "ios", not(target_abi = "sim"))) => 99,
-        // NOT the simulator. Its Metal backend stalls in resource-set setup
+        // NOT a simulator. Its Metal backend stalls in resource-set setup
         // (`__ggml_metal_rsets_init_block_invoke` never returned here), so
         // offloading made a 0.5B model slower than the CPU instead of faster.
         // The simulator is a correctness harness, not a speed reference.
-        None => 0,
+        None if cfg!(target_abi = "sim") => 0,
+        None => 99,
     }
 }
 
@@ -846,10 +846,9 @@ pub fn generate(model_path: &Path, prompt: &str) -> Result<String> {
 
 /// Like `generate`, with an explicit cap on generated tokens.
 pub fn generate_with(model_path: &Path, prompt: &str, max_new_tokens: usize) -> Result<String> {
-    let be = backend()?;
-    let model = LlamaModel::load_from_file(be, model_path, &model_params())
-        .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
-    generate_in(&model, prompt, max_new_tokens)
+    with_session(model_path, |model, ctx, cached| {
+        generate_in(model, ctx, cached, prompt, max_new_tokens)
+    })
 }
 
 /// The assistant turn we end every prompt with.
@@ -923,15 +922,114 @@ fn with_thinking_disabled<'a>(model: &LlamaModel, prompt: &'a str) -> std::borro
     }
 }
 
-/// Generate on an already-loaded model. A fresh context per call keeps the two
-/// stages of a two-stage refine from sharing a KV cache.
-fn generate_in(model: &LlamaModel, prompt: &str, max_new_tokens: usize) -> Result<String> {
-    let be = backend()?;
-    let ctx_params = context_params();
-    let mut ctx = model
-        .new_context(be, ctx_params)
-        .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("llama context: {e}")))?;
+// ---- The resident session -------------------------------------------------
+//
+// Loading a 2B model costs more than the generation that follows it, and every
+// prompt in this file shares a long prefix (the system paragraph and its
+// examples). A fresh model and a fresh context per call pays both again, every
+// time -- which is what used to happen.
+//
+// A `Session` keeps one model and one context alive, and each generation reuses
+// the KV entries of the prefix it shares with the previous prompt. It is
+// process-wide and behind a mutex because llama.cpp serialises decoding anyway:
+// two generations sharing one context would be a bug, not a speed-up.
 
+struct Session {
+    /// Declared BEFORE `model` on purpose: Rust drops fields in declaration
+    /// order, and the context must go before the model it borrowed from.
+    ctx: LlamaContext<'static>,
+    /// Boxed so the address handed to the context cannot move when the
+    /// `Session` is moved into the global slot.
+    model: Box<LlamaModel>,
+    /// The tokens currently in `ctx`'s KV cache, at positions `0..len`. Only the
+    /// prompt is recorded: tokens generated after it are removed at the start of
+    /// the next call, from the shared prefix onward.
+    cached: Vec<LlamaToken>,
+    path: PathBuf,
+}
+
+static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+impl Session {
+    fn load(path: &Path) -> Result<Self> {
+        let be = backend()?;
+        let model = Box::new(
+            LlamaModel::load_from_file(be, path, &model_params()).map_err(|e| {
+                EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", path.display()))
+            })?,
+        );
+        // SAFETY: `model` is owned by the `Session` this context goes into, in a
+        // `Box` (so its address survives the move into `SESSION`), and `ctx` is
+        // declared first so it is dropped before the model. The `'static`
+        // reference never leaves the session -- it is only ever used inside
+        // `with_session`, which holds the mutex that owns both.
+        let model_ref: &'static LlamaModel = unsafe { &*(model.as_ref() as *const LlamaModel) };
+        let ctx = model_ref
+            .new_context(be, context_params())
+            .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("llama context: {e}")))?;
+        Ok(Self { ctx, model, cached: Vec::new(), path: path.to_path_buf() })
+    }
+}
+
+/// Run `f` against the resident session, loading it first when this is a new
+/// model. Every generation in this file goes through here.
+fn with_session<T>(
+    model_path: &Path,
+    f: impl FnOnce(&LlamaModel, &mut LlamaContext<'static>, &mut Vec<LlamaToken>) -> Result<T>,
+) -> Result<T> {
+    let mut guard = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let reload = match guard.as_ref() {
+        Some(session) => session.path != model_path,
+        None => true,
+    };
+    if reload {
+        // Dropped before the new one is loaded: two 2B models must never be
+        // resident at once on a phone.
+        *guard = None;
+        *guard = Some(Session::load(model_path)?);
+    }
+    let session = guard.as_mut().expect("session was just loaded");
+    f(&session.model, &mut session.ctx, &mut session.cached)
+}
+
+/// Loads the model and opens its context, without generating anything.
+///
+/// The app calls this when a recording starts, so the seconds of loading happen
+/// while the user is still speaking instead of after they stop. Idempotent: a
+/// second call for the same model is a no-op.
+pub fn warm_session(model_path: &Path) -> Result<()> {
+    with_session(model_path, |_, _, _| Ok(()))
+}
+
+/// Drops the model and the context, returning their memory to the OS.
+///
+/// For the app's lifecycle hooks (background, memory warning). The next call
+/// loads again; nothing is left half-initialised.
+pub fn release_session() {
+    let mut guard = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = None;
+}
+
+/// Whether a model is resident right now. For tests and for the log line that
+/// says whether a prewarm actually happened.
+pub fn session_is_loaded() -> bool {
+    SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_some()
+}
+
+/// Generate on the resident session, reusing the KV entries of the prefix this
+/// prompt shares with the previous one.
+///
+/// Only the shared prefix is reused. The last prompt token is always decoded
+/// again, because sampling needs a logit for it, and everything from the shared
+/// prefix onward is dropped with `kv_cache_seq_rm` -- including the tokens
+/// generated last time, which are not in `cached`.
+fn generate_in(
+    model: &LlamaModel,
+    ctx: &mut LlamaContext<'static>,
+    cached: &mut Vec<LlamaToken>,
+    prompt: &str,
+    max_new_tokens: usize,
+) -> Result<String> {
     // parse_special = true so "<|im_start|>" etc. become control tokens, not text.
     let vocab = model.vocab();
     let prompt = with_thinking_disabled(model, prompt);
@@ -939,16 +1037,37 @@ fn generate_in(model: &LlamaModel, prompt: &str, max_new_tokens: usize) -> Resul
     if tokens.len() >= N_CTX as usize {
         return Err(EngineError::new(ErrorCode::InvalidArg, "transcript too long for one LLM pass"));
     }
+    if tokens.is_empty() {
+        return Err(EngineError::new(ErrorCode::InvalidArg, "empty prompt"));
+    }
+
+    // How much of the old cache is a prefix of this prompt. The last token is
+    // excluded even when it matches: the sampler needs its logit.
+    let mut shared = tokens
+        .iter()
+        .zip(cached.iter())
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(tokens.len() - 1);
+    if ctx.kv_cache_seq_rm(0, Some(shared as u32), None).is_err() {
+        // A partial trim the backend cannot do (or a poisoned cache) is not worth
+        // failing the pass over: drop it all and decode the prompt from the top.
+        ctx.clear_kv_cache();
+        shared = 0;
+    }
 
     let mut batch = LlamaBatch::new(N_CTX as usize, 1);
     let last = tokens.len() as i32 - 1;
-    for (i, t) in tokens.iter().enumerate() {
+    for (i, t) in tokens.iter().enumerate().skip(shared) {
         batch
             .add(*t, i as i32, &[0], i as i32 == last)
             .map_err(|e| EngineError::new(ErrorCode::Inference, format!("batch add: {e}")))?;
     }
     ctx.decode(&mut batch)
         .map_err(|e| EngineError::new(ErrorCode::Inference, format!("prompt decode: {e}")))?;
+    // From here the cache holds exactly this prompt; anything generated below is
+    // beyond `cached` and is trimmed by the next call.
+    *cached = tokens.clone();
 
     let mut sampler = LlamaSampler::greedy();
     let mut pos = tokens.len() as i32;
@@ -1188,40 +1307,65 @@ pub fn refine_with_tone(model_path: &Path, text: &str, keywords_hint: &str, tone
     if tone == Tone::Normal {
         return refine_with_keywords_normal(model_path, text, keywords_hint);
     }
-    let Some((target, source)) = detect_translation_request(text) else {
-        let raw = generate(model_path, &refine_prompt_with_tone(text, keywords_hint, tone))?;
-        return Ok(tidy_output(&raw));
-    };
-    // One load for both passes: refine in the speaker's language, then translate.
-    let be = backend()?;
-    let model = LlamaModel::load_from_file(be, model_path, &model_params())
-        .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
-    let refined = tidy_output(&generate_in(
-        &model,
-        &refine_prompt_with_tone(&source, keywords_hint, tone),
-        MAX_NEW_TOKENS,
-    )?);
-    translate_in(&model, &refined, target)
+    with_session(model_path, |model, ctx, cached| {
+        let Some((target, source)) = detect_translation_request(text) else {
+            let raw = generate_in(
+                model,
+                ctx,
+                cached,
+                &refine_prompt_with_tone(text, keywords_hint, tone),
+                MAX_NEW_TOKENS,
+            )?;
+            return Ok(tidy_output(&raw));
+        };
+        // One session for both passes: refine in the speaker's language, then
+        // translate. The second prompt shares the first one's opening tokens, so
+        // part of its KV cache is reused.
+        let refined = tidy_output(&generate_in(
+            model,
+            ctx,
+            cached,
+            &refine_prompt_with_tone(&source, keywords_hint, tone),
+            MAX_NEW_TOKENS,
+        )?);
+        translate_in(model, ctx, cached, &refined, target)
+    })
 }
 
 /// The default-register pass, including the translation-request split.
 fn refine_with_keywords_normal(model_path: &Path, text: &str, keywords_hint: &str) -> Result<String> {
-    let Some((target, source)) = detect_translation_request(text) else {
-        let raw = generate(model_path, &refine_prompt_with_hint(text, keywords_hint))?;
-        return Ok(tidy_output(&raw));
-    };
-    // One load for both passes: refine in the speaker's language, then translate.
-    let be = backend()?;
-    let model = LlamaModel::load_from_file(be, model_path, &model_params())
-        .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
-    let refined = tidy_output(&generate_in(&model, &refine_prompt_with_hint(&source, keywords_hint), MAX_NEW_TOKENS)?);
-    translate_in(&model, &refined, target)
+    with_session(model_path, |model, ctx, cached| {
+        let Some((target, source)) = detect_translation_request(text) else {
+            let raw = generate_in(
+                model,
+                ctx,
+                cached,
+                &refine_prompt_with_hint(text, keywords_hint),
+                MAX_NEW_TOKENS,
+            )?;
+            return Ok(tidy_output(&raw));
+        };
+        let refined = tidy_output(&generate_in(
+            model,
+            ctx,
+            cached,
+            &refine_prompt_with_hint(&source, keywords_hint),
+            MAX_NEW_TOKENS,
+        )?);
+        translate_in(model, ctx, cached, &refined, target)
+    })
 }
 
 /// Translate with an already-loaded model, falling back to the refined text when
 /// the translation comes back empty.
-fn translate_in(model: &LlamaModel, text: &str, target: &str) -> Result<String> {
-    let raw = generate_in(model, &translate_prompt(text, target), MAX_NEW_TOKENS)?;
+fn translate_in(
+    model: &LlamaModel,
+    ctx: &mut LlamaContext<'static>,
+    cached: &mut Vec<LlamaToken>,
+    text: &str,
+    target: &str,
+) -> Result<String> {
+    let raw = generate_in(model, ctx, cached, &translate_prompt(text, target), MAX_NEW_TOKENS)?;
     let out = tidy_output(&raw);
     if out.trim().is_empty() {
         return Ok(text.to_string());
@@ -1236,27 +1380,26 @@ fn translate_in(model: &LlamaModel, text: &str, target: &str) -> Result<String> 
 /// it comes back empty, and stage 2 falls back to stage 1's output. Both returns
 /// go through `tidy_output`.
 pub fn refine_two_stage(model_path: &Path, text: &str, keywords_hint: &str) -> Result<String> {
-    let be = backend()?;
-    let model = LlamaModel::load_from_file(be, model_path, &model_params())
-        .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
+    with_session(model_path, |model, ctx, cached| {
+        let (target, source) = match detect_translation_request(text) {
+            Some((target, source)) => (Some(target), source),
+            None => (None, text.to_string()),
+        };
 
-    let (target, source) = match detect_translation_request(text) {
-        Some((target, source)) => (Some(target), source),
-        None => (None, text.to_string()),
-    };
+        // Stage 1 rewrites at roughly the input's own length, so its cap scales;
+        // stage 2 only condenses, so the normal cap is plenty.
+        let stage1_max = (source.chars().count() * 2).clamp(MAX_NEW_TOKENS, STAGE1_MAX_TOKENS);
+        let understood = generate_in(model, ctx, cached, &understand_prompt(&source), stage1_max)?;
+        let middle = if understood.trim().is_empty() { source.clone() } else { understood };
 
-    // Stage 1 rewrites at roughly the input's own length, so its cap scales;
-    // stage 2 only condenses, so the normal cap is plenty.
-    let stage1_max = (source.chars().count() * 2).clamp(MAX_NEW_TOKENS, STAGE1_MAX_TOKENS);
-    let understood = generate_in(&model, &understand_prompt(&source), stage1_max)?;
-    let middle = if understood.trim().is_empty() { source.clone() } else { understood };
-
-    let condensed = generate_in(&model, &refine_prompt_with_hint(&middle, keywords_hint), MAX_NEW_TOKENS)?;
-    let refined = if condensed.trim().is_empty() { tidy_output(&middle) } else { tidy_output(&condensed) };
-    match target {
-        Some(target) => translate_in(&model, &refined, target),
-        None => Ok(refined),
-    }
+        let condensed =
+            generate_in(model, ctx, cached, &refine_prompt_with_hint(&middle, keywords_hint), MAX_NEW_TOKENS)?;
+        let refined = if condensed.trim().is_empty() { tidy_output(&middle) } else { tidy_output(&condensed) };
+        match target {
+            Some(target) => translate_in(model, ctx, cached, &refined, target),
+            None => Ok(refined),
+        }
+    })
 }
 
 /// One entry point for both refine shapes. `stages` is 1 (single pass), 2
