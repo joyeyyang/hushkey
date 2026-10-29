@@ -68,9 +68,14 @@ impl Verdict {
 
 /// Phrases a model says when it answers the prompt rather than the draft.
 ///
-/// Short and prefix-anchored on purpose: an answer that merely CONTAINS "以下是"
-/// is fine ("以下是本週的進度" is a legitimate sentence), while one that STARTS
-/// with it is the model introducing its own output.
+/// Matched ANYWHERE in the answer, not only at its start. The first version was
+/// prefix-anchored to spare legitimate sentences ("以下是本週的進度"), but a 2B
+/// model rarely opens with its remark -- measured answers prepend a clause first
+/// ("好的，以下是整理後的版本…") and the prefix check sailed past them. The
+/// check is now positional-free and instead compares against the input: a
+/// phrase the speaker actually said is content and passes, one the model added
+/// is a remark and fails. The cost of a false reject is the polish, not the
+/// dictation -- every caller falls back to the raw transcript.
 const META_PREFIXES: [&str; 8] = [
     "以下是", "很抱歉", "抱歉", "對不起", "總結：", "原文：", "Here is", "Sure,",
 ];
@@ -80,27 +85,56 @@ const META_PREFIXES: [&str; 8] = [
 /// If the answer repeats one of these and the speaker never said it, the model
 /// answered US instead of cleaning the draft. The list grows with the prompts:
 /// a longer prompt is a longer thing for a small model to answer instead of the
-/// text, so the tone paragraphs are named here too.
-const INSTRUCTION_PHRASES: [&str; 16] = [
+/// text, so every rule that reads like a sentence is named here. Only phrases a
+/// person is unlikely to say on purpose are listed -- a false positive throws
+/// away a correct answer, and the whole gate exists to keep answers, not to
+/// punish them.
+const INSTRUCTION_PHRASES: &[&str] = &[
+    // The shared contract, as the three refine prompts state it.
     "不要摘要",
     "不要漏掉任何一件事",
+    "重複的只留一次",
     "重複講的同一件事只留一次",
     "刪掉口頭禪",
     "多餘的字",
+    "只有一個重點就寫一句",
+    "數字、時間、名字照原樣保留",
     "照原樣保留",
     "問句保持問句",
-    "預設用繁體中文輸出",
-    "把使用者的口語改寫成通順的書面文字",
-    // Added with the formal-register rule: a longer prompt is a longer thing
-    // for a small model to answer instead of the draft.
+    "指令本身不要出現在結果裡",
+    "語言跟使用者講的一樣",
+    "中文一律用繁體字",
+    "只有明確要求翻譯時才換語言",
+    "最後不要加句號",
+    "只輸出改寫後的內容",
+    // The opening register paragraphs.
+    "把使用者的口語改寫成通順、正式的書面文字",
     "像寫給客戶或同事的信",
     "像自言自語",
     "換成正式而具體的詞",
-    // The tone paragraphs (see `REFINE_SYSTEM_CASUAL` / `_FORMAL`).
     "像傳訊息給熟識的同事",
     "好讀的口語文字",
     "像對外發的正式書信或公文",
+    "稱呼對方一律用「您」",
+    "只改寫原話說的內容",
     "不要自己補上新的事實",
+    "不要自己補上新的事實或新的名詞",
+    "不要用「就是說」「然後」當連接詞",
+    "一句只講一件事",
+    // The voice-edit prompt (`EDIT_SYSTEM`). Listed here because the edit path
+    // now runs the same echo check: an answer that recites "只輸出改寫後的內容"
+    // is the model talking to us, not an edited draft.
+    "沒改到的行照原樣輸出",
+    "不要重新編號",
+    "被刪掉的那一行整行都不要出現",
+    "第一行是指令",
+    // The confirmation lines `EDIT_SYSTEM` names as failures. Only the
+    // distinctive ones: "沒問題" and "收到" are ordinary things a person says
+    // and an instruction may legitimately put them into a line, so they stay
+    // out of the guard and live only in the prompt.
+    "我已經幫你改好了",
+    "好的我改好了",
+    "好的，我改好了",
 ];
 
 /// The casual particles the formal prompt forbids.
@@ -142,7 +176,13 @@ pub fn check(kind: Kind, raw: &str, refined: &str, tone: Tone) -> Verdict {
 
     match kind {
         Kind::Refine => {
-            if refined_len < raw_len * 15 / 100 {
+            // The floor drops for a short input. A 20-character draft has no
+            // room to condense: 15% of it is three characters, which a model
+            // that answered "好的" would clear. Below 50 characters the answer
+            // must keep a tenth of what was said, and the retention check below
+            // does the rest.
+            let floor_percent = if raw_len < 50 { 10 } else { 15 };
+            if refined_len < raw_len * floor_percent / 100 {
                 return Verdict::reject(format!("far too short: {refined_len}/{raw_len} chars"));
             }
             if refined_len > raw_len * 2 {
@@ -160,19 +200,26 @@ pub fn check(kind: Kind, raw: &str, refined: &str, tone: Tone) -> Verdict {
         }
     }
 
+    // Anywhere in the answer, not only at its start -- see `META_PREFIXES`.
+    // Skipped when the input already carries the phrase: then it is the
+    // speaker's own words surviving the pass, not the model introducing itself.
     for prefix in META_PREFIXES {
-        if refined.starts_with(prefix) {
+        if refined.contains(prefix) && !raw.contains(prefix) {
             return Verdict::reject(format!("meta phrasing: {prefix}"));
         }
     }
 
+    // The echo check runs for both jobs. A spoken edit is a prompt too, and a
+    // 2B model that recites one of its rules is answering the prompt rather
+    // than applying it -- the failure the edit path used to be blind to.
+    if let Some(phrase) = INSTRUCTION_PHRASES
+        .iter()
+        .find(|phrase| refined.contains(**phrase) && !raw.contains(**phrase))
+    {
+        return Verdict::reject(format!("echoed the instructions: {phrase}"));
+    }
+
     if kind == Kind::Refine {
-        if let Some(phrase) = INSTRUCTION_PHRASES
-            .iter()
-            .find(|phrase| refined.contains(**phrase) && !raw.contains(**phrase))
-        {
-            return Verdict::reject(format!("echoed the instructions: {phrase}"));
-        }
         if introduced_simplified(raw, refined) {
             return Verdict::reject("the model introduced simplified characters");
         }
@@ -181,9 +228,12 @@ pub fn check(kind: Kind, raw: &str, refined: &str, tone: Tone) -> Verdict {
                 return Verdict::reject(format!("casual particle in a formal line: {particle}"));
             }
         }
-        return check_language(raw, refined);
+        return check_language(raw, refined, true);
     }
-    Verdict::ok()
+    // An edit may delete most of the draft, so the retention ratio (which asks
+    // "did the answer keep the speaker's words?") would fire on a legitimate
+    // deletion. Only the language switch is checked here.
+    check_language(raw, refined, false)
 }
 
 /// The two ways the language can go wrong: Chinese lost, or Chinese invented.
@@ -192,7 +242,11 @@ pub fn check(kind: Kind, raw: &str, refined: &str, tone: Tone) -> Verdict {
 /// UNLESS the speaker named a language to answer in (the refine prompt is told
 /// to honour that request and drop the instruction). The same in reverse: an
 /// English draft must not come back translated.
-fn check_language(raw: &str, refined: &str) -> Verdict {
+///
+/// `retention` adds the third check -- the answer kept some of the speaker's
+/// characters -- and is off for a spoken edit, where deleting most of the draft
+/// is the instruction being followed rather than a rewrite.
+fn check_language(raw: &str, refined: &str, retention: bool) -> Verdict {
     if contains_cjk(raw) {
         if !contains_cjk(refined) {
             if !names_another_language(raw) {
@@ -203,17 +257,19 @@ fn check_language(raw: &str, refined: &str) -> Verdict {
             }
             return Verdict::ok();
         }
-        let raw_chars: Vec<char> = raw.chars().filter(|c| is_ideograph(*c)).collect();
-        if !raw_chars.is_empty() {
-            let kept = raw_chars.iter().filter(|c| refined.contains(**c)).count();
-            let ratio = kept as f32 / raw_chars.len() as f32;
-            // Condensing to ~30% is normal; the legitimate worst case measured
-            // 0.26, so 0.18 only catches a rewrite into something else entirely.
-            if ratio < 0.18 {
-                return Verdict::reject(format!(
-                    "only kept {}% of the words used",
-                    (ratio * 100.0) as i32
-                ));
+        if retention {
+            let raw_chars: Vec<char> = raw.chars().filter(|c| is_ideograph(*c)).collect();
+            if !raw_chars.is_empty() {
+                let kept = raw_chars.iter().filter(|c| refined.contains(**c)).count();
+                let ratio = kept as f32 / raw_chars.len() as f32;
+                // Condensing to ~30% is normal; the legitimate worst case measured
+                // 0.26, so 0.18 only catches a rewrite into something else entirely.
+                if ratio < 0.18 {
+                    return Verdict::reject(format!(
+                        "only kept {}% of the words used",
+                        (ratio * 100.0) as i32
+                    ));
+                }
             }
         }
     } else if contains_latin(raw) && !contains_latin(refined) {
@@ -306,8 +362,19 @@ mod tests {
             assert!(!verdict.ok, "{answer}");
             assert!(verdict.reason.starts_with("meta phrasing"));
         }
-        // The same words INSIDE a sentence are the speaker's, not the model's.
-        assert!(ok(raw, "明天下午三點跟小林開會，以下是重點"));
+        // A remark that opens with a clause first is caught too: the check is
+        // positional-free now, because measured answers prepend "好的，".
+        let longer = "明天下午三點跟小林開會，討論第四季時程，地點還沒確定";
+        let buried = check(
+            Kind::Refine,
+            longer,
+            "好的，以下是整理後的版本：明天下午三點跟小林開會，討論第四季時程，地點還沒確定",
+            Tone::Normal,
+        );
+        assert!(!buried.ok);
+        assert!(buried.reason.starts_with("meta phrasing"));
+        // The same words are the speaker's when the input carries them.
+        assert!(ok("明天下午三點跟小林開會，以下是重點", "明天下午三點跟小林開會，以下是重點"));
     }
 
     #[test]
@@ -350,12 +417,27 @@ mod tests {
         let raw = "明天下午三點跟小林開會討論第四季時程地點還沒確定記得帶合約和報價單還有名片";
         let kept: String = raw.chars().take(20).collect();
         assert!(ok(raw, &kept));
-        // 5 of 37 = 14%: above the length floor (15% of 37 rounds down to 5),
-        // below the retention floor -- a fragment made of the opening words.
+        // 5 of 37 = 14%: above the length floor (10% of 37 rounds down to 3,
+        // since the input is under 50 characters), below the retention floor --
+        // a fragment made of the opening words.
         let fragment: String = raw.chars().take(5).collect();
         let verdict = check(Kind::Refine, raw, &fragment, Tone::Normal);
         assert!(!verdict.ok);
         assert!(verdict.reason.starts_with("only kept"));
+    }
+
+    #[test]
+    fn a_short_input_gets_a_lower_length_floor() {
+        // 20 characters: 10% is two, where the old 15% floor was three. Both
+        // clear "好的" (2 chars), which the retention check catches; what the
+        // lower floor buys is a legitimate two-character answer not being
+        // rejected on length alone.
+        let raw = "明天下午三點跟小林開會";
+        assert!(check(Kind::Refine, raw, "明天開會", Tone::Normal).ok);
+        // The retention check is what stops a fragment from passing on length.
+        let verdict = check(Kind::Refine, raw, "明", Tone::Normal);
+        assert!(!verdict.ok);
+        assert!(verdict.reason.starts_with("only kept"), "{}", verdict.reason);
     }
 
     #[test]
@@ -391,16 +473,45 @@ mod tests {
         let draft = "明天下午三點跟小林開會\n討論第四季時程\n地點還沒確定";
         // Two of three lines gone: a deletion, which is the point.
         assert!(check(Kind::Edit, draft, "明天下午三點跟小林開會\n地點還沒確定", Tone::Normal).ok);
-        // A remark that introduces itself IS caught. A bare "好的，我改好了"
-        // is not judged here: which lines survived is the numbering parser's
-        // business (`llm::check_edited_shape`), and only it knows the numbers.
+        // A remark that introduces itself IS caught, wherever it sits.
         let remark = check(Kind::Edit, draft, "以下是修改後的版本", Tone::Normal);
         assert!(!remark.ok);
         assert!(remark.reason.starts_with("meta phrasing"));
-        assert!(check(Kind::Edit, draft, "好的，我已經幫你改好了", Tone::Normal).ok);
+        // A confirmation line is a remark too -- the edit prompt names it as a
+        // failure, so an answer made of one is refused here rather than typed
+        // into somebody's document.
+        for remark in ["好的，我已經幫你改好了", "好的我改好了", "沒問題，以下是改好的版本"] {
+            let verdict = check(Kind::Edit, draft, remark, Tone::Normal);
+            assert!(!verdict.ok, "{remark}");
+        }
         let essay = check(Kind::Edit, draft, &draft.repeat(4), Tone::Normal);
         assert!(!essay.ok);
         assert!(essay.reason.starts_with("far too long"));
+    }
+
+    #[test]
+    fn an_edit_is_checked_for_language_and_echoed_rules() {
+        let draft = "1. 明天下午三點跟小林開會\n2. 討論第四季時程";
+        // A Chinese draft must not come back in English.
+        let translated = check(Kind::Edit, draft, "1. Meet Xiao Lin at 3 pm\n2. Q4 schedule", Tone::Normal);
+        assert!(!translated.ok);
+        assert_eq!(translated.reason, "no Chinese left in the output");
+        // An English draft must not come back translated.
+        let away = check(Kind::Edit, "1. meet at 3\n2. Q4 schedule", "1. 三點開會\n2. 第四季時程", Tone::Normal);
+        assert!(!away.ok);
+        assert_eq!(away.reason, "translated away");
+        // A rule from the edit prompt recited back at us.
+        let echo = check(
+            Kind::Edit,
+            draft,
+            "1. 明天下午三點跟小林開會\n2. 討論第四季時程\n不要重新編號",
+            Tone::Normal,
+        );
+        assert!(!echo.ok);
+        assert!(echo.reason.starts_with("echoed the instructions"));
+        // Deleting the second line keeps only a third of the draft, and that is
+        // the instruction being followed -- the retention ratio must not fire.
+        assert!(check(Kind::Edit, draft, "1. 明天下午三點跟小林開會", Tone::Normal).ok);
     }
 
     #[test]
