@@ -1284,16 +1284,46 @@ final class AppController {
             hud.flash("沒有可貼上的文字")
             return
         }
-        ModelInstaller.log("insert: from window, \(text.count) chars")
+        // K: 送出前整理. A meeting transcript is deliberately NOT refined while
+        // it is being recorded -- those words are the record -- so the send is
+        // the one place the cleanup may run, and only because the user asked for
+        // a document by pressing 貼上. The switch in the header is the per-send
+        // answer; the global AI 整理 setting still has the last word.
+        guard polishEnabled, hud.polishOnSend else {
+            ModelInstaller.log("insert: from window, \(text.count) chars, raw")
+            sendFromWindow(text, organized: false)
+            return
+        }
+        ModelInstaller.log("insert: from window, \(text.count) chars, cleanup first")
+        hud.showStage("整理中…")
+        coreQueue.async {
+            let organized = self.polish(text)
+            DispatchQueue.main.async {
+                // The main window is where the result lives after this; it should
+                // hold what was sent, not what was heard.
+                self.mainWindow?.setTranscript(organized)
+                self.sendFromWindow(organized, organized: true)
+            }
+        }
+    }
+
+    /// Hides the window, then delivers. The window has to go first: it is the
+    /// focused responder after a click on its button, so a synthesized Cmd+V
+    /// would paste into our own text view.
+    private func sendFromWindow(_ text: String, organized: Bool) {
         hud.hide()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-            self?.insertDirect(text)
+            self?.insertDirect(text, organized: organized)
         }
     }
 
     /// Inserts text into whatever app was focused. The HUD is in display mode here
     /// (not key), so the synthesized Cmd+V lands in the target app, not in us.
-    private func insertDirect(_ text: String) {
+    ///
+    /// `organized` marks a send that ran the cleanup on the way out: the text on
+    /// the card is then not the text that was delivered, so the result capsule
+    /// offers 複製整理後.
+    private func insertDirect(_ text: String, organized: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             hud.flash("內容為空，已忽略")
@@ -1308,6 +1338,7 @@ final class AppController {
             ModelInstaller.log("insert: pasted \(trimmed.count) chars")
             refreshPermission(reason: "paste")
             hud.showResult(trimmed)
+            if organized { hud.offerCopy(of: trimmed) }
         case let .needsPermission(reason):
             ModelInstaller.log("insert: blocked - accessibility not granted")
             // Bring the window up so the banner and its buttons are visible.

@@ -228,6 +228,12 @@ enum SelfTest {
                 to: dir.appendingPathComponent("\(theme.id)-dictation-result.png"),
                 text: "下週三上線，其他頁面之後再排。"
             )
+            // The same capsule after a send that ran the cleanup: 複製整理後 has
+            // to fit beside the delivered text.
+            window.snapshotOrganizedResult(
+                to: dir.appendingPathComponent("\(theme.id)-dictation-result-organized.png"),
+                text: "下週三上線，其他頁面之後再排。"
+            )
             // The step between the mic and the paste: the capsule has to stay,
             // and say what it is doing. This is also the shot that catches a
             // status line drawn through the microphone: the glyph is on screen and

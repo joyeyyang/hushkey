@@ -86,7 +86,17 @@ final class DictationWindow: NSObject {
     // The header and the transcript card that the capsule grew.
     private var titleLabel: NSTextField!
     private var statusPill: StatusPill!
-    private var copyButton: TextButton!
+    /// AI 整理: whether 貼上 runs the cleanup first.
+    ///
+    /// It replaced 複製 in this header (K). Copying a raw meeting transcript is
+    /// not what the card is for; the copy that matters is the text actually
+    /// delivered, and that one lives in the result capsule
+    /// (`copyRefinedButton`), where it names what it copies.
+    private var polishButton: TextButton!
+    /// 複製整理後: the delivered text, after the cleanup. Only shown in the
+    /// result capsule, and only for a send that ran one.
+    private var copyRefinedButton: TextButton!
+    private var refinedCopy: String?
     /// 貼上: the words on screen, into whatever field has the caret. Without it
     /// the only way out of this window was 複製, which cannot reach a field that
     /// does not accept a paste from the clipboard's owner.
@@ -261,19 +271,31 @@ final class DictationWindow: NSObject {
         // `CircleButton` is: this panel is normally not the key window while a
         // recording runs, and a stock `NSButton` spends the first click in a
         // non-key window waking the window instead of pressing itself. The stop
-        // button next to it has always worked on the first click, and 複製 is the
-        // control the transcript mostly exists for.
+        // button next to it has always worked on the first click.
         pasteButton = TextButton(title: "貼上")
         pasteButton.toolTip = "把這段文字貼到游標所在的輸入框"
         pasteButton.isEnabled = false
         pasteButton.onClick = { [weak self] in self?.onInsert?() }
         card.addSubview(pasteButton)
 
-        copyButton = TextButton(title: "複製")
-        copyButton.toolTip = "把目前看到的逐字稿放進剪貼簿"
-        copyButton.isEnabled = false
-        copyButton.onClick = { [weak self] in self?.copyTranscript() }
-        card.addSubview(copyButton)
+        // The switch that decides what 貼上 delivers. It is here rather than in
+        // Settings because the answer depends on what is on screen: a meeting
+        // transcript is worth cleaning once on the way out, a dictation is
+        // already clean. The state is stored, so the next session starts the way
+        // the last one was sent.
+        polishButton = TextButton(title: Self.polishTitle(polishOnSend))
+        polishButton.toolTip = "開啟後按「貼上」會先整理再送出；關閉則送出畫面上的原文"
+        polishButton.onClick = { [weak self] in self?.togglePolish() }
+        card.addSubview(polishButton)
+
+        // 複製整理後: the text that was actually delivered. It sits in the result
+        // capsule, not the header, because the header is where text is SENT from
+        // and this button is about what came out.
+        copyRefinedButton = TextButton(title: "複製整理後")
+        copyRefinedButton.toolTip = "把剛才送出的整理後文字放進剪貼簿"
+        copyRefinedButton.isHidden = true
+        copyRefinedButton.onClick = { [weak self] in self?.copyRefined() }
+        card.addSubview(copyRefinedButton)
 
         escapeHint = NSTextField(labelWithString: "Esc")
 escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
@@ -388,7 +410,8 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         titleLabel.textColor = Self.ink
         escapeHint.textColor = Self.inkSoft
         statusPill.applyTheme(theme)
-        copyButton.needsDisplay = true
+        polishButton.needsDisplay = true
+        copyRefinedButton.needsDisplay = true
         bodyCard.layer?.backgroundColor = theme.surface.cgColor
         bodyCard.layer?.borderColor = theme.border.cgColor
         textView.textColor = Self.ink
@@ -493,6 +516,18 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         applyMode(.result)
         statusLabel.stringValue = text
         statusLabel.isHidden = false
+        layoutContents()
+        render(to: url)
+    }
+
+    /// Offscreen render of the result capsule after a send that ran the cleanup:
+    /// the 複製整理後 button has to fit beside the delivered text without
+    /// pushing the ⋮⋮ grip or wrapping the line.
+    func snapshotOrganizedResult(to url: URL, text: String) {
+        applyMode(.result)
+        statusLabel.stringValue = text
+        statusLabel.isHidden = false
+        offerCopy(of: text)
         layoutContents()
         render(to: url)
     }
@@ -725,6 +760,17 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         stopButton.frame = NSRect(x: m + 344, y: bandMidY - 17, width: 34, height: 34)
         handleView.frame = NSRect(x: m + 404, y: bandMidY - 11, width: 14, height: 22)
 
+        // 複製整理後 lives in the result capsule: it appears only after a send
+        // that ran the cleanup, and only while the delivered text is on screen.
+        let showsRefinedCopy = mode == .result && refinedCopy != nil
+        copyRefinedButton.isHidden = !showsRefinedCopy
+        let refinedCopyWidth = max(copyRefinedButton.intrinsicContentSize.width, 72)
+        if showsRefinedCopy {
+            copyRefinedButton.frame = NSRect(x: shapeW - 74 - refinedCopyWidth,
+                                             y: bandMidY - 11,
+                                             width: refinedCopyWidth, height: 22)
+        }
+
         statusLabel.sizeToFit()
         // The strip after the mic is ONE slot of 170 pt, and the waveform owns it.
         // Anything else drawn there -- the live words, a notice, "已暫停" -- borrows
@@ -747,8 +793,9 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
             // first words) and the processing shape (after the mic closed). The
             // check glyph takes the same slot for a result, hence the same 56.
             let leftPad: CGFloat = (mode == .result || !micView.isHidden) ? 56 : 24
-            // Leave room for the ⋮⋮ grip on the right.
-            let rightPad: CGFloat = 74
+            // Leave room for the ⋮⋮ grip on the right, and for 複製整理後 when
+            // the result capsule is offering it.
+            let rightPad: CGFloat = showsRefinedCopy ? 74 + refinedCopyWidth + 8 : 74
             statusLabel.frame = NSRect(x: m + leftPad, y: bandMidY - statusLabel.frame.height / 2,
                                        width: shapeW - leftPad - rightPad, height: min(statusLabel.frame.height, Self.capsuleShape.height))
         }
@@ -769,7 +816,7 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         let hidden = !showsHeader
         titleLabel.isHidden = hidden
         statusPill.isHidden = hidden || !(mode == .recording || mode == .processing)
-        copyButton.isHidden = hidden
+        polishButton.isHidden = hidden
         pasteButton.isHidden = hidden
         escapeHint.isHidden = hidden
         bodyCard.isHidden = !showsBody
@@ -781,29 +828,28 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         let headerBottom = headerTop - Self.headerHeight
         let headerMidY = headerBottom + Self.headerHeight / 2
 
-        // Right to left: the hint, then 複製, then the pill, so a long session
-        // name gives way instead of pushing the controls off the edge.
+        // Right to left: the hint, then 貼上, then AI 整理, then the pill, so a
+        // long session name gives way instead of pushing the controls off the
+        // edge. 貼上 keeps its box whatever the switch says, because it is the
+        // button the user aims at.
         escapeHint.sizeToFit()
         escapeHint.frame.origin = NSPoint(x: bounds.width - m - 14 - escapeHint.frame.width,
                                           y: headerMidY - escapeHint.frame.height / 2)
-        // Wide enough for 已複製, which the button swaps to after a copy, so its
-        // frame never changes under the user's cursor.
-        let copySize = copyButton.intrinsicContentSize
-        let copyWidth = max(copySize.width, 56)
-        let copyHeight = max(copySize.height, 22)
-        copyButton.frame = NSRect(x: escapeHint.frame.minX - 12 - copyWidth,
-                                  y: headerMidY - copyHeight / 2,
-                                  width: copyWidth, height: copyHeight)
-        // 貼上 sits to its left, same box: the two verbs a finished transcript
-        // offers, and neither one should move when the other changes width.
         let pasteWidth = max(pasteButton.intrinsicContentSize.width, 56)
-        pasteButton.frame = NSRect(x: copyButton.frame.minX - 10 - pasteWidth,
-                                   y: headerMidY - copyHeight / 2,
-                                   width: pasteWidth, height: copyHeight)
+        let rowHeight = max(pasteButton.intrinsicContentSize.height, 22)
+        pasteButton.frame = NSRect(x: escapeHint.frame.minX - 12 - pasteWidth,
+                                   y: headerMidY - rowHeight / 2,
+                                   width: pasteWidth, height: rowHeight)
+        // The switch is wider than 貼上 and changes width with its state; the
+        // minimum keeps "AI 整理：關" from clipping.
+        let polishWidth = max(polishButton.intrinsicContentSize.width, 78)
+        polishButton.frame = NSRect(x: pasteButton.frame.minX - 10 - polishWidth,
+                                    y: headerMidY - rowHeight / 2,
+                                    width: polishWidth, height: rowHeight)
         // The pill's own constraints size its label to whatever is left inside
         // it, so the frame has to be the comfortable width or the state clips.
         let pillWidth = max(statusPill.fittingSize.width + 2, 56)
-        let pillX = pasteButton.frame.minX - 12 - pillWidth
+        let pillX = polishButton.frame.minX - 12 - pillWidth
         statusPill.frame = NSRect(x: pillX, y: headerMidY - 11, width: pillWidth, height: 22)
 
         let titleHeight = titleLabel.intrinsicContentSize.height
@@ -953,6 +999,9 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         dismissedByUser = false
         isPaused = false
         pauseButton.glyphKind = .pause
+        // The last send's 複製整理後 belongs to that session's result.
+        refinedCopy = nil
+        copyRefinedButton.isHidden = true
         clearTranscript()
         show(text: "", mode: .recording)
     }
@@ -1058,6 +1107,10 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         // in our own field, even if this panel was left key by a prior edit.
         panel.makeFirstResponder(nil)
         panel.orderOut(nil)
+        // The offered copy is about the send that just happened; closing the
+        // window ends that offer.
+        refinedCopy = nil
+        copyRefinedButton.isHidden = true
     }
 
     /// Current text in the editable field (the user may have edited it).
@@ -1242,10 +1295,9 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
     }
 
     /// The transcript is text the user may want elsewhere immediately; the button
-    /// only makes sense once there is something to copy.
+    /// only makes sense once there is something to send.
     private func refreshCopyAvailability() {
         let hasText = !textView.string.isEmpty
-        copyButton.isEnabled = hasText
         pasteButton.isEnabled = hasText
     }
 
@@ -1271,19 +1323,54 @@ escapeHint.toolTip = "按 Esc 只關閉這個視窗，錄音不會停止"
         append(all, showSpeaker: speaker)
     }
 
-    /// Copies what the card is showing. The main window's history tab can do this
-    /// too, but that means leaving the surface the user is watching.
-    private func copyTranscript() {
-        let text = textView.string
-        guard !text.isEmpty else { return }
+    /// Copies the text that was just delivered, when the send ran the cleanup.
+    ///
+    /// The transcript on the card is what was SAID; this is what was SENT, and
+    /// the two differ exactly when 貼上 refined on the way out. The button is in
+    /// the result capsule rather than the header because that is the only moment
+    /// the two texts are both known to differ.
+    private func copyRefined() {
+        guard let text = refinedCopy, !text.isEmpty else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-        let original = copyButton.title
-        copyButton.title = "已複製"
+        copyRefinedButton.title = "已複製"
+        // A click is a signal the user is reading: cancel the capsule's fade
+        // rather than race it.
+        hideWork?.cancel()
+        hideWork = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
-            self?.copyButton.title = original
+            self?.copyRefinedButton.title = "複製整理後"
         }
+    }
+
+    // MARK: 貼上 的整理開關
+
+    /// Whether 貼上 runs the cleanup first. Stored: it is a preference about how
+    /// the user wants to send, not a decision that dies with the window.
+    var polishOnSend: Bool {
+        UserDefaults.standard.object(forKey: Self.polishKey) as? Bool ?? true
+    }
+
+    private static let polishKey = "hud.polishOnSend"
+
+    private static func polishTitle(_ on: Bool) -> String {
+        on ? "AI 整理：開" : "AI 整理：關"
+    }
+
+    private func togglePolish() {
+        let next = !polishOnSend
+        UserDefaults.standard.set(next, forKey: Self.polishKey)
+        polishButton.title = Self.polishTitle(next)
+        // The title got wider or narrower, and this sheet lays out by frame.
+        layoutContents()
+    }
+
+    /// Offers the text that was delivered when it is not what the card shows.
+    func offerCopy(of text: String) {
+        refinedCopy = text
+        copyRefinedButton.title = "複製整理後"
+        layoutContents()
     }
 
     @objc private func scrolled() {
