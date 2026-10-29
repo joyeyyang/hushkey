@@ -152,6 +152,24 @@ final class PiPController: NSObject {
         lastRendered = nil
     }
 
+    /// Attempts to start PiP when the app backgrounds, if configured but not yet live.
+    /// Call this from the app's scenePhase handler on `.background`.
+    func startOnBackgroundIfNeeded() {
+        guard Self.isSupported else { return }
+        guard SharedStore.mode == .pip else { return }
+        guard let controller = pip else { return }
+        guard !controller.isPictureInPictureActive else { return }
+        // The controller was set up earlier (from RecorderTab), but PiP only
+        // becomes possible when the app backgrounds. Try to start it now.
+        if controller.isPictureInPicturePossible {
+            Diagnostics.log.notice("pip: starting on background")
+            controller.startPictureInPicture()
+            startRepaint()
+        } else {
+            Diagnostics.log.error("pip: still not possible on background")
+        }
+    }
+
     /// Repaints the window with whatever the recogniser has heard so far, so the
     /// small window is the live caption rather than a static picture.
     fileprivate func refreshCaption() {

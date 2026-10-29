@@ -83,6 +83,9 @@ struct RootView: View {
             // first. The next recording prewarms again (`DictationController`).
             if phase == .background {
                 Core.releaseModel()
+                // If PiP mode is selected, try to start the PiP window now.
+                // PiP only becomes possible when the app backgrounds.
+                PiPController.shared.startOnBackgroundIfNeeded()
                 return
             }
             // The other two. A keyboard cannot be trusted to reach a running app:
