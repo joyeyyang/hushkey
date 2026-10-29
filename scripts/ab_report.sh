@@ -4,7 +4,7 @@
 # The time files are `/usr/bin/time -l` output, which puts the wall clock on a
 # "N.NN real" line and the peak on a "N maximum resident set size" line.
 set -u
-cd "$(dirname "$0")/../core_engine/target/ab" || exit 1
+cd "$(dirname "$0")/../rust/core_engine/target/ab" || exit 1
 
 row() { # file tag
   awk -v tag="$2" '

@@ -10,17 +10,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SHERPA_IOS="core_engine/vendor/ios"
+SHERPA_IOS="rust/core_engine/vendor/ios"
 if [ ! -d "$SHERPA_IOS/build-ios-no-tts" ]; then
     echo "missing $SHERPA_IOS -- extract sherpa-onnx-v1.13.4-ios-no-tts.tar.bz2 there"
     exit 1
 fi
 
 for slice in sim device; do
-    mkdir -p "ios_app/vendor/$slice"
+    mkdir -p "ios/ios_app/vendor/$slice"
 done
-cp -f "$SHERPA_IOS/sim/lib/"*.a ios_app/vendor/sim/ 2>/dev/null || true
-cp -f "$SHERPA_IOS/device/lib/"*.a ios_app/vendor/device/ 2>/dev/null || true
+cp -f "$SHERPA_IOS/sim/lib/"*.a ios/ios_app/vendor/sim/ 2>/dev/null || true
+cp -f "$SHERPA_IOS/device/lib/"*.a ios/ios_app/vendor/device/ 2>/dev/null || true
 
 # IPHONEOS_DEPLOYMENT_TARGET is load-bearing, not decoration: clang bakes the
 # minimum OS into every object file it produces, and the app links at 17.0. Built
@@ -31,14 +31,14 @@ cp -f "$SHERPA_IOS/device/lib/"*.a ios_app/vendor/device/ 2>/dev/null || true
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
 
 SHERPA_ONNX_DIR="$PWD/$SHERPA_IOS/sim" \
-    cargo build --manifest-path core_engine/Cargo.toml --target aarch64-apple-ios-sim --release
+    cargo build --manifest-path rust/core_engine/Cargo.toml --target aarch64-apple-ios-sim --release
 SHERPA_ONNX_DIR="$PWD/$SHERPA_IOS/device" \
-    cargo build --manifest-path core_engine/Cargo.toml --target aarch64-apple-ios --release
+    cargo build --manifest-path rust/core_engine/Cargo.toml --target aarch64-apple-ios --release
 
-cp -f core_engine/target/aarch64-apple-ios-sim/release/liboffline_voice_core.a ios_app/vendor/sim/
-cp -f core_engine/target/aarch64-apple-ios/release/liboffline_voice_core.a ios_app/vendor/device/
+cp -f core_engine/target/aarch64-apple-ios-sim/release/liboffline_voice_core.a ios/ios_app/vendor/sim/
+cp -f core_engine/target/aarch64-apple-ios/release/liboffline_voice_core.a ios/ios_app/vendor/device/
 
-cd ios_app
+cd ios/ios_app
 xcodegen generate
 xcodebuild -project OfflineVoiceAssistant.xcodeproj -scheme OfflineVoiceAssistant \
     -sdk iphonesimulator -configuration Debug -derivedDataPath build \

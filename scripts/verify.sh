@@ -21,7 +21,7 @@ APP="$ROOT/dist/OfflineVoiceAssistant.app/Contents/MacOS/OfflineVoiceAssistant"
 FAILED=()
 
 export OVC_MODELS="${OVC_MODELS:-$ROOT/models}"
-export OVC_LLM_WORKER="${OVC_LLM_WORKER:-$ROOT/core_engine/target/release/ovc-llm-worker}"
+export OVC_LLM_WORKER="${OVC_LLM_WORKER:-$ROOT/rust/core_engine/target/release/ovc-llm-worker}"
 
 step() {
     printf '\n=== %s ===\n' "$1"
@@ -38,14 +38,14 @@ record() {
 }
 
 step "rust tests"
-( cd core_engine && \
+( cd rust/core_engine && \
   SHERPA_ONNX_DIR="$PWD/vendor/sherpa-onnx-v1.13.8-osx-arm64-shared" \
   DYLD_LIBRARY_PATH="$PWD/vendor/sherpa-onnx-v1.13.8-osx-arm64-shared/lib" \
   cargo test --release ) >/tmp/ovc-verify-rust.log 2>&1
 record "rust tests" $?
 
 step "swift tests"
-( cd macos_app && swift test ) >/tmp/ovc-verify-swift.log 2>&1
+( cd mac/macos_app && swift test ) >/tmp/ovc-verify-swift.log 2>&1
 record "swift tests" $?
 
 if [ ! -x "$APP" ]; then
@@ -54,7 +54,7 @@ if [ ! -x "$APP" ]; then
 fi
 
 step "cli self-test"
-./macos_app/.build/release/voiceinput --selftest >/tmp/ovc-verify-cli.log 2>&1
+./mac/macos_app/.build/release/voiceinput --selftest >/tmp/ovc-verify-cli.log 2>&1
 record "cli self-test" $?
 
 # The CLI's edit and summarise paths are the kit's, reached from the command
@@ -62,7 +62,7 @@ record "cli self-test" $?
 # checked the argument handling would pass with a broken pipeline.
 step "cli edit"
 printf '明天下午三點跟小林開會，討論第四季時程，地點還沒確定' \
-    | ./macos_app/.build/release/voiceinput --edit "把小林改成大衛" \
+    | ./mac/macos_app/.build/release/voiceinput --edit "把小林改成大衛" \
     >/tmp/ovc-verify-cli-edit.log 2>&1
 EDIT_STATUS=$?
 record "cli edit" $EDIT_STATUS
@@ -78,7 +78,7 @@ fi
 
 step "cli summarize"
 printf '明天下午三點跟小林開會討論第四季時程。小林說下週三之前會給客戶看初稿。我負責週五之前補上第二段的數字。' \
-    | ./macos_app/.build/release/voiceinput --summarize \
+    | ./mac/macos_app/.build/release/voiceinput --summarize \
     >/tmp/ovc-verify-cli-summary.log 2>&1
 SUMMARY_STATUS=$?
 record "cli summarize" $SUMMARY_STATUS
@@ -101,8 +101,8 @@ fi
 # answer is a numbered list, and the product's job is to find the named line
 # and put the draft's own shape back.
 step "voice edit probe (15 cases)"
-OVC_LLM_WORKER="$ROOT/core_engine/target/release/ovc-llm-worker" \
-    ./core_engine/target/release/examples/edit_batch tests/edit_expected.tsv \
+OVC_LLM_WORKER="$ROOT/rust/core_engine/target/release/ovc-llm-worker" \
+    ./rust/core_engine/target/release/examples/edit_batch tests/edit_expected.tsv \
     >/tmp/ovc-verify-edit-batch.log 2>&1
 EDIT_BATCH_STATUS=$?
 record "voice edit probe" $EDIT_BATCH_STATUS

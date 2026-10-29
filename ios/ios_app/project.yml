@@ -38,7 +38,7 @@ targets:
         INFOPLIST_FILE: Sources/App/Info.plist
         CODE_SIGN_ENTITLEMENTS: Sources/App/App.entitlements
         SWIFT_OBJC_BRIDGING_HEADER: Sources/App/Bridging.h
-        HEADER_SEARCH_PATHS: ["$(SRCROOT)/../core_engine/include"]
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/../../rust/core_engine/include"]
         OTHER_LDFLAGS:
           - "-loffline_voice_core"
           - "-lsherpa-onnx"
@@ -50,10 +50,10 @@ targets:
           - "CoreML"
         LIBRARY_SEARCH_PATHS[sdk=iphoneos*]:
           - "$(SRCROOT)/vendor/device"
-          - "$(SRCROOT)/../core_engine/vendor/ios/device/lib"
+          - "$(SRCROOT)/../../rust/core_engine/vendor/ios/device/lib"
         LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]:
           - "$(SRCROOT)/vendor/sim"
-          - "$(SRCROOT)/../core_engine/vendor/ios/sim/lib"
+          - "$(SRCROOT)/../../rust/core_engine/vendor/ios/sim/lib"
     dependencies:
       - target: DictationKeyboard
 

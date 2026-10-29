@@ -19,7 +19,7 @@ fn main() {
     let path = std::env::args().nth(1).expect("usage: edit_batch <cases-file>");
     let body = std::fs::read_to_string(&path).expect("read cases");
 
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../models");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models");
     let chosen = std::env::var("OVC_LLM_MODEL")
         .ok()
         .map(|v| v.trim().to_string())

@@ -6,7 +6,7 @@ measured on it. This records the re-measurement, including the parts that got
 worse.
 
 Everything below is a recorded run, not an impression. The harness lives in
-`core_engine/tests/transcripts/` (ten fixed transcripts: Chinese and English
+`rust/core_engine/tests/transcripts/` (ten fixed transcripts: Chinese and English
 meetings, an assignments-only meeting, a decisions-only meeting, a chat, two
 novel-style narrations) and runs through `scripts/ab_models.sh`.
 
@@ -124,8 +124,8 @@ SHERPA_ONNX_DIR="$PWD/vendor/sherpa-onnx-v1.13.8-osx-arm64-shared" \
 cd .. && SECTION=actions bash scripts/section_ab.sh
 ```
 
-`ab_models.sh` writes `core_engine/target/ab/<tag>_<case>.out` and `.time`;
-`section_ab.sh` writes `core_engine/target/section_ab/`. A prompt change that
+`ab_models.sh` writes `rust/core_engine/target/ab/<tag>_<case>.out` and `.time`;
+`section_ab.sh` writes `rust/core_engine/target/section_ab/`. A prompt change that
 touches one section only needs that section's run.
 
 ---
@@ -196,9 +196,9 @@ path, after its own cleanup:
 
 ```
 clang -O2 scripts/probe_transcribe.c -o /tmp/probe_transcribe \
-  -L core_engine/target/release -loffline_voice_core \
-  -Wl,-rpath,$PWD/core_engine/target/release
-DYLD_LIBRARY_PATH=core_engine/target/release /tmp/probe_transcribe \
+  -L rust/core_engine/target/release -loffline_voice_core \
+  -Wl,-rpath,$PWD/rust/core_engine/target/release
+DYLD_LIBRARY_PATH=rust/core_engine/target/release /tmp/probe_transcribe \
   <clip>.wav "$HOME/Library/Application Support/OfflineVoiceAssistant/models"
 ```
 

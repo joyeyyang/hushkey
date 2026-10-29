@@ -41,7 +41,7 @@ is keyed to it too, and the build scripts address the executable by path.
 ## Build
 
 Requires macOS 13+, Xcode 26, Rust, and the sherpa-onnx macOS arm64 shared library
-(extract `sherpa-onnx-v1.13.8-osx-arm64-shared.tar.bz2` into `core_engine/vendor/`).
+(extract `sherpa-onnx-v1.13.8-osx-arm64-shared.tar.bz2` into `rust/core_engine/vendor/`).
 
 ```sh
 scripts/download_models.sh   # optional for developers; the app downloads on first launch
@@ -60,11 +60,11 @@ scripts/package_dmg.sh       # dist/OfflineVoiceAssistant.dmg
 
 ## Layout
 
-- `core_engine/` Rust core, C header in `include/offline_voice_core.h`
-- `macos_app/` SwiftPM app (hotkey, HUD, capture, injection)
+- `rust/core_engine/` Rust core, C header in `include/offline_voice_core.h`
+- `mac/macos_app/` SwiftPM app (hotkey, HUD, capture, injection)
 - `models/manifest.json` model sources, sizes, SHA-256, licenses
 - `scripts/` download, verify, build, package
-- `platform_interfaces/` iOS/Android notes
+- `rust/platform_interfaces/` iOS/Android notes
 
 Privacy: audio and transcripts stay on this Mac. A recording-state indicator (red menu-bar glyph
 while capturing) is implemented; the data-deletion UI is **not implemented**.

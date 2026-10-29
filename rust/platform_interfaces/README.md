@@ -1,6 +1,6 @@
 # Mobile porting notes (design only, not implemented or tested)
 
-The core exposes a plain C ABI (`core_engine/include/offline_voice_core.h`), so iOS and Android can link the same Rust library.
+The core exposes a plain C ABI (`rust/core_engine/include/offline_voice_core.h`), so iOS and Android can link the same Rust library.
 
 ## iOS
 - Build `offline_voice_core` as a static lib for `aarch64-apple-ios`; link sherpa-onnx's iOS xcframework.

@@ -40,20 +40,20 @@ a2f2059 Improve cleanup quality and rebuild the HUD as a 文青 capsule
 
 ```
 $ git status --short
- M core_engine/src/lib.rs
- M core_engine/src/state.rs
- M macos_app/Resources/Info.plist
- M macos_app/Sources/COfflineVoiceCore/include/offline_voice_core.h
- M macos_app/Sources/OfflineVoiceAssistant/CoreBridge.swift
- M macos_app/Sources/OfflineVoiceAssistant/main.swift
-?? core_engine/src/segmentation.rs
-?? macos_app/Sources/OfflineVoiceAssistant/CalendarNaming.swift
-?? macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift
-?? macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift
-?? macos_app/Sources/OfflineVoiceAssistant/Naming.swift
-?? macos_app/Sources/OfflineVoiceAssistant/Theme.swift
-?? macos_app/Sources/OfflineVoiceAssistant/TranscriptExport.swift
-?? macos_app/Sources/OfflineVoiceAssistant/TranscriptModel.swift
+ M rust/core_engine/src/lib.rs
+ M rust/core_engine/src/state.rs
+ M mac/macos_app/Resources/Info.plist
+ M mac/macos_app/Sources/COfflineVoiceCore/include/offline_voice_core.h
+ M mac/macos_app/Sources/OfflineVoiceAssistant/CoreBridge.swift
+ M mac/macos_app/Sources/OfflineVoiceAssistant/main.swift
+?? rust/core_engine/src/segmentation.rs
+?? mac/macos_app/Sources/OfflineVoiceAssistant/CalendarNaming.swift
+?? mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift
+?? mac/macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift
+?? mac/macos_app/Sources/OfflineVoiceAssistant/Naming.swift
+?? mac/macos_app/Sources/OfflineVoiceAssistant/Theme.swift
+?? mac/macos_app/Sources/OfflineVoiceAssistant/TranscriptExport.swift
+?? mac/macos_app/Sources/OfflineVoiceAssistant/TranscriptModel.swift
 ?? scripts/ab_models.sh
 ?? scripts/ab_report.sh
 ```
@@ -62,26 +62,26 @@ $ git status --short
 
 ```
 $ git show --stat --format="" 1e846ed
- core_engine/examples/meeting_summary.rs  |  21 +
- core_engine/include/offline_voice_core.h |   8 +
- core_engine/src/bin/ovc-llm-worker.rs   |   1 +
- core_engine/src/lib.rs                   |  17 +-
- core_engine/src/llm.rs                   | 236 +++++++++++++-
- core_engine/src/state.rs                 | 663 ++++++++++++++++++++++++++++++-
+ rust/core_engine/examples/meeting_summary.rs  |  21 +
+ rust/core_engine/include/offline_voice_core.h |   8 +
+ rust/core_engine/src/bin/ovc-llm-worker.rs   |   1 +
+ rust/core_engine/src/lib.rs                   |  17 +-
+ rust/core_engine/src/llm.rs                   | 236 +++++++++++++-
+ rust/core_engine/src/state.rs                 | 663 ++++++++++++++++++++++++++++++-
 $ git show --stat --format="" 985e939
- macos_app/Resources/Info.plist                     |   2 +
+ mac/macos_app/Resources/Info.plist                     |   2 +
  .../COfflineVoiceCore/include/offline_voice_core.h |   4 +
  .../Sources/OfflineVoiceAssistant/CoreBridge.swift |  10 +
  .../Sources/OfflineVoiceAssistant/HUDWindow.swift  |  54 ++++-
  .../Sources/OfflineVoiceAssistant/History.swift    |  83 +++++++
  .../Sources/OfflineVoiceAssistant/MainWindow.swift | 217 ++++++++++++-
  .../OfflineVoiceAssistant/SystemAudioTap.swift     | 247 +++++++++++++++++++
- macos_app/Sources/OfflineVoiceAssistant/main.swift | 266 +++++++++++++++++++--
+ mac/macos_app/Sources/OfflineVoiceAssistant/main.swift | 266 +++++++++++++++++++--
 $ git show --stat --format="" 45a7f47
  scripts/package_dmg.sh | 33 +++++++++++++++++++++++++++++++++
 $ git show --stat --format="" 6ea26b9
- core_engine/src/llm.rs   | 73 +++++++++++++++++++++++++++++++++++++++
- core_engine/src/state.rs | 34 ++++++++++++++++---
+ rust/core_engine/src/llm.rs   | 73 +++++++++++++++++++++++++++++++++++++++
+ rust/core_engine/src/state.rs | 34 ++++++++++++++++---
  models/manifest.json     | 88 +++++++++++++++++++++++++++++++++++-----
 ```
 
@@ -89,13 +89,13 @@ $ git show --stat --format="" 6ea26b9
 
 ```
 $ for c in 1e846ed 985e939 45a7f47 6ea26b9; do git show --numstat --format="" $c | awk -v c=$c '$1!="-" && $1+0>500 {print c, $3, $1" lines"}'; done
-1e846ed core_engine/src/state.rs 659 lines
+1e846ed rust/core_engine/src/state.rs 659 lines
 ```
 
 1.4 `1e846ed` 訊息裡的「23 unit tests」是可成立的（指該 commit 之後整個 crate 的測試總數，不指「新增 23 個」）：
 
 ```
-$ for f in asr chunking llm state vad; do printf "%-10s %s\n" "$f.rs" "$(git show 1e846ed:core_engine/src/$f.rs | grep -c '#\[test\]')"; done
+$ for f in asr chunking llm state vad; do printf "%-10s %s\n" "$f.rs" "$(git show 1e846ed:rust/core_engine/src/$f.rs | grep -c '#\[test\]')"; done
 asr.rs     1
 chunking.rs 4
 llm.rs     0
@@ -110,12 +110,12 @@ TOTAL: 23
 $ git status --porcelain --ignored | head
 !! .DS_Store
 !! .freebuff/
-!! core_engine/target/
-!! core_engine/vendor/
+!! rust/core_engine/target/
+!! rust/core_engine/vendor/
 !! dist/
-!! macos_app/.DS_Store
-!! macos_app/.build/
-!! macos_app/Sources/.DS_Store
+!! mac/macos_app/.DS_Store
+!! mac/macos_app/.build/
+!! mac/macos_app/Sources/.DS_Store
 !! models/asr/
 !! models/llm/
 ```
@@ -166,7 +166,7 @@ dist/
 *.dmg
 .build/
 .DS_Store
-core_engine/vendor/
+rust/core_engine/vendor/
 models/asr/
 models/llm/
 models/rag/
@@ -234,7 +234,7 @@ OK       llm-qwen3.5-2b-q4-k-m
 exit=0
 ```
 
-3.3 `items()` 為什麼不會拋錯（`macos_app/Sources/OfflineVoiceAssistant/ModelInstaller.swift:84-95`）：
+3.3 `items()` 為什麼不會拋錯（`mac/macos_app/Sources/OfflineVoiceAssistant/ModelInstaller.swift:84-95`）：
 
 ```swift
 return try models.compactMap { m in
@@ -261,7 +261,7 @@ return try models.compactMap { m in
 
 ---
 
-### 4. `core_engine/src/state.rs`
+### 4. `rust/core_engine/src/state.rs`
 
 **結論：部分通過。** `load_asr()` 的 int8 優先與 `llm_model_path()` 的路徑穿越防護都正確；**但**穿越防護有破口（`.`），fallback 是靜默的，而且 `file_len` 的錯誤訊息有細節問題。
 
@@ -270,7 +270,7 @@ return try models.compactMap { m in
 4.1 確認我讀到的是 HEAD 的版本（worktree 已被 agent 改寫）：
 
 ```
-$ git show HEAD:core_engine/src/state.rs | grep -n -A 22 "^pub fn load_asr"
+$ git show HEAD:rust/core_engine/src/state.rs | grep -n -A 22 "^pub fn load_asr"
 62:pub fn load_asr() -> Result<()> {
 63-    let mut s = lock();
 64-    if s.asr.is_some() {
@@ -283,7 +283,7 @@ $ git show HEAD:core_engine/src/state.rs | grep -n -A 22 "^pub fn load_asr"
 78-    let bytes = file_len(&model)? + file_len(&tokens)?;
 ```
 
-`git diff HEAD -- core_engine/src/state.rs` 顯示 worktree 已被改成全新的 segmentation／speaker 分流架構（新增 `core_engine/src/segmentation.rs`、`asr_submit_tagged`），但 `load_asr()` 與 `llm_model_path()` 在 HEAD 與 worktree 兩邊相同（`git show HEAD:...` 的輸出與我先前讀到的一致）。
+`git diff HEAD -- rust/core_engine/src/state.rs` 顯示 worktree 已被改成全新的 segmentation／speaker 分流架構（新增 `rust/core_engine/src/segmentation.rs`、`asr_submit_tagged`），但 `load_asr()` 與 `llm_model_path()` 在 HEAD 與 worktree 兩邊相同（`git show HEAD:...` 的輸出與我先前讀到的一致）。
 
 4.2 `load_asr()`：int8 優先、fp32 回退 ✓，且**不存在**時的錯誤訊息可讀：
 
@@ -357,13 +357,13 @@ Ok(model)
 
 ---
 
-### 5. `core_engine/src/llm.rs`（thinking 關閉機制）
+### 5. `rust/core_engine/src/llm.rs`（thinking 關閉機制）
 
 **結論：不通過（核心宣稱失效）。** 三個子問題：`insert_think_block` 確實只插在**最後一個** assistant turn 之後 ✓；`template_uses_thinking` 確實讀 **GGUF metadata**（不是檔名）✓；`generate_in` 確實有呼叫 `with_thinking_disabled` ✓。**但偵測條件在真實的 Qwen3.5-2B 模板上恆為 false，於是這個機制對新的預設模型完全不會啟動**——也就是 commit 訊息所說的「prefilled with a closed empty think block」實際上沒有發生。
 
 **證據：**
 
-5.1 原始碼（`core_engine/src/llm.rs`）：
+5.1 原始碼（`rust/core_engine/src/llm.rs`）：
 
 ```rust
 const ASSISTANT_TURN: &str = "<|im_start|>assistant\n";
@@ -552,15 +552,15 @@ drwxr-xr-x@  3 joyyang  staff         96 10月 19 16:11 dist/OfflineVoiceAssista
 
 ```
 $ shasum -a 256 dist/OfflineVoiceAssistant.app/Contents/Frameworks/liboffline_voice_core.dylib \
-    core_engine/target/release/deps/liboffline_voice_core.dylib \
-    core_engine/target/release/liboffline_voice_core.dylib
+    rust/core_engine/target/release/deps/liboffline_voice_core.dylib \
+    rust/core_engine/target/release/liboffline_voice_core.dylib
 de88de319abc1c669a9c2bd5d5fd893d9c58283615606d2cc7eee97f6ef84191  dist/.../liboffline_voice_core.dylib
-0ada4d0e9984045e062e0bb691266a4dd9443d677f53df35ce86d5cc61e934b3  core_engine/target/release/deps/liboffline_voice_core.dylib
-5fb624868106a1342a98772414d72cab82e1b3e15f706351a00fc36cb055164e  core_engine/target/release/liboffline_voice_core.dylib
+0ada4d0e9984045e062e0bb691266a4dd9443d677f53df35ce86d5cc61e934b3  rust/core_engine/target/release/deps/liboffline_voice_core.dylib
+5fb624868106a1342a98772414d72cab82e1b3e15f706351a00fc36cb055164e  rust/core_engine/target/release/liboffline_voice_core.dylib
 
-$ shasum -a 256 dist/.../ovc-llm-worker core_engine/target/release/ovc-llm-worker
+$ shasum -a 256 dist/.../ovc-llm-worker rust/core_engine/target/release/ovc-llm-worker
 b5d2b1243398cdc3c2acf1aa3db5ed4ae6e09d721e7722b407d3f2b97088e58d  dist/.../ovc-llm-worker
-3fca076eb104dbcdcc07833adffd41bbe2027e0e73e73de9ff3bdfc726c85a57  core_engine/target/release/ovc-llm-worker
+3fca076eb104dbcdcc07833adffd41bbe2027e0e73e73de9ff3bdfc726c85a57  rust/core_engine/target/release/ovc-llm-worker
 ```
 
 也就是說：**目前 `dist/` 裡的 app 與 DMG 不含 `6ea26b9` 的 int8 ASR / Qwen3.5 / think-block 任何改動**（app bundle 是 10月19 16:11 的）。`scripts/build_macos.sh:31-32` 優先從 `target/release/deps/` 拷貝（該份是 10月20 00:44 的新產物），所以**重跑一次 build 即可修正**；`target/release/` 頂層那份 `.a/.rlib/.dylib` 反而是舊的（10月19 16:04），只有 fallback 會用到。
@@ -778,34 +778,34 @@ fn restates(line: &[String], clause: &[String]) -> bool {
 「model manager / OVC_LLM_MODEL 未交付」與「README 過時」與「沒有執行紀錄」的證據：
 
 ```
-$ grep -rn "OVC_LLM_MODEL|setenv|ModelCatalog|ModelDownloader" --include="*.swift" --include="*.rs" --include="*.sh" . | grep -v "^./core_engine/target"
-./macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:13:final class ModelDownloader: NSObject, URLSessionDownloadDelegate {
-./macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:238:            let digest = try ModelCatalog.sha256(of: partialURL)
-./macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:354:        guard ModelCatalog.relativePathIsSafe(entry.file) else {
-./macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:355:            throw ModelCatalog.CatalogError.unsafePath(entry.file)
-./macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:358:            throw ModelCatalog.CatalogError.selectedModel(entry.file)
-./macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:361:        let file = ModelCatalog.modelsDirectory().appendingPathComponent(entry.file)
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:33:    /// The bare filename, which is what the engine's `OVC_LLM_MODEL` accepts: it
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:79:enum ModelCatalog {
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:227:/// as `OVC_LLM_MODEL`. Only the filename travels, because the engine validates that and
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:231:    static let engineVariable = "OVC_LLM_MODEL"
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:255:           let entry = try? ModelCatalog.entry(forFile: stored),
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:259:        if let entry = try? ModelCatalog.defaultLLM(),
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:260:           ModelCatalog.isInstalled(entry: entry) {
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:276:            throw ModelCatalog.CatalogError.notSelectable(
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:279:        guard ModelCatalog.relativePathIsSafe(entry.file) else {
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:280:            throw ModelCatalog.CatalogError.unsafePath(entry.file)
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:283:                throw ModelCatalog.CatalogError.notSelectable(
-./macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:300:        setenv(engineVariable, currentFileName, 1)
+$ grep -rn "OVC_LLM_MODEL|setenv|ModelCatalog|ModelDownloader" --include="*.swift" --include="*.rs" --include="*.sh" . | grep -v "^./rust/core_engine/target"
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:13:final class ModelDownloader: NSObject, URLSessionDownloadDelegate {
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:238:            let digest = try ModelCatalog.sha256(of: partialURL)
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:354:        guard ModelCatalog.relativePathIsSafe(entry.file) else {
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:355:            throw ModelCatalog.CatalogError.unsafePath(entry.file)
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:358:            throw ModelCatalog.CatalogError.selectedModel(entry.file)
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:361:        let file = ModelCatalog.modelsDirectory().appendingPathComponent(entry.file)
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:33:    /// The bare filename, which is what the engine's `OVC_LLM_MODEL` accepts: it
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:79:enum ModelCatalog {
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:227:/// as `OVC_LLM_MODEL`. Only the filename travels, because the engine validates that and
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:231:    static let engineVariable = "OVC_LLM_MODEL"
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:255:           let entry = try? ModelCatalog.entry(forFile: stored),
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:259:        if let entry = try? ModelCatalog.defaultLLM(),
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:260:           ModelCatalog.isInstalled(entry: entry) {
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:276:            throw ModelCatalog.CatalogError.notSelectable(
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:279:        guard ModelCatalog.relativePathIsSafe(entry.file) else {
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:280:            throw ModelCatalog.CatalogError.unsafePath(entry.file)
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:283:                throw ModelCatalog.CatalogError.notSelectable(
+./mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:300:        setenv(engineVariable, currentFileName, 1)
 ```
 
 已提交的 tree 裡，`ModelCatalog.swift` / `ModelDownloader.swift` **根本不存在**（`git ls-files` 只列出 14 個 Swift 檔，不含這兩個），所以已提交版本裡設定 `OVC_LLM_MODEL` 的地方數量為 **0**。而工作區中新增（尚未提交）的 `ModelCatalog.swift:299` 定義了 `applyToProcessEnvironment()`（內含 `setenv`），**但沒有任何地方呼叫它**：
 
 ```
-$ grep -rn "applyToProcessEnvironment|LLMSelection" --include="*.swift" macos_app/
-macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:357:        guard !LLMSelection.isSelected(entry) else {
-macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:229:enum LLMSelection {
-macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:299:    static func applyToProcessEnvironment() -> Int32 {
+$ grep -rn "applyToProcessEnvironment|LLMSelection" --include="*.swift" mac/macos_app/
+mac/macos_app/Sources/OfflineVoiceAssistant/ModelDownloader.swift:357:        guard !LLMSelection.isSelected(entry) else {
+mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:229:enum LLMSelection {
+mac/macos_app/Sources/OfflineVoiceAssistant/ModelCatalog.swift:299:    static func applyToProcessEnvironment() -> Int32 {
 ```
 
 即使把這份未提交的工作算進去，引擎的 `OVC_LLM_MODEL` 也不會被設定 → 使用者在 model manager 選的模型**對引擎沒有任何作用**。
@@ -877,7 +877,7 @@ $ tail -6 ~/Library/Application\ Support/OfflineVoiceAssistant/ova.log
 
 17. **[低] `file_len()` 同時扮演「存在性探測」與「取長度」兩種角色**（`state.rs:273` / `:278` 只呼叫它來產生錯誤，長度值丟棄）。建議拆成 `require_file()` / `file_len()`，並在「找不到」時把「legacy 也找過」寫進訊息。
 
-18. **[低] `core_engine/target/release/` 頂層的 `.a`/`.rlib`/`.dylib` 停在 10月19 16:04**（`deps/` 裡的是 10月20 00:44 的新產物）。`build_macos.sh` 優先用 `deps/`，所以 app 沒事，但任何直接連結頂層 `.a` 的流程會拿到舊核心。建議清掉頂層副本或統一來源。
+18. **[低] `rust/core_engine/target/release/` 頂層的 `.a`/`.rlib`/`.dylib` 停在 10月19 16:04**（`deps/` 裡的是 10月20 00:44 的新產物）。`build_macos.sh` 優先用 `deps/`，所以 app 沒事，但任何直接連結頂層 `.a` 的流程會拿到舊核心。建議清掉頂層副本或統一來源。
 
 19. **[低] 工作區有 9 個未追蹤的新檔（含 `offline_voice_core.h` ABI 變更、`Info.plist` 變更、7 個新 Swift 檔、`segmentation.rs`、2 個腳本）。** 其中 `LLMSelection.applyToProcessEnvironment()` 沒有呼叫點（見第 6 項）。建議先把這批東西整理成一個可審查的 commit，再談下一輪。
 

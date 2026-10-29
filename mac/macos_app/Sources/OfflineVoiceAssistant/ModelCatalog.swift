@@ -231,7 +231,7 @@ enum ModelCatalog {
 
 /// The user's LLM choice: persisted under `settings.llmModel` and handed to the engine
 /// as `OVC_LLM_MODEL`. Only the filename travels, because the engine validates that and
-/// joins it onto `<models>/llm` itself (see `llm_model_path` in core_engine/src/state.rs).
+/// joins it onto `<models>/llm` itself (see `llm_model_path` in rust/core_engine/src/state.rs).
 enum LLMSelection {
     static let defaultsKey = "settings.llmModel"
     static let engineVariable = "OVC_LLM_MODEL"

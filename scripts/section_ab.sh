@@ -8,7 +8,7 @@
 #
 # Serial on purpose: 8 GB of RAM, and two llama workers at once land in swap.
 set -u
-cd "$(dirname "$0")/../core_engine" || exit 1
+cd "$(dirname "$0")/../rust/core_engine" || exit 1
 
 D="tests/transcripts"
 OUT="target/section_ab"

@@ -20,10 +20,14 @@ macOS 選單列語音輸入 App。按 Option+Space → 說話 → 逐字稿貼�
 
 Rust 核心 + Swift App。Swift 部分可以只用 SwiftPM 建置，不需要開 Xcode。
 
+頂層分成 `rust/`、`ios/`、`mac/` 三層，**葉目錄名不動**（`core_engine`、`ios_app`、
+`macos_app`）：建置腳本、XcodeGen、`Cargo.toml` 的路徑都還是原來那幾個名字，
+只是多一層分類；`models/`、`tests/`、`scripts/`、`docs/` 留在根目錄，兩端共用。
+
 ## 2. 目錄結構
 
 ```
-core_engine/            Rust 核心，純 C ABI
+rust/core_engine/            Rust 核心，純 C ABI
   src/lib.rs            ABI 進入點（extern "C"）
   src/state.rs          引擎狀態機：ASR 生命週期、LLM 呼叫、摘要分段
   src/llm.rs            llama.cpp 包裝：提示詞、生成、解析、語音編輯
@@ -31,11 +35,14 @@ core_engine/            Rust 核心，純 C ABI
   include/offline_voice_core.h    ← 這份是對外契約
   examples/             量測探針（asr_probe、edit_batch、section_probe、meeting_summary）
 
-macos_app/              SwiftPM
+mac/macos_app/              SwiftPM
   Sources/COfflineVoiceCore/include/  ← 同一份 header 的副本（必須同步）
   Sources/VoiceInputKit/   ★ 可重用函式庫：引擎、編輯、系統音訊、貼上
   Sources/OfflineVoiceAssistant/  App 本體（視窗、設定、模型管理）
   Sources/voiceinput/     CLI（voiceinput）
+
+ios/ios_app/                XcodeGen 專案（App ＋ 鍵盤擴充，共用 Shared/）
+rust/platform_interfaces/   移植筆記（設計，不是程式）
 
 models/manifest.json    模型來源、大小、SHA-256
 scripts/                build / verify / download / package / ax_check
@@ -65,8 +72,8 @@ mutex 上序列化。錯誤碼是 ABI 的一部分。
 
 `ASR_SubmitTagged` 的 `speaker` 參數：`1` = 系統音訊。
 
-**兩份 header 必須同步**：`core_engine/include/` 與
-`macos_app/Sources/COfflineVoiceCore/include/`。加符號要記得兩邊都加。
+**兩份 header 必須同步**：`rust/core_engine/include/` 與
+`mac/macos_app/Sources/COfflineVoiceCore/include/`。加符號要記得兩邊都加。
 
 ## 4. 三層架構與「誰負責什麼」
 
@@ -80,7 +87,7 @@ App 不再有自己的 `AudioCapture`／`SystemAudioTap`／`CoreBridge`——這
 App 走 Kit 的 `VoiceInputSession`。
 
 Kit 是這個專案的產品目標之一：「把整套語音輸入方式打包成函式，放在另外一個資料夾，
-之後可以再去調用。」`macos_app/Sources/VoiceInputKit/` 就是那個資料夾。CLI
+之後可以再去調用。」`mac/macos_app/Sources/VoiceInputKit/` 就是那個資料夾。CLI
 （`Sources/voiceinput`）是它的命令列入口。
 
 ## 5. 核心設計決定
@@ -156,7 +163,7 @@ Kit 的 `VoiceInputSession.Mode` 區分 `.dictation` / `.meeting`。
 
 ### 5.5 整理出來的東西要正式：提示詞的第一段
 
-`REFINE_SYSTEM`（`core_engine/src/llm.rs`）第一段講的是**語域**，不是規則：
+`REFINE_SYSTEM`（`rust/core_engine/src/llm.rs`）第一段講的是**語域**，不是規則：
 
 > 語氣要像寫給客戶或同事的信，不要像自言自語；不要「喔、啦、耶、欸、嘛」這類語氣詞，
 > 也不要「蠻、超、有點」這類隨性的說法，換成正式而具體的詞；句子要完整，
@@ -300,8 +307,8 @@ accessibility replacement
 
 建置必須序列：8 GB RAM，subagent 禁止執行 `cargo build` / `swift build`。
 
-建置需要 sherpa-onnx：`core_engine/vendor/sherpa-onnx-v1.13.8-osx-arm64-shared`
-（在 `core_engine/vendor/`，不是 repo 根的 `vendor/`）。
+建置需要 sherpa-onnx：`rust/core_engine/vendor/sherpa-onnx-v1.13.8-osx-arm64-shared`
+（在 `rust/core_engine/vendor/`，不是 repo 根的 `vendor/`）。
 
 ## 11. 還沒做的
 

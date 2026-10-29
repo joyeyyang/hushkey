@@ -81,7 +81,7 @@ enum Text {
     }
 
     /// Distinctive phrases from the refine instructions in
-    /// `core_engine/src/llm.rs` (`REFINE_SYSTEM`). If the answer repeats one of
+    /// `rust/core_engine/src/llm.rs` (`REFINE_SYSTEM`). If the answer repeats one of
     /// these and the user never said it, the model answered US instead of
     /// cleaning the draft.
     private static let instructionPhrases = [

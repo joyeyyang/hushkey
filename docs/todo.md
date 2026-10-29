@@ -125,7 +125,7 @@ OVC_SELFTEST_IMPORT=<clip>.wav dist/OfflineVoiceAssistant.app/Contents/MacOS/Off
 
 ## 6.5 AI 整理的三個缺陷（2026-10-25）
 
-使用者回報三件事，都在整理階段（`core_engine/src/llm.rs`）：
+使用者回報三件事，都在整理階段（`rust/core_engine/src/llm.rs`）：
 
 1. **口頭指令沒被執行。** 講「把前面那句刪掉」「第二點不要」，結果裡那句還在。
 2. **語言被翻走又沒翻回。** 中文問句裡夾了英文產品名，整段變成英文。
@@ -175,7 +175,7 @@ sha256 `edc6015cb15694c27be7d1d33f1bc015db9a358ff51ed524628c027504907ba9`。
 上游 GGUF 少了 Sentence-Transformers 的 dense module，對本用途沒差：詞與逐字稿都用
 同一顆模型算，排名自洽。
 
-### 實測（`core_engine/examples/embed_probe.rs`，全部是真實繁中句子）
+### 實測（`rust/core_engine/examples/embed_probe.rs`，全部是真實繁中句子）
 **詞彙檢索——排序可靠，門檻不可靠。** 草稿「明天下午三點要跟小林開會，討論隼的第四季
 時程，Figma 的稿子我會先更新」：該抓到的 0.402–0.465（小林／隼／第四季／Figma），
 不該抓到的 0.260–0.479（`小林設計` 0.479 甚至比 `小林` 0.465 高，因為它真的共用「小林」）。
@@ -194,10 +194,10 @@ sha256 `edc6015cb15694c27be7d1d33f1bc015db9a358ff51ed524628c027504907ba9`。
 餵給模型，它會認不出來並把指令留成內容；只有完整的短句才引用給模型。
 
 ### 架構
-- `core_engine/src/embed.rs`：載入、Mean pooling 向量、L2 正規化、詞向量磁碟快取
+- `rust/core_engine/src/embed.rs`：載入、Mean pooling 向量、L2 正規化、詞向量磁碟快取
   （`models/.cache/term-vectors.tsv`，含範例向量，以 model 檔名＋維度驗證；範例用
   `\u{1}` 命名空間與詞彙分開，因為兩者前綴不同）、關鍵字排序、指令篩選、視窗切句。
-- `core_engine/src/state.rs`：`screened_hint()` 在整理前把提示詞換成「這次真的講到的詞」，
+- `rust/core_engine/src/state.rs`：`screened_hint()` 在整理前把提示詞換成「這次真的講到的詞」，
   並附上「使用者的修改要求（原話）」；`warm_retrieval()` 供主程式先算好向量。
 - C ABI：`LLM_RelevantTerms`／`LLM_EditClauses`／`LLM_WarmRetrieval`（沒有模型時回空字串，
   不是錯誤）。`OVC_EMBED_DISABLE=1` 可停用，`OVC_EMBED_MODEL` 可換檔名。
@@ -219,7 +219,7 @@ sha256 `edc6015cb15694c27be7d1d33f1bc015db9a358ff51ed524628c027504907ba9`。
 - `voiceinput --warm` 可在安裝後／啟動時先把向量算好，避開第一次的延遲。
 
 ### 語音輸入打包成可呼叫模組（使用者要求「放在另外一個資料夾」）
-`macos_app/Sources/VoiceInputKit/`：獨立 target，含 `VoiceInputConfig`、
+`mac/macos_app/Sources/VoiceInputKit/`：獨立 target，含 `VoiceInputConfig`、
 `VoiceInputEngine`（`prepare`／`transcribe(fileAt:)`／`makeSession`／`warmRetrievalCache`）、
 `VoiceInputSession`（即時錄音）、`relevantTerms(for:in:)`、`editInstructions(in:config:)`、
 `CursorInserter`（貼到游標）。另有命令列工具 `voiceinput`：
@@ -244,7 +244,7 @@ tap、macOS 14.2+、與麥克風分開的權限），`VoiceInputConfig.captureSy
 
 使用者實測後判定**輸出不可用**，要求刪掉。已完整移除，不是關掉：
 
-- `core_engine/src/embed.rs`、`examples/embed_probe.rs` 刪除；`lib.rs`／`state.rs`／
+- `rust/core_engine/src/embed.rs`、`examples/embed_probe.rs` 刪除；`lib.rs`／`state.rs`／
   `llm.rs`／`bin/ovc-llm-worker.rs` 退回加入檢索之前的狀態（`git checkout e67bf1f^`），
   只保留 `OVC_LLM_WORKER`（讓命令列工具找得到 worker）。
 - C ABI `LLM_RelevantTerms`／`LLM_EditClauses`／`LLM_WarmRetrieval` 與兩份 header 的宣告移除。
@@ -354,7 +354,7 @@ worker 新任務 `edit`：core 自己編號（多行或多句），提示詞要�
 內容式指令（「把地點改成三樓會議室」），發現真正的問題不在解析，而在
 **模型選錯行**。
 
-用 `core_engine/examples/edit_batch.rs`（一次載入模型、跑一組案例）量測，
+用 `rust/core_engine/examples/edit_batch.rs`（一次載入模型、跑一組案例）量測，
 三行草稿「明天下午三點跟小林開會，討論第四季時程，地點還沒確定」：
 
 | 指令 | 整份草稿提示詞的結果 |
@@ -447,7 +447,7 @@ worker 新任務 `edit`：core 自己編號（多行或多句），提示詞要�
 
 閘門放寬後，三句日常話確實被誤判成編輯（量到的），加框架規則後全部回到
 no，而 11 個真的編輯指令全部 yes。閘門的樣本現在是**測試**
-（`macos_app/Tests/VoiceInputKitTests/VoiceEditInstructionTests.swift`），
+（`mac/macos_app/Tests/VoiceInputKitTests/VoiceEditInstructionTests.swift`），
 不再只是註解裡列的樣本。
 
 ### 8.4.4 「改短」不是「改成」（2026-10-25 晚間）
@@ -482,7 +482,7 @@ delete the second one   明天下午三點跟小林開會，地點還沒確定
 
 ### 8.4.4.1 編輯探針量的是模型，不是產品（2026-10-26）
 
-清點「語音編輯」的驗證時，發現 `core_engine/examples/edit_batch.rs` 有問題：
+清點「語音編輯」的驗證時，發現 `rust/core_engine/examples/edit_batch.rs` 有問題：
 它直接呼叫 `llm::generate(&llm::edit_prompt(...))`，量的是**模型原始回覆**。
 
 但模型的回覆是**編號清單**：

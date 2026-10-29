@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-SHERPA_DIR="${SHERPA_ONNX_DIR:-$ROOT/core_engine/vendor/sherpa-onnx-v1.13.8-osx-arm64-shared}"
+SHERPA_DIR="${SHERPA_ONNX_DIR:-$ROOT/rust/core_engine/vendor/sherpa-onnx-v1.13.8-osx-arm64-shared}"
 APP="$ROOT/dist/OfflineVoiceAssistant.app"
 
 need() { command -v "$1" >/dev/null || { echo "missing dependency: $1" >&2; exit 1; }; }
@@ -14,29 +14,29 @@ need cargo; need swift; need codesign; need install_name_tool
 [[ -d "$SHERPA_DIR/lib" ]] || { echo "sherpa-onnx not found at $SHERPA_DIR (see README)" >&2; exit 1; }
 
 echo "== core engine (release)"
-(cd "$ROOT/core_engine" && SHERPA_ONNX_DIR="$SHERPA_DIR" cargo build --release)
+(cd "$ROOT/rust/core_engine" && SHERPA_ONNX_DIR="$SHERPA_DIR" cargo build --release)
 
 # The edit probe is a verification tool, but it has to be built here or
 # scripts/verify.sh would run a stale one.
-(cd "$ROOT/core_engine" && SHERPA_ONNX_DIR="$SHERPA_DIR" cargo build --release --example edit_batch)
+(cd "$ROOT/rust/core_engine" && SHERPA_ONNX_DIR="$SHERPA_DIR" cargo build --release --example edit_batch)
 
 echo "== core tests"
-(cd "$ROOT/core_engine" && SHERPA_ONNX_DIR="$SHERPA_DIR" DYLD_LIBRARY_PATH="$SHERPA_DIR/lib" cargo test --release)
+(cd "$ROOT/rust/core_engine" && SHERPA_ONNX_DIR="$SHERPA_DIR" DYLD_LIBRARY_PATH="$SHERPA_DIR/lib" cargo test --release)
 
 echo "== swift app (release)"
-(cd "$ROOT/macos_app" && swift build -c release)
+(cd "$ROOT/mac/macos_app" && swift build -c release)
 
 echo "== assemble .app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
-cp "$ROOT/macos_app/.build/release/OfflineVoiceAssistant" "$APP/Contents/MacOS/"
-cp "$ROOT/macos_app/Resources/Info.plist" "$APP/Contents/"
+cp "$ROOT/mac/macos_app/.build/release/OfflineVoiceAssistant" "$APP/Contents/MacOS/"
+cp "$ROOT/mac/macos_app/Resources/Info.plist" "$APP/Contents/"
 cp "$ROOT/models/manifest.json" "$APP/Contents/Resources/models-manifest.json"
-cp "$ROOT/core_engine/target/release/deps/liboffline_voice_core.dylib" "$APP/Contents/Frameworks/" 2>/dev/null \
-  || cp "$ROOT/core_engine/target/release/liboffline_voice_core.dylib" "$APP/Contents/Frameworks/"
+cp "$ROOT/rust/core_engine/target/release/deps/liboffline_voice_core.dylib" "$APP/Contents/Frameworks/" 2>/dev/null \
+  || cp "$ROOT/rust/core_engine/target/release/liboffline_voice_core.dylib" "$APP/Contents/Frameworks/"
 cp "$SHERPA_DIR"/lib/libsherpa-onnx-c-api.dylib "$SHERPA_DIR"/lib/libonnxruntime*.dylib "$APP/Contents/Frameworks/"
 # LLM worker runs out of process; the core looks for it in Contents/Frameworks (see state.rs).
-WORKER="$ROOT/core_engine/target/release/ovc-llm-worker"
+WORKER="$ROOT/rust/core_engine/target/release/ovc-llm-worker"
 [[ -x "$WORKER" ]] || { echo "missing LLM worker at $WORKER (cargo build --release must produce it)" >&2; exit 1; }
 cp "$WORKER" "$APP/Contents/Frameworks/ovc-llm-worker"
 
@@ -72,12 +72,12 @@ fi
 if [ -n "$SIGN_ID" ] && [ "$SIGN_ID" != "-" ]; then
   echo "== codesign with identity: $SIGN_ID"
   codesign --force --deep --sign "$SIGN_ID" \
-    --entitlements "$ROOT/macos_app/Resources/OfflineVoiceAssistant.entitlements" "$APP"
+    --entitlements "$ROOT/mac/macos_app/Resources/OfflineVoiceAssistant.entitlements" "$APP"
 else
   echo "== codesign (ad-hoc: no signing identity found, so the Accessibility"
   echo "   grant will have to be re-enabled after every rebuild)"
   codesign --force --deep --sign - \
-    --entitlements "$ROOT/macos_app/Resources/OfflineVoiceAssistant.entitlements" "$APP"
+    --entitlements "$ROOT/mac/macos_app/Resources/OfflineVoiceAssistant.entitlements" "$APP"
 fi
 codesign --verify --deep --strict "$APP" && echo "codesign verify: ok"
 # LaunchServices caches the bundle it first saw at a given path. When the binary

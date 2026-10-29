@@ -19,7 +19,7 @@ let package = Package(
             path: "Sources/OfflineVoiceAssistant",
             linkerSettings: [
                 .unsafeFlags([
-                    "-L\(Context.packageDirectory)/../core_engine/target/release",
+                    "-L\(Context.packageDirectory)/../../rust/core_engine/target/release",
                     "-loffline_voice_core",
                 ]),
             ]
@@ -30,7 +30,7 @@ let package = Package(
             path: "Sources/VoiceInputKit",
             linkerSettings: [
                 .unsafeFlags([
-                    "-L\(Context.packageDirectory)/../core_engine/target/release",
+                    "-L\(Context.packageDirectory)/../../rust/core_engine/target/release",
                     "-loffline_voice_core",
                 ]),
             ]
@@ -41,7 +41,7 @@ let package = Package(
             path: "Sources/voiceinput",
             linkerSettings: [
                 .unsafeFlags([
-                    "-L\(Context.packageDirectory)/../core_engine/target/release",
+                    "-L\(Context.packageDirectory)/../../rust/core_engine/target/release",
                     "-loffline_voice_core",
                 ]),
             ]

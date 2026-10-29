@@ -42,7 +42,7 @@ import wave
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CLI = ROOT / "macos_app/.build/release/voiceinput"
+CLI = ROOT / "mac/macos_app/.build/release/voiceinput"
 MODELS = ROOT / "models"
 WORK = Path("/tmp/ovc-bench")
 

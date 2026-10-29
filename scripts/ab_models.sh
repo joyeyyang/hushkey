@@ -4,7 +4,7 @@
 # Serial on purpose: the machine has 8 GB of RAM, and two workers at once land in
 # swap and produce empty output that looks like a model failure.
 set -u
-cd "$(dirname "$0")/../core_engine" || exit 1
+cd "$(dirname "$0")/../rust/core_engine" || exit 1
 # The transcripts live in the repo, not a temp directory: the first run of this
 # script read them from /tmp and macOS deleted them, which silently turned every
 # case into "cat: No such file" and a FAILED line.

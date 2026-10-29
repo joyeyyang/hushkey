@@ -696,17 +696,17 @@ report、日誌停在 `llm model:` 那一行，連補辨識都還沒開始。所
 
 ```bash
 # 核心測試（降級、整理、摘要在內）
-cargo test --manifest-path core_engine/Cargo.toml
+cargo test --manifest-path rust/core_engine/Cargo.toml
 
 # 模擬器 slice
-SHERPA_ONNX_DIR="$PWD/core_engine/vendor/ios/sim" \
-  cargo build --manifest-path core_engine/Cargo.toml --target aarch64-apple-ios-sim --release
-cp -f core_engine/target/aarch64-apple-ios-sim/release/liboffline_voice_core.a ios_app/vendor/sim/
+SHERPA_ONNX_DIR="$PWD/rust/core_engine/vendor/ios/sim" \
+  cargo build --manifest-path rust/core_engine/Cargo.toml --target aarch64-apple-ios-sim --release
+cp -f rust/core_engine/target/aarch64-apple-ios-sim/release/liboffline_voice_core.a ios/ios_app/vendor/sim/
 
 # 真機 slice
-SHERPA_ONNX_DIR="$PWD/core_engine/vendor/ios/device" \
-  cargo build --manifest-path core_engine/Cargo.toml --target aarch64-apple-ios --release
-cp -f core_engine/target/aarch64-apple-ios/release/liboffline_voice_core.a ios_app/vendor/device/
+SHERPA_ONNX_DIR="$PWD/rust/core_engine/vendor/ios/device" \
+  cargo build --manifest-path rust/core_engine/Cargo.toml --target aarch64-apple-ios --release
+cp -f rust/core_engine/target/aarch64-apple-ios/release/liboffline_voice_core.a ios/ios_app/vendor/device/
 
 # App
 cd ios_app && xcodegen generate
@@ -1051,7 +1051,7 @@ A3 的競爭則用「orphan spool ＋ fresh request」一起驗：啟動後 log 
 
 | 檢查 | 真實結果 |
 |---|---|
-| `cargo test --manifest-path core_engine/Cargo.toml` | `88 passed; 0 failed`；另有 `ffi_lifecycle_and_error_paths` 1/1 通過 |
+| `cargo test --manifest-path rust/core_engine/Cargo.toml` | `88 passed; 0 failed`；另有 `ffi_lifecycle_and_error_paths` 1/1 通過 |
 | iOS simulator Debug build | `** BUILD SUCCEEDED **` |
 | iOS generic device Debug build | `** BUILD SUCCEEDED **`（簽署 team `7S48J3H2N2`） |
 | StuckProbe 故障注入 | 修前永久卡住；修後 `leftTranscribing=true`、按鈕可按、press 被接受 |
@@ -1085,7 +1085,7 @@ A3 的競爭則用「orphan spool ＋ fresh request」一起驗：啟動後 log 
 
 ### I.2 提示詞與原文在核心裡是兩塊，不是串在一起
 
-`core_engine/src/llm.rs::edit_prompt` 的形狀是：
+`rust/core_engine/src/llm.rs::edit_prompt` 的形狀是：
 
 ```text
 <EDIT_SYSTEM>…使用者的訊息裡，第一行是指令，空一行之後才是要改的文字。
@@ -1115,7 +1115,7 @@ UI 的行數預覽（`PromptEditRegion.lines` / `PromptEdit.lines`）刻意照�
 `numbered_items` 的規則（去空行、去項目符號、去既有編號），所以「第 3 行」在畫面上
 和核心眼裡是同一行；macOS 有 7 個單元測試釘住這件事。
 
-### I.4 真實輸出對照（`voiceinput --edit`，worker `core_engine/target/release/ovc-llm-worker`）
+### I.4 真實輸出對照（`voiceinput --edit`，worker `rust/core_engine/target/release/ovc-llm-worker`）
 
 原文（3 行）：
 
@@ -1198,7 +1198,7 @@ voiceinput: could not apply the edit (no usable result)
 
 | 檢查 | 真實結果 |
 |---|---|
-| `cargo test --manifest-path core_engine/Cargo.toml --lib` | `90 passed; 0 failed`（含新增 2 個 edit 測試） |
+| `cargo test --manifest-path rust/core_engine/Cargo.toml --lib` | `90 passed; 0 failed`（含新增 2 個 edit 測試） |
 | `swift test`（macOS） | `Executed 17 tests, with 0 failures`（含新增 `PromptEditRegionTests` 7 個） |
 | iOS simulator Debug build | `** BUILD SUCCEEDED **` |
 | iOS 畫面 | `docs/evidence/ios-prompt-edit.png`：修改提示詞輸入框、執行修改鈕、整段／選取範圍／第 1 行 |
