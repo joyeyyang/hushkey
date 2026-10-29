@@ -63,8 +63,10 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .onAppear(perform: prepare)
         .onOpenURL { url in
-            // The keyboard's microphone button, one of the three ways it arrives.
+            // The keyboard's two buttons, each with the same three ways of
+            // arriving: the URL, the group's pending request, a notification.
             if url.host == "record" { handleRecordRequest(channel: "url") }
+            if url.host == "edit" { KeyboardEdit.handlePending(channel: "url") }
         }
         .onChange(of: scenePhase) { _, phase in
             // The other two. A keyboard cannot be trusted to reach a running app:
@@ -75,6 +77,11 @@ struct RootView: View {
             // at it, whichever way they got here.
             guard phase == .active else { return }
             handleRecordRequest(channel: "active")
+            // Same three channels for the keyboard's 修改的提示詞 panel. It needs
+            // this one for the same reason: iOS declines `extensionContext.open`
+            // while the containing app is resident, so the request is written
+            // down and picked up here instead.
+            KeyboardEdit.handlePending(channel: "active", freshOnly: true)
         }
     }
 
@@ -143,6 +150,12 @@ struct RootView: View {
         // recomputed from what is actually on disk.
         SharedStore.prepareModelDirs()
         modelsReady = SharedStore.hasModels
+        // Registered before the model check: a keyboard edit with no model
+        // installed still deserves an answer ("App 裡還沒有可用的模型"), and a
+        // request that is silently dropped looks exactly like an app that is not
+        // running -- which is the message the panel would then show.
+        SharedStore.observeEditRequest { KeyboardEdit.handlePending(channel: "notification") }
+        KeyboardEdit.handlePending(channel: "launch", freshOnly: true)
         guard modelsReady else { return }
         // The keyboard's microphone, third channel. Registered in BOTH modes: the
         // handler is the same request the URL carries, and in Mode 1 the URL often

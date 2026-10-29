@@ -68,6 +68,19 @@ enum Diagnostics {
         path(after: "-OVC_REFINE_TEXT")
     }
 
+    /// `-OVC_KB_EDIT_PROBE <instruction>`: the keyboard's 修改的提示詞 request,
+    /// written from inside the app so the whole round trip can be run from a
+    /// script.
+    ///
+    /// The keyboard cannot be tapped from the command line, and the part worth
+    /// checking is not the tap -- it is the request crossing to the app, being
+    /// acknowledged, and coming back with the core's answer. This posts the same
+    /// request through `SharedStore`, which is the only line the keyboard uses,
+    /// and writes the outcome to `Documents/keyboard-edit.json`.
+    static var keyboardEditInstruction: String? {
+        path(after: "-OVC_KB_EDIT_PROBE")
+    }
+
     /// `-OVC_PAUSE_PROBE`: start a dictation and pause/resume it over the App
     /// Group, exactly as the keyboard's buttons do.
     ///

@@ -21,6 +21,12 @@ final class KeyboardViewController: UIInputViewController {
     private var refreshTimer: Timer?
     /// The last text this keyboard saw, so ⧉ still works after it was inserted.
     private var lastText = ""
+    /// The sequence of the 修改的提示詞 this keyboard is waiting for.
+    ///
+    /// Only one at a time: the panel has one 套用 button and the app runs one
+    /// generation on one queue, so a second request would queue behind the first
+    /// and the user would be looking at an answer to the older one.
+    private var editSeq: Int?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -75,18 +81,24 @@ final class KeyboardViewController: UIInputViewController {
 
         if let ready = session.text, !ready.isEmpty { lastText = ready }
 
-        bar.apply(
-            phase: session.phase,
-            text: text,
-            needsSwitch: !(SharedStore.mode == .pip && SharedStore.pipAlive),
-            paused: SharedStore.isPaused
-        )
+        // The panel's status line is the one the user is acting on, so a phase
+        // update must not paint over "修改中…" or "請先開啟 Hushkey 一次".
+        if editSeq == nil {
+            bar.apply(
+                phase: session.phase,
+                text: text,
+                needsSwitch: !(SharedStore.mode == .pip && SharedStore.pipAlive),
+                paused: SharedStore.isPaused
+            )
+        }
 
         if SharedStore.sharedContainer == nil {
             bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
             return
         }
         insertPending()
+        checkEditResult()
+        applyPendingEditResult()
     }
 
     /// Types the app's result exactly once, at the cursor.
@@ -99,6 +111,17 @@ final class KeyboardViewController: UIInputViewController {
     private func insertPending() {
         guard view.window != nil else { return }
         guard let pending = SharedStore.pending() else { return }
+        // 用說的: this dictation is the 修改的提示詞, not text for the cursor. It
+        // goes into the panel, where the user can fix it before 套用.
+        if SharedStore.instructionDictation {
+            SharedStore.instructionDictation = false
+            SharedStore.markConsumed(pending.seq)
+            let draft = SharedStore.instructionDictationDraft
+            SharedStore.instructionDictationDraft = ""
+            if !draft.isEmpty { lastText = draft }
+            bar.showEditPanel(prefill: pending.text)
+            return
+        }
         textDocumentProxy.insertText(pending.text)
         SharedStore.markConsumed(pending.seq)
         lastText = pending.text
@@ -114,6 +137,10 @@ final class KeyboardViewController: UIInputViewController {
         bar.onMic = { [weak self] in self?.openRecorder() }
         bar.onPause = { [weak self] in self?.togglePause() }
         bar.onNext = { [weak self] in self?.advanceToNextInputMode() }
+        bar.onEdit = { [weak self] in self?.toggleEditPanel() }
+        bar.onVoiceInstruction = { [weak self] in self?.speakInstruction() }
+        bar.onEditApply = { [weak self] instruction in self?.applyEdit(instruction) }
+        bar.onOpenApp = { [weak self] in self?.openAppForEdit() }
         bar.onCopy = { [weak self] in
             guard let self, !self.lastText.isEmpty else { return }
             UIPasteboard.general.string = self.lastText
@@ -131,6 +158,151 @@ final class KeyboardViewController: UIInputViewController {
             bar.topAnchor.constraint(equalTo: view.topAnchor),
             bar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+    }
+
+    // MARK: 修改的提示詞
+
+    private func toggleEditPanel() {
+        if bar.isEditing {
+            bar.hideEditPanel()
+            return
+        }
+        guard SharedStore.sharedContainer != nil else {
+            bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
+            return
+        }
+        guard !lastText.isEmpty else {
+            bar.showNotice("先插入一段文字，再修改它。")
+            return
+        }
+        guard SharedStore.current().phase != .recording else {
+            bar.showNotice("錄音中不能修改，先停下來。")
+            return
+        }
+        bar.showEditPanel()
+    }
+
+    /// 用說的: the instruction is dictated like any other sentence, but its
+    /// result goes into the panel instead of the cursor.
+    ///
+    /// It exists because a keyboard extension cannot present a system keyboard --
+    /// so on a phone there is no way to TYPE into the panel's field. Speaking the
+    /// instruction is the route that works there; the field stays for a hardware
+    /// keyboard, and for fixing a word the recogniser got wrong.
+    private func speakInstruction() {
+        guard SharedStore.sharedContainer != nil else {
+            bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
+            return
+        }
+        SharedStore.instructionDictationDraft = lastText
+        SharedStore.instructionDictation = true
+        SharedStore.requestRecording()
+        if SharedStore.mode == .pip, SharedStore.pipAlive {
+            bar.showWorking("說出要怎麼改…")
+            return
+        }
+        openApp()
+    }
+
+    /// 套用: one request to the app, then wait for its acknowledgement and its
+    /// answer.
+    ///
+    /// The two waits are separate because they mean different things. No
+    /// acknowledgement within a beat means the app is not running -- a 20-second
+    /// edit is not evidence of that, so a single timeout would either give up on
+    /// a working edit or tell the user to open an app that is already open.
+    private func applyEdit(_ instruction: String) {
+        let draft = lastText
+        guard !draft.isEmpty else {
+            bar.showNotice("先插入一段文字，再修改它。")
+            return
+        }
+        guard editSeq == nil else {
+            bar.showWorking("還在改上一次的，請等一下。")
+            return
+        }
+        let seq = SharedStore.requestEdit(draft: draft, instruction: instruction)
+        editSeq = seq
+        bar.showWorking("修改中…")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, self.editSeq == seq else { return }
+            guard SharedStore.editAckedSeq < seq else { return }
+            self.bar.showAppNeeded()
+        }
+        // The same bound the app's own panel uses. A phone loads the model per
+        // call, so this is generous on purpose: giving up on a working edit and
+        // leaving the text unchanged is worse than a long wait the user can see.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak self] in
+            guard let self, self.editSeq == seq else { return }
+            self.editSeq = nil
+            self.bar.showNotice("修改沒有回應，原文沒有變動。")
+        }
+    }
+
+    private func checkEditResult() {
+        guard let seq = editSeq, let result = SharedStore.editResult(for: seq) else { return }
+        editSeq = nil
+        SharedStore.markEditApplied(seq)
+        guard let text = result.text, !text.isEmpty else {
+            bar.showNotice(result.error ?? "修改失敗，原文沒有變動。")
+            return
+        }
+        replaceDraft(with: text)
+    }
+
+    /// The answer to a request this process did not make.
+    ///
+    /// Mode 1 opens the app to record the instruction, which destroys the
+    /// keyboard; the answer therefore arrives in a new process. The group keeps
+    /// it until it has been applied once, which is what this reads.
+    private func applyPendingEditResult() {
+        guard editSeq == nil, let pending = SharedStore.unappliedEditResult() else { return }
+        SharedStore.markEditApplied(pending.result.seq)
+        guard let text = pending.result.text, !text.isEmpty else {
+            bar.showNotice(pending.result.error ?? "修改失敗，原文沒有變動。")
+            return
+        }
+        // The draft is the one the request carried: this process never had it.
+        lastText = pending.draft
+        replaceDraft(with: text)
+    }
+
+    /// Puts the edited text where the draft was.
+    ///
+    /// The only text this keyboard can locate exactly is the sentence it typed
+    /// itself, and only while the cursor is still right behind it. If the user
+    /// has typed or moved since, the draft is not where it was -- so the answer
+    /// goes to the clipboard instead of deleting whatever happens to be there.
+    private func replaceDraft(with text: String) {
+        let draft = lastText
+        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        guard !draft.isEmpty, before.hasSuffix(draft) else {
+            UIPasteboard.general.string = text
+            lastText = text
+            bar.hideEditPanel()
+            bar.showNotice("游標不在原文後面，已複製修改後的文字。")
+            return
+        }
+        for _ in 0..<draft.count { textDocumentProxy.deleteBackward() }
+        textDocumentProxy.insertText(text)
+        lastText = text
+        bar.hideEditPanel()
+        bar.apply(phase: .done, text: "已換成 \(text.count) 字", needsSwitch: true, paused: false)
+    }
+
+    /// The app is not running, so the request has nowhere to run. Opening it is
+    /// the user's decision, not something a 套用 tap does silently -- the request
+    /// is already in the group, so any way of getting there works, and the app
+    /// finds it when it becomes active.
+    private func openAppForEdit() {
+        guard let url = URL(string: "ovc://edit") else { return }
+        extensionContext?.open(url) { [weak self] ok in
+            guard !ok else { return }
+            DispatchQueue.main.async {
+                self?.bar.showNotice("已送出修改請求，切回 Hushkey 就會處理。")
+            }
+        }
     }
 
     // MARK: actions

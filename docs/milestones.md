@@ -1454,3 +1454,126 @@ iOS 的 `PromptEdit` 是這次補上的：`.selection` 把切片當整段丟核�
   辨識器的正常輸出，轉換由 Swift 端的 ICU `Hans-Hant` 負責。
 - **不判斷語意**：兩句完全不同的中文，字數與字集都可能落在合法範圍內。要抓這種
   只能再問一次模型，成本與可靠性都不划算（見 L.3）。
+
+## 附錄 M：鍵盤上的「修改的提示詞」（2026-10-29）
+
+### M.1 為什麼不是鍵盤自己叫模型
+
+擴充功能只有 30–40 MB 可用記憶體，模型是幾百 MB；就算塞得進去，擴充功能被系統砍掉時
+是沒有錯誤的。所以鍵盤只做三件事：把請求寫進 App Group、等回覆、把回覆換回文件裡。
+模型在 containing App 跑——這條界線和附錄 H 的麥克風是同一條，理由也一樣。
+
+```
+鍵盤（擴充）                      App Group                      App
+────────────────────────────────────────────────────────────────────
+requestEdit(draft, instruction) → e.request (seq, draft, at)
+                                  ← e.ack = seq        （我收到了）
+                                  ← e.response = {seq, text|error}
+                                   e.applied = seq      （鍵盤已套用）
+```
+
+三個通道都會把請求送到 App：Darwin notification（Mode 2，App 還活著）、`ovc://edit`
+（App 沒開，擴充功能用 `extensionContext.open`）、以及 App 變成 active（iOS 拒絕了
+open，但使用者自己切回來）。三條最後都呼叫 `KeyboardEdit.handlePending`，而它第一件事
+是**消費序號**：同一個請求被兩條通道送到時，第二次不會再跑一次 20 秒的推論。
+
+`freshOnly` 只給「不是新點擊」的通道（launch、active）用：那不是使用者剛剛按了套用，
+所以只認 120 秒內的請求，免得幾天前沒處理到的請求忽然開始改字。
+
+### M.2 兩段等待：1.5 秒看 ack，120 秒看答案
+
+單一逾時做不到這件事，因為它要分辨的是兩種完全不同的狀態：
+
+| 等了多久 | 狀態 | 面板顯示 |
+| --- | --- | --- |
+| 1.5 秒內沒有 `e.ack` | App 沒在跑，請求沒有人處理 | 「請先開啟 Hushkey 一次，再按『套用』」＋「開啟 Hushkey」按鈕 |
+| 有 ack、還沒答案 | App 在想（實測 0.27 s 收到 ack，答案 40 s） | 「修改中…」 |
+| 120 秒還沒有答案 | 這次放棄 | 「修改沒有回應，原文沒有變動。」 |
+
+ack 在**呼叫模型之前**寫，這是整個協定的關鍵：`LLM_EditText` 在手機上要 20–40 秒
+（每次呼叫重新載入權重），把它當成「App 沒開」的證據就會叫使用者去開一個已經開著的
+App。而 1.5 秒是人按下去到看見回饋的容忍上限，不是推論時間。
+
+「開啟 Hushkey」按鈕只在使用者按下時才開 App：套用本身不會偷偷切走 App。請求已經在
+group 裡，所以用哪條路進去都一樣，App 一 active 就會撿起來。
+
+### M.3 `e.applied`：Mode 1 會把鍵盤殺掉
+
+Mode 1 的「用說的」是叫 App 錄音，而開啟 App 會**重建鍵盤**——回來的是新的擴充功能
+行程，記憶體裡沒有 `seq`、沒有 `lastText`。所以：
+
+- 請求攜帶 `draft`，答案才對得上文字（新行程不知道剛才在畫面上的是哪一句）；
+- `e.applied` 記錄「這個序號的答案已經貼進文件」，新行程靠它決定要不要套用；
+- `unappliedEditResult()` 每次出現都讀，不只在等待時讀。
+
+少了這個鍵，答案會安靜地留在 group 裡：使用者切回來看到的是原本的字，而且沒有任何
+「其實已經改好了」的跡象。這種失敗比報錯更難查。
+
+### M.4 擴充功能叫不出系統鍵盤，所以有「用說的」
+
+iOS 不會為鍵盤擴充功能裡的 `UITextField` 顯示系統鍵盤（鍵盤不能在鍵盤裡）。因此面板
+有兩條路：
+
+- **輸入框**：硬體鍵盤（iPad 鍵盤殼）可用，也是修正辨識錯字的地方；
+- **用說的**：走既有錄音流程取得一句話，結果填回面板的輸入框，使用者確認後才「套用」。
+
+兩條都停在同一個「套用」，而只有它會呼叫模型。`SharedStore.instructionDictation`
+與 `instructionDictationDraft` 記「這次聽寫是提示詞」和「要改的是哪一段」——同樣是
+跨行程的需求，所以放在 group 而不是擴充功能的記憶體。
+
+### M.5 改完的字放哪裡：直接替換，或退回剪貼簿
+
+鍵盤唯一能精確定位的文字，是它自己剛剛插入、而且游標還在後面的那一句。所以
+`replaceDraft` 先檢查 `documentContextBeforeInput` 是否以 `lastText` 結尾：
+
+- 是 → 刪掉同樣字數再插入，文字原地換掉；
+- 否（使用者打過字、移動過游標）→ 放進剪貼簿並說明「游標不在原文後面，已複製修改後的
+  文字」。刪錯別人的字比多按一次貼上貴得多。
+
+### M.6 guardrail 也在這條路上
+
+App 端的 `KeyboardEdit` 在回覆前跑 `TextRules.sanityCheck(mode: "edit")`：模型對著
+指令回廢話、或回三段式的解釋，就在這裡被擋下，面板顯示「AI 這次的回覆不像修改後的
+文字，原文沒有變動」。這和 App 內面板（`PromptEdit`）是同一條規則、同一個核心進入點
+（附錄 L），不是第二份判斷。
+
+### M.7 實測（模擬器，iPhone 17）
+
+```
+$ SIMCTL_CHILD_OVC_LLM_MODEL=qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  xcrun simctl launch <dev> com.example.offlinevoiceassistant.ios \
+  -OVC_KB_EDIT_PROBE "把三點改成四點，小林改成大衛"
+{
+  "draft"       : "明天下午三點跟小林開會，討論第四季時程",
+  "instruction" : "把三點改成四點，小林改成大衛",
+  "seq"         : 2,
+  "ack"         : 2,
+  "ackedAfter"  : 0.275,
+  "elapsed"     : 40.25,
+  "answered"    : true,
+  "text"        : "明天下午四點跟大衛開會，討論第四季時程"
+}
+```
+
+第一次跑（單一指令）在 0.27 秒內完成，因為模型剛好在記憶體裡；第二次是 40.25 秒，
+就是「每次呼叫重新載入權重」的成本。這兩個數字正好是 M.2 為什麼要分成兩段等待的
+理由。
+
+探針（`-OVC_KB_EDIT_PROBE`）走的是面板用的同一行 `SharedStore.requestEdit`，之後等
+ack 與答案，最後把結果寫成 `Documents/keyboard-edit.json`。它不模擬鍵盤的點擊，因為
+點擊不是風險所在——跨行程的請求、ack、答案與套用才是。
+
+截圖：`docs/evidence/ios-keyboard-edit-panel.png`（`-OVC_KB_PROBE` 畫出收合與展開
+兩種真實的 `VoiceBar`；兩個預覽曾因為 `UIViewRepresentable` 讀不到內部的
+height constraint 而疊在一起，補 `sizeThatFits` 之後才分開）。
+
+### M.8 驗收與限制
+
+- `xcodebuild` sim／device：BUILD SUCCEEDED。
+- 模擬器端到端：上面兩次，ack 0.27 s、答案 40 s，文字正確。
+- **Mode 2 的「零跳轉」沒有在真機上驗證**：模擬器沒有 PiP，這條只能真機確認
+  （清單見 `docs/evidence/ios-pip-device-checklist.md`）。
+- 鍵盤端不能自己錄音、不能叫出系統鍵盤、記憶體 30–40 MB——這三條是設計的前提，
+  不是待修的問題。
+- `replaceDraft` 只認「游標緊接在 `lastText` 之後」：使用者在原文後面接著打字時，
+  答案會走剪貼簿而不是原地替換。

@@ -339,6 +339,242 @@ enum SharedStore {
         post()
     }
 
+    // MARK: keyboard edit (修改的提示詞)
+
+    /// One 修改的提示詞, written by the keyboard and acted on by the app.
+    ///
+    /// The keyboard cannot run the model: an extension gets tens of megabytes
+    /// before the system kills it, and the LLM alone is several hundred. So the
+    /// panel asks, the app answers -- and both sides need the request to survive
+    /// the app being suspended, the keyboard being dismissed while it works, and
+    /// the notification nobody was listening for. That is a value in the group,
+    /// not a message in flight.
+    struct EditRequest: Codable, Equatable {
+        /// Monotonic, so a reply can be matched to the question it answers.
+        var seq: Int
+        /// The text the user wants changed. For the keyboard panel this is the
+        /// sentence the keyboard last typed, because that is the only text it
+        /// knows the exact position of.
+        var draft: String
+        /// What to change, verbatim: the user's own words, never paraphrased.
+        var instruction: String
+        var at: Double
+    }
+
+    /// The app's answer to one `EditRequest`. `text` and `error` are exclusive;
+    /// both nil means "still working", which the keyboard reads as nothing.
+    struct EditResult: Codable, Equatable {
+        var seq: Int
+        var text: String?
+        var error: String?
+    }
+
+    /// The app heard the request and is working on it.
+    ///
+    /// Separate from the result because the two answer different questions, and
+    /// the keyboard has to act on them differently: no acknowledgement means the
+    /// app is not running (say so, offer to open it), no result yet means it is
+    /// running and slow (keep waiting). An edit takes ~20 seconds on a phone --
+    /// the model is loaded per call -- so a single timeout cannot tell those
+    /// apart without either lying to the user or giving up on a working edit.
+    static let editRequestName = "com.example.offlinevoiceassistant.edit"
+    static let editResultName = "com.example.offlinevoiceassistant.editResult"
+
+    private enum EditKey {
+        static let request = "e.request"
+        static let consumed = "e.consumed"
+        static let ack = "e.ack"
+        static let response = "e.response"
+        /// The newest answer the keyboard has already put into the document.
+        ///
+        /// In Mode 1 the edit opens the app and the keyboard is destroyed, so the
+        /// answer arrives in a NEW extension process that has no memory of asking.
+        /// Without this key it would sit in the group unapplied -- the user comes
+        /// back to the text they had, with no sign that anything was answered.
+        static let applied = "e.applied"
+        /// A dictation the keyboard asked for in order to fill its instruction
+        /// field, rather than to type at the cursor.
+        ///
+        /// In the group rather than in the extension's memory: in Mode 1 the
+        /// microphone opens the app, which destroys the keyboard, and the answer
+        /// arrives in a new process that has no memory of having asked.
+        static let instructionDictation = "s.instructionDictation"
+        static let instructionDraft = "s.instructionDraft"
+    }
+
+    /// Writes the request and announces it. Returns the sequence to wait on.
+    @discardableResult
+    static func requestEdit(draft: String, instruction: String) -> Int {
+        guard let defaults else { return 0 }
+        let previous = (try? defaults.data(forKey: EditKey.request))
+            .flatMap { try? JSONDecoder().decode(EditRequest.self, from: $0) }
+        let seq = max(
+            previous?.seq ?? 0,
+            defaults.integer(forKey: EditKey.consumed),
+            defaults.integer(forKey: EditKey.ack)
+        ) + 1
+        let request = EditRequest(
+            seq: seq, draft: draft, instruction: instruction,
+            at: Date().timeIntervalSince1970
+        )
+        if let data = try? JSONEncoder().encode(request) {
+            defaults.set(data, forKey: EditKey.request)
+        }
+        post(name: editRequestName)
+        return seq
+    }
+
+    /// A request the app has not consumed. Nil when there is none.
+    static var pendingEditRequest: EditRequest? {
+        guard let defaults,
+              let data = defaults.data(forKey: EditKey.request),
+              let request = try? JSONDecoder().decode(EditRequest.self, from: data),
+              request.seq > defaults.integer(forKey: EditKey.consumed)
+        else { return nil }
+        return request
+    }
+
+    /// Whether the pending request is recent enough to act on without being
+    /// asked to. The prompted channels (the URL, the notification) are being
+    /// delivered now; a launch or coming back to the app is not evidence of a
+    /// new tap, so those only honour a request that is still warm.
+    static func hasFreshEditRequest(within seconds: TimeInterval = 120) -> Bool {
+        guard let request = pendingEditRequest else { return false }
+        return Date().timeIntervalSince1970 - request.at < seconds
+    }
+
+    /// Called by whoever acts on the request, before acting: two channels can
+    /// deliver the same request, and the second one must not run the model again.
+    static func consumeEditRequest(_ seq: Int) {
+        defaults?.set(seq, forKey: EditKey.consumed)
+    }
+
+    /// "I have it." Written before the model is called, so the keyboard can tell
+    /// "the app is not running" from "the app is thinking".
+    static func ackEditRequest(_ seq: Int) {
+        guard let defaults else { post(name: editResultName); return }
+        defaults.set(seq, forKey: EditKey.ack)
+        post(name: editResultName)
+    }
+
+    static var editAckedSeq: Int {
+        defaults?.integer(forKey: EditKey.ack) ?? 0
+    }
+
+    /// The answer, or an error the panel can show. `text` nil with an `error`
+    /// means the edit was refused; both nil is never written.
+    static func publishEditResult(seq: Int, text: String?, error: String?) {
+        guard let defaults else { post(name: editResultName); return }
+        let result = EditResult(seq: seq, text: text, error: error)
+        if let data = try? JSONEncoder().encode(result) {
+            defaults.set(data, forKey: EditKey.response)
+        }
+        post(name: editResultName)
+    }
+
+    /// The answer to `seq`, or nil while there is none.
+    ///
+    /// Matched on the sequence rather than "the last result": the keyboard may
+    /// still be waiting on an older request when a newer one is answered, and
+    /// applying the wrong sentence to the wrong text is worse than waiting.
+    static func editResult(for seq: Int) -> EditResult? {
+        guard let defaults,
+              let data = defaults.data(forKey: EditKey.response),
+              let result = try? JSONDecoder().decode(EditResult.self, from: data),
+              result.seq == seq,
+              result.text != nil || result.error != nil
+        else { return nil }
+        return result
+    }
+
+    /// An answer the keyboard has not put into the document yet, with the draft
+    /// it belongs to.
+    ///
+    /// Read on every appearance, not only while waiting: a keyboard recreated
+    /// after an app switch has no `seq` in memory, and this is the only thing
+    /// that can tell it there is an answer to apply.
+    static func unappliedEditResult() -> (result: EditResult, draft: String)? {
+        guard let defaults,
+              let responseData = defaults.data(forKey: EditKey.response),
+              let result = try? JSONDecoder().decode(EditResult.self, from: responseData),
+              result.seq > defaults.integer(forKey: EditKey.applied),
+              let requestData = defaults.data(forKey: EditKey.request),
+              let request = try? JSONDecoder().decode(EditRequest.self, from: requestData),
+              request.seq == result.seq,
+              result.text != nil || result.error != nil
+        else { return nil }
+        return (result, request.draft)
+    }
+
+    /// Called after the answer was inserted (or copied, or shown as a failure),
+    /// so the same answer cannot be applied twice by two paths.
+    static func markEditApplied(_ seq: Int) {
+        defaults?.set(seq, forKey: EditKey.applied)
+    }
+
+    /// Marks the next published dictation as an instruction for the panel.
+    static var instructionDictation: Bool {
+        get { defaults?.bool(forKey: EditKey.instructionDictation) ?? false }
+        set { defaults?.set(newValue, forKey: EditKey.instructionDictation) }
+    }
+
+    /// The text the instruction is about, kept beside the flag.
+    ///
+    /// In Mode 1 the microphone opens the app and the keyboard is destroyed, so
+    /// the sentence that was on screen when 用說的 was tapped has to be in the
+    /// group as well -- otherwise the instruction comes back to a panel with
+    /// nothing to apply it to.
+    static var instructionDictationDraft: String {
+        get { defaults?.string(forKey: EditKey.instructionDraft) ?? "" }
+        set { defaults?.set(newValue, forKey: EditKey.instructionDraft) }
+    }
+
+    /// Runs `handler` on the main queue when the keyboard asks for an edit.
+    static func observeEditRequest(_ handler: @escaping () -> Void) {
+        EditRequestWatch.handler = handler
+        guard !EditRequestWatch.registered, let center = poster else { return }
+        EditRequestWatch.registered = true
+        let observer = Unmanaged.passUnretained(EditRequestWatch.shared).toOpaque()
+        CFNotificationCenterAddObserver(
+            center, observer,
+            { _, _, _, _, _ in
+                DispatchQueue.main.async { EditRequestWatch.handler?() }
+            },
+            editRequestName as CFString,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    private final class EditRequestWatch {
+        static let shared = EditRequestWatch()
+        static var handler: (() -> Void)?
+        static var registered = false
+    }
+
+    /// Runs `handler` on the main queue when the app acknowledges or answers.
+    static func observeEditResult(_ handler: @escaping () -> Void) {
+        EditResultWatch.handler = handler
+        guard !EditResultWatch.registered, let center = poster else { return }
+        EditResultWatch.registered = true
+        let observer = Unmanaged.passUnretained(EditResultWatch.shared).toOpaque()
+        CFNotificationCenterAddObserver(
+            center, observer,
+            { _, _, _, _, _ in
+                DispatchQueue.main.async { EditResultWatch.handler?() }
+            },
+            editResultName as CFString,
+            nil,
+            .deliverImmediately
+        )
+    }
+
+    private final class EditResultWatch {
+        static let shared = EditResultWatch()
+        static var handler: (() -> Void)?
+        static var registered = false
+    }
+
     // MARK: settings
 
     /// The cleanup pass, on by default. Off is the honest option for a user who

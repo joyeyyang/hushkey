@@ -31,6 +31,10 @@ struct OVCApp: App {
             }
         }
 
+        if let instruction = Diagnostics.keyboardEditInstruction {
+            KeyboardEditProbe.run(instruction: instruction)
+        }
+
         if Diagnostics.probesPause {
             Task { @MainActor in PauseProbe.run() }
         }

@@ -44,6 +44,10 @@ struct KeyboardProbeView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 VoiceBarPreview()
+                Text("按鉛筆後的樣子（修改的提示詞）")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                VoiceBarPreview(expanded: true)
             }
         }
         .padding(20)
@@ -58,14 +62,35 @@ struct KeyboardProbeView: View {
 
 /// The real keyboard bar, in the app, at real size.
 struct VoiceBarPreview: UIViewRepresentable {
+    /// Draws the 修改的提示詞 panel open, which is the state whose height and
+    /// button row are otherwise only visible on a phone with the keyboard up.
+    var expanded = false
+
     func makeUIView(context: Context) -> VoiceBar {
         let bar = VoiceBar()
         // Same states the extension shows, so the picture is not a mock-up: the
         // idle prompt is what a user sees before tapping, which is the one that
         // has to fit.
         bar.apply(phase: .idle, text: "", needsSwitch: true, paused: false)
+        if expanded {
+            bar.showEditPanel(prefill: "把三點改成四點")
+            // The field must not take focus here: the probe screen already has
+            // one, and a keyboard inside the app's own screen is not the picture
+            // this is for.
+            bar.endEditing(true)
+        }
         return bar
     }
 
     func updateUIView(_ bar: VoiceBar, context: Context) {}
+
+    /// The bar's height is a constraint inside the view, and SwiftUI does not read
+    /// it -- without this, two previews in one column were given a shared slice of
+    /// the screen and drew on top of each other.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: VoiceBar, context: Context) -> CGSize? {
+        CGSize(
+            width: proposal.width ?? UIScreen.main.bounds.width,
+            height: expanded ? VoiceBar.expandedHeight : VoiceBar.height
+        )
+    }
 }
