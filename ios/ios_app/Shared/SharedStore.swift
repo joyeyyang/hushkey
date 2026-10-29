@@ -353,6 +353,19 @@ enum SharedStore {
         set { defaults?.set(newValue, forKey: "refine") }
     }
 
+    /// The register the cleanup writes in: "casual", "normal" (the default) or
+    /// "formal".
+    ///
+    /// Lives here rather than in `Preferences` because it is a setting the
+    /// keyboard has an opinion about too (the 修改提示詞 panel is the keyboard's
+    /// own surface), and the App Group defaults are the only store both
+    /// processes can read. The core treats an unknown value as "normal", so a
+    /// value written by an older build costs the register, never the dictation.
+    static var refineTone: String {
+        get { defaults?.string(forKey: "refineTone") ?? "normal" }
+        set { defaults?.set(newValue, forKey: "refineTone") }
+    }
+
     /// How the keyboard asks for a dictation.
     ///
     /// `.toApp` is the default and cannot fail: the keyboard opens `ovc://record`,

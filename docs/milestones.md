@@ -1271,3 +1271,79 @@ shim:   platform IOS            minos 17.0
 === 15/15 changed
 === 15/15 right
 ```
+
+## 附錄 K：三種語氣（casual／normal／formal，2026-10-29）
+
+### K.1 改的只有提示詞，管線不動
+
+三種語氣共用同一個模型、同一條鏈（Script → refine → sanity guard → translate），
+差別只有兩個地方：system 行開頭那段語域說明，以及 few-shot 範例。`normal` 用的是
+原本的 `REFINE_SYSTEM` 與 `REFINE_EXAMPLES_*`，**位元組完全沒動**——所有回歸案例與
+量測都是對它做的，動了就會讓「同一句現在讀起來不一樣」看起來像語氣功能造成的。
+
+```
+llm::Tone { Casual, Normal, Formal }
+  as_str()  "casual" / "normal" / "formal"
+  parse()   未知、空字串、大小寫不同 → Normal（跨 C ABI／worker 參數／設定檔，
+            打錯字不能讓使用者損失一次聽寫）
+```
+
+三個語氣各有一套提示詞與範例（中文／英文各一組）。範例是**分開的**，不是把同一組
+換標籤：範例的語域會把輸出拉回去，正式範例配輕鬆指示，答案還是正式的。
+
+三套提示詞都重述同一組不變式（不摘要、不漏事、數字照留、繁體、結尾不加句號），
+`every_tone_keeps_the_shared_rules` 對三套都驗，避免日後只改一套時悄悄掉規則。
+
+### K.2 兩段式只留給 normal
+
+`casual` / `formal` 一律單段。兩段式的第一段是 `UNDERSTAND_SYSTEM`，那是一段
+**沒有語域概念**的中性改寫；2B 會把中性句子交給第二段，語氣晚一次改寫才到，甚至
+到不了（第二段已經沒什麼好改）。所以設定裡的「2 段」只對 normal 有效，選了輕鬆或
+正式就是單段——語氣是使用者用嘴巴要求的事，段數只是效能旋鈕。
+
+### K.3 同一句、三種語氣（實測）
+
+worker：`rust/core_engine/target/release/ovc-llm-worker`，指令：
+
+```bash
+printf '%s' "<原句>" | ./mac/macos_app/.build/release/voiceinput --refine --tone casual
+```
+
+```text
+### 嗯那個下週三下午三點半你有空嗎，我要跟你討論那個八十萬的案子，然後記得帶合約
+casual  下週三下午三點半有空嗎？想跟你討論八十萬的案子，記得帶合約
+normal  下週三下午三點半是否有空？我想與你討論八十萬的案子，請記得攜帶合約
+formal  請問您下週三下午三點半是否有空？我想與您討論八十萬的案子，請記得攜帶合約
+
+### 那個明天的會議改到下午四點，然後記得通知小林
+casual  • 明天的會議改到下午四點 / • 記得通知小林
+normal  明天的會議將改至下午四點，請務必通知小林
+formal  會議時間已調整至明天下午四點，請通知小林
+
+### um can you uh send me the report before the meeting? the report before the meeting
+casual  Can you send me the report before the meeting?
+normal  Could you send me the report before the meeting?
+formal  Could you please send me the report before the meeting?
+```
+
+第二組也示範了輕鬆語域的一個副作用：兩個重點會拆成兩行（提示詞本來就要求
+「多個重點就一行一個」），normal／formal 則併成一句。
+
+### K.4 調 prompt 時踩到的兩個坑（都留在程式註解裡）
+
+- **正式語域不可以把問句改成命令。** 原本寫了「請求用請／敬請開頭，不要用『可以幫
+  我…嗎』」，實測英文問句直接變成命令（`can you send me the report?` →
+  `Please send me the report prior to the meeting`），請求的力道整個消失，正好違反
+  共用的「問句保持問句」。規則拿掉，改用正式範例教「問句還是問句」。
+- **2B 的改寫慣性比規則強。** 正式語域仍會把 `QA isn't done yet` 寫成
+  `the QA team is not yet complete`（多出 `team`）。提示詞加了「不要自己補上新的事實
+  或新的名詞」也壓不住，這是模型本身的傾向，交給任務 F 的 guardrail 與已知限制處理。
+
+### K.5 驗收
+
+- `cargo test --lib`：96 passed（+6：三套提示詞兩兩不同、normal 等於舊提示詞、
+  `parse` 未知→normal、三套都含共用不變式、語域說明在範例之前、keywords hint 仍生效）。
+- `swift test`：17 passed（簽名變更，行為未變）。
+- `xcodebuild` sim／device：BUILD SUCCEEDED。
+- `scripts/verify.sh` 新增 `refine tone (3 registers)`：同一句跑三次必須兩兩不同，
+  第四次省略 `--tone` 必須等於 normal（「未指定＝普通」）。

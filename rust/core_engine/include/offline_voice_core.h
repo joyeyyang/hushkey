@@ -80,6 +80,11 @@ int32_t LLM_Summarize(const char *transcript, char **out_summary);
 int32_t LLM_RefineText(const char *text, char **out_text);
 int32_t LLM_RefineTextWithKeywords(const char *text, const char *keywords_hint, char **out_text);
 int32_t LLM_RefineTextWithKeywordsStages(const char *text, const char *keywords_hint, uint32_t stages, char **out_text);
+/* Refine in a chosen register: `tone` is "casual", "normal" or "formal".
+ * NULL, empty or anything else means "normal". `stages` is honoured for "normal"
+ * only; the other two are single-pass by design (their prompt carries the
+ * register, and the two-stage shape's first pass has no notion of it). */
+int32_t LLM_RefineTextWithTone(const char *text, const char *keywords_hint, const char *tone, uint32_t stages, char **out_text);
 /* The .gguf that answered the most recent LLM task, or "" when none has run.
  * A downgrade is invisible in the answer -- the core retries with a smaller model
  * and returns its text -- so this is how a caller learns which one actually

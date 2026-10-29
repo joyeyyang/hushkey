@@ -22,7 +22,7 @@ pub use memory::OvcMemoryUsage;
 pub use llm::{
     edit_with_instruction as llm_edit,
     refine as llm_refine, refine_stages as llm_refine_stages, refine_two_stage as llm_refine_two_stage,
-    refine_with_keywords as llm_refine_with_keywords,
+    refine_with_keywords as llm_refine_with_keywords, refine_with_tone as llm_refine_with_tone,
     summarize_one as llm_summarize_one, translate as llm_translate,
     SECTION_ACTIONS, SECTION_DECISIONS, SECTION_SUMMARY,
 };
@@ -349,6 +349,32 @@ pub unsafe extern "C" fn LLM_RefineTextWithKeywordsStages(
         let input = read_str(text, "text")?;
         let hint = if keywords_hint.is_null() { String::new() } else { read_str(keywords_hint, "keywords_hint")?.to_owned() };
         let refined = state::refine_text_with_keywords_stages(input, &hint, stages)?;
+        write_out(out, &refined)
+    })())
+}
+
+/// Like `LLM_RefineTextWithKeywordsStages`, but with a register.
+///
+/// `tone` is "casual", "normal" or "formal"; anything else (including an empty
+/// or NULL pointer) means "normal", which is also the prompt the other entry
+/// points use. `stages` is honoured for "normal" only -- the other two registers
+/// are single-pass by design.
+///
+/// # Safety
+/// Pointers must follow the header contract.
+#[no_mangle]
+pub unsafe extern "C" fn LLM_RefineTextWithTone(
+    text: *const c_char,
+    keywords_hint: *const c_char,
+    tone: *const c_char,
+    stages: u32,
+    out: *mut *mut c_char,
+) -> c_int {
+    status((|| {
+        let input = read_str(text, "text")?;
+        let hint = if keywords_hint.is_null() { String::new() } else { read_str(keywords_hint, "keywords_hint")?.to_owned() };
+        let tone = if tone.is_null() { String::new() } else { read_str(tone, "tone")?.to_owned() };
+        let refined = state::refine_text_with_tone(input, &hint, &tone, stages)?;
         write_out(out, &refined)
     })())
 }

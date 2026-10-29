@@ -81,6 +81,7 @@ final class AppController {
     private static let polishKey = "settings.polish"
     private static let confirmKey = "settings.confirmInsert"
     private static let translateKey = "settings.translate"
+    private static let toneKey = "settings.tone"
     private static let systemAudioKey = "settings.meetingSystemAudio"
 
     /// "auto" (the default), "off", "en" (translate into English) or "zh" (into
@@ -92,6 +93,20 @@ final class AppController {
     /// explicit directions stay for people who want every line in one language
     /// regardless of what they said.
     private var translateTarget: String { UserDefaults.standard.string(forKey: Self.translateKey) ?? "auto" }
+
+    /// The register the cleanup writes in: "casual", "normal" or "formal".
+    ///
+    /// `OVC_REFINE_TONE` overrides the stored value so the three registers can be
+    /// compared on the same sentence without opening settings and changing it
+    /// back. A value the core does not know is treated as "normal" there, so a
+    /// typo costs the register and never the dictation.
+    private var refineTone: String {
+        if let forced = ProcessInfo.processInfo.environment["OVC_REFINE_TONE"],
+           !forced.trimmingCharacters(in: .whitespaces).isEmpty {
+            return forced
+        }
+        return UserDefaults.standard.string(forKey: Self.toneKey) ?? "normal"
+    }
 
     /// Whether meeting mode also captures the Mac's own audio output. Default on.
     private var meetingSystemAudio: Bool {
@@ -168,6 +183,12 @@ final class AppController {
         // MainWindow's own saveSettings, so this only needs to confirm the change.
         window.onTranslateChange = { code in
             ModelInstaller.log("translate set to \(code)")
+        }
+
+        // The register reaches the core through `passConfig()`, which reads the
+        // same key on every dictation, so nothing has to be pushed anywhere.
+        window.onToneChange = { code in
+            ModelInstaller.log("refine tone set to \(code)")
         }
 
         // Meeting mode can also transcribe what the Mac plays (the other people
@@ -1374,6 +1395,7 @@ final class AppController {
             modelsDirectory: VoiceInputConfig.defaultModelsDirectory(),
             keywords: keywords.all,
             refineStages: Self.refineStagesOverride(),
+            refineTone: refineTone,
             translateTarget: translateTarget,
             llmModel: LLMSelection.currentFileName,
             polishEnabled: polishEnabled

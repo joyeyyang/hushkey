@@ -35,8 +35,8 @@ SHERPA_ONNX_DIR="$PWD/$SHERPA_IOS/sim" \
 SHERPA_ONNX_DIR="$PWD/$SHERPA_IOS/device" \
     cargo build --manifest-path rust/core_engine/Cargo.toml --target aarch64-apple-ios --release
 
-cp -f core_engine/target/aarch64-apple-ios-sim/release/liboffline_voice_core.a ios/ios_app/vendor/sim/
-cp -f core_engine/target/aarch64-apple-ios/release/liboffline_voice_core.a ios/ios_app/vendor/device/
+cp -f rust/core_engine/target/aarch64-apple-ios-sim/release/liboffline_voice_core.a ios/ios_app/vendor/sim/
+cp -f rust/core_engine/target/aarch64-apple-ios/release/liboffline_voice_core.a ios/ios_app/vendor/device/
 
 cd ios/ios_app
 xcodegen generate

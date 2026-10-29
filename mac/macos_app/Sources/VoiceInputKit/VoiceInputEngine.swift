@@ -93,6 +93,21 @@ public final class VoiceInputEngine {
         return try CoreABI.summarize(transcript)
     }
 
+    /// One cleanup pass in the configured register, THROWING when the model
+    /// cannot answer.
+    ///
+    /// The product path is `refineTranscript`, which falls back to the raw
+    /// transcript so a dictation is never lost. A caller that is measuring the
+    /// cleanup — the command-line tool comparing the three registers — needs the
+    /// failure instead of the fallback: with the fallback, a broken install and a
+    /// working one that returned the input look identical, and the comparison
+    /// would "pass" on three copies of the transcript.
+    public func refine(_ text: String) throws -> String {
+        ensurePrepared()
+        return try CoreABI.refine(
+            text, keywordsHint: "", stages: config.refineStages, tone: config.refineTone)
+    }
+
     /// Releases the engine. Safe to call more than once; a later `prepare()`
     /// brings it back.
     public func shutdown() {

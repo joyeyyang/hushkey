@@ -95,6 +95,38 @@ if [ $SUMMARY_STATUS -eq 0 ]; then
     fi
 fi
 
+# The three registers, on one sentence: the same input through the same cleanup,
+# once per tone. What is checked is not that each answer is good -- that is a
+# judgement call -- but that the switch is wired all the way to the prompt: three
+# identical answers mean the tone never left the settings file. The fourth run
+# omits --tone and has to match "normal", which is the default the product
+# promises when nothing is chosen.
+step "refine tone (3 registers)"
+TONE_INPUT='嗯那個下週三下午三點半你有空嗎，我要跟你討論那個八十萬的案子，然後記得帶合約'
+TONE_STATUS=0
+for tone in casual normal formal default; do
+    TONE_FLAG="--tone $tone"
+    [ "$tone" = "default" ] && TONE_FLAG=""
+    # shellcheck disable=SC2086
+    printf '%s' "$TONE_INPUT" | ./mac/macos_app/.build/release/voiceinput --refine $TONE_FLAG \
+        >"/tmp/ovc-verify-tone-$tone.log" 2>&1 || TONE_STATUS=1
+    [ -s "/tmp/ovc-verify-tone-$tone.log" ] || TONE_STATUS=1
+done
+record "refine tone" $TONE_STATUS
+if [ $TONE_STATUS -eq 0 ]; then
+    if cmp -s /tmp/ovc-verify-tone-casual.log /tmp/ovc-verify-tone-normal.log \
+        || cmp -s /tmp/ovc-verify-tone-normal.log /tmp/ovc-verify-tone-formal.log \
+        || cmp -s /tmp/ovc-verify-tone-casual.log /tmp/ovc-verify-tone-formal.log; then
+        printf 'FAIL  two registers answered identically\n'
+        FAILED+=("refine tone distinct")
+    elif ! cmp -s /tmp/ovc-verify-tone-default.log /tmp/ovc-verify-tone-normal.log; then
+        printf 'FAIL  omitting --tone did not answer like normal\n'
+        FAILED+=("refine tone default")
+    else
+        printf 'PASS  the three registers answered differently, and the default is normal\n'
+    fi
+fi
+
 # The edit probe measures the PRODUCT path -- the same call the app makes --
 # against the eleven spoken edits and their expected answers. Checking the raw
 # model instead would measure something the user never sees: the model's

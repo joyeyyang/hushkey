@@ -39,6 +39,12 @@ struct Options {
     var mode: OutputMode = .human
     var translateTarget = "auto"
     var refineStages: UInt32 = 0
+    /// The cleanup's register. The three accepted values are the core's, and a
+    /// typo is an error here (see `parseArguments`) so a measurement run cannot
+    /// silently measure the default three times.
+    var refineTone = "normal"
+    /// `--refine`: clean the text on stdin and print the result.
+    var refineOnly = false
     var llmModel: String?
     var worker: URL?
     var polishEnabled = true
@@ -65,6 +71,8 @@ usage: voiceinput [options] <audio-file> [...]
   --add-keyword <term>    append a term to the stored list and print it
   --translate <auto|off|en|zh>  language handling (default auto)
   --refine-stages <0|1|2> cleanup passes; 0 lets the engine decide (default 0)
+  --tone <casual|normal|formal>  register of the cleanup (default normal)
+  --refine                clean the text read from stdin and print it
   --llm <file>            bare LLM filename inside models/llm/
   --no-polish             skip the AI cleanup pass entirely
   --is-edit <text>        print yes/no: does this line read as a spoken edit?
@@ -124,6 +132,18 @@ func parseArguments(_ args: [String]) -> Options {
                 fail("--refine-stages expects 0, 1 or 2, got \"\(raw)\"", code: 1)
             }
             opts.refineStages = n
+        case "--tone":
+            let raw = value("--tone")
+            // Stricter than the core on purpose: the core falls back to
+            // "normal" so a settings typo never costs a dictation, but a flag
+            // is a request, and a script comparing three registers must not get
+            // three copies of "normal".
+            guard ["casual", "normal", "formal"].contains(raw) else {
+                fail("--tone expects casual, normal or formal, got \"\(raw)\"", code: 1)
+            }
+            opts.refineTone = raw
+        case "--refine":
+            opts.refineOnly = true
         case "--llm":
             opts.llmModel = value("--llm")
         case "--worker":
@@ -169,6 +189,7 @@ func makeConfig(_ opts: Options) -> VoiceInputConfig {
         modelsDirectory: opts.modelsDirectory ?? VoiceInputConfig.defaultModelsDirectory(),
         keywords: keywords,
         refineStages: opts.refineStages,
+        refineTone: opts.refineTone,
         translateTarget: opts.translateTarget,
         llmModel: opts.llmModel,
         workerExecutable: opts.worker,
@@ -296,6 +317,37 @@ func runSummarize(config: VoiceInputConfig) -> Never {
     exit(0)
 }
 
+// MARK: - Refine
+
+/// Cleans the text on stdin and prints the result.
+///
+/// The same cleanup the app runs, on a known sentence, so the three registers
+/// (`--tone`) can be compared without a microphone and without changing a
+/// setting back and forth. Deliberately the THROWING path
+/// (`VoiceInputEngine.refine`) rather than `refineTranscript`: a failed pass has
+/// to be a non-zero exit, not the input printed back as if the model had
+/// answered.
+///
+/// The script is normalised first, exactly as the dictation path does, so a
+/// Simplified transcript is compared the way it would be in production.
+func runRefine(config: VoiceInputConfig) -> Never {
+    let data = FileHandle.standardInput.readDataToEndOfFile()
+    guard let raw = String(data: data, encoding: .utf8) else {
+        fail("the text on stdin is not valid UTF-8", code: 1)
+    }
+    let text = VoiceText.toTraditional(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    guard !text.isEmpty else {
+        fail("the text on stdin is empty", code: 1)
+    }
+    let engine = makeEngine(config)
+    defer { engine.shutdown() }
+    guard let refined = try? engine.refine(text), !refined.isEmpty else {
+        fail("could not refine the text (no usable result)", code: 1)
+    }
+    print(VoiceText.toTraditional(refined))
+    exit(0)
+}
+
 // MARK: - Engine
 
 /// Builds the engine the way every path needs it: config validated, core
@@ -395,6 +447,10 @@ if let instruction = opts.editInstruction {
 
 if opts.summarize {
     runSummarize(config: config)
+}
+
+if opts.refineOnly {
+    runRefine(config: config)
 }
 
 guard !opts.files.isEmpty else {

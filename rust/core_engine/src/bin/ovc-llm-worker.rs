@@ -3,10 +3,12 @@
 //! all LLM memory (weights, Metal buffers) to the OS, so the parent process's peak RSS
 //! does not include them.
 //!
-//! Usage: ovc-llm-worker <refine|refine-two-stage|summary|translate|edit> <model.gguf> [instruction]
-//! `instruction` is, per task: the keywords hint (refine, refine-two-stage), the section
-//! instruction (summary), the target language (translate), or the spoken edit instruction
-//! (edit). stdin: UTF-8 text. stdout: UTF-8 result. Exit code 0 on success.
+//! Usage: ovc-llm-worker <refine|refine-two-stage|refine-casual|refine-formal|summary|translate|edit>
+//!                     <model.gguf> [instruction]
+//! `instruction` is, per task: the keywords hint (refine, refine-two-stage, refine-casual,
+//! refine-formal), the section instruction (summary), the target language (translate), or
+//! the spoken edit instruction (edit). stdin: UTF-8 text. stdout: UTF-8 result. Exit code 0
+//! on success.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -15,7 +17,10 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: ovc-llm-worker <refine|refine-two-stage|summary|translate|edit> <model.gguf> [instruction]");
+        eprintln!(
+            "usage: ovc-llm-worker <refine|refine-two-stage|refine-casual|refine-formal|summary|translate|edit> \
+             <model.gguf> [instruction]"
+        );
         return ExitCode::from(2);
     }
     let task = args[1].as_str();
@@ -29,6 +34,18 @@ fn main() -> ExitCode {
     let result = match task {
         "refine" => offline_voice_core::llm_refine_with_keywords(&model, input.trim(), &instruction),
         "refine-two-stage" => offline_voice_core::llm_refine_two_stage(&model, input.trim(), &instruction),
+        "refine-casual" => offline_voice_core::llm_refine_with_tone(
+            &model,
+            input.trim(),
+            &instruction,
+            offline_voice_core::llm::Tone::Casual,
+        ),
+        "refine-formal" => offline_voice_core::llm_refine_with_tone(
+            &model,
+            input.trim(),
+            &instruction,
+            offline_voice_core::llm::Tone::Formal,
+        ),
         "summary" => offline_voice_core::llm_summarize_one(&model, &instruction, input.trim()),
         "translate" => offline_voice_core::llm_translate(&model, input.trim(), &instruction),
         "edit" => offline_voice_core::llm_edit(&model, input.trim(), &instruction),

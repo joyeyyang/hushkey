@@ -1,7 +1,7 @@
 import AppKit
 import QuartzCore
 
-/// The 設定 tab: five cards on the window's paper instead of one long form.
+/// The 設定 tab: six cards on the window's paper instead of one long form.
 ///
 /// This view never writes to `UserDefaults`. Every change leaves through a
 /// callback so the controller owns persistence; `syncFromDefaults` is the only
@@ -14,6 +14,8 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
     var onHotkeyChange: ((String) -> Void)?
     /// "auto" | "off" | "en" | "zh".
     var onTranslateChange: ((String) -> Void)?
+    /// The cleanup's register: "casual" | "normal" | "formal".
+    var onToneChange: ((String) -> Void)?
     var onPolishChange: ((Bool) -> Void)?
     var onConfirmChange: ((Bool) -> Void)?
     var onSystemAudioChange: ((Bool) -> Void)?
@@ -38,6 +40,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
     private var toggleRows: [ToggleRowView] = []
     private var themeRows: [ThemeRowView] = []
     private var choiceRows: [ChoiceRowView] = []
+    private var toneRows: [ChoiceRowView] = []
 
     /// Holds the chosen theme code. The swatch rows are only a visual front end
     /// for this popup, which is why it never joins the view hierarchy.
@@ -59,6 +62,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
     private let quitButton: ThemedButton
 
     private var translateSelection = 0
+    private var toneSelection = 1
 
     private let translateCodes = ["auto", "off", "en", "zh"]
     private let translateTitles = [
@@ -66,6 +70,15 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
         "關閉",
         "一律翻成英文",
         "一律翻成繁體中文",
+    ]
+
+    /// Casual first, normal in the middle, formal last: the order is the ladder
+    /// the settings describe, and the default sits where a reader expects it.
+    private let toneCodes = ["casual", "normal", "formal"]
+    private let toneTitles = [
+        "輕鬆：像傳訊息給熟識的同事",
+        "一般（預設）：正式但不生硬",
+        "正式：對外書信、公文",
     ]
 
     private var themeCodes: [String] { ["system"] + ThemeCatalog.all.map(\.id) }
@@ -105,6 +118,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
         captionLabels.forEach { $0.textColor = theme.textSecondary }
         toggleRows.forEach { $0.applyTheme(theme) }
         choiceRows.forEach { $0.applyTheme(theme) }
+        toneRows.forEach { $0.applyTheme(theme) }
         themeRows.forEach { $0.applyTheme(theme) }
         themeRows.first?.setPalette(systemPalette)
 
@@ -123,6 +137,9 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
         for (index, row) in choiceRows.enumerated() {
             row.setSelected(index == translateSelection, theme: theme)
         }
+        for (index, row) in toneRows.enumerated() {
+            row.setSelected(index == toneSelection, theme: theme)
+        }
     }
 
     /// Populates every control from what the app has stored. Fires no callbacks.
@@ -138,6 +155,9 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
 
         let translate = defaults.string(forKey: "settings.translate") ?? "auto"
         selectTranslate(code: normalizedTranslateCode(translate), notify: false)
+
+        let tone = defaults.string(forKey: "settings.tone") ?? "normal"
+        selectTone(code: normalizedToneCode(tone), notify: false)
 
         polishSwitch.state = storedBool(defaults, "settings.polish", fallback: true) ? .on : .off
         confirmSwitch.state = storedBool(defaults, "settings.confirmInsert", fallback: false) ? .on : .off
@@ -158,6 +178,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
         hotkeyField.stringValue = "Option+Space"
         lastHotkey = "Option+Space"
         selectTranslate(code: "auto", notify: false)
+        selectTone(code: "normal", notify: false)
         polishSwitch.state = .on
         confirmSwitch.state = .off
         systemAudioSwitch.state = .on
@@ -168,6 +189,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
         onThemeChange?("system")
         onHotkeyChange?("Option+Space")
         onTranslateChange?("auto")
+        onToneChange?("normal")
         onPolishChange?(true)
         onConfirmChange?(false)
         onSystemAudioChange?(true)
@@ -230,6 +252,7 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
 
         buildThemeCard()
         buildDictationCard()
+        buildToneCard()
         buildTranslateCard()
         buildExportCard()
         buildOtherCard()
@@ -337,6 +360,26 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
                                    caption: "需要「螢幕與系統音訊錄製」權限；戴耳機可避免重複收音。",
                                    control: systemAudioSwitch,
                                    action: #selector(didToggleSystemAudio)), to: card)
+    }
+
+    /// 語氣: which of the three registers the cleanup writes in.
+    ///
+    /// Its own card rather than a row inside 聽寫, because the three options need
+    /// a sentence each to be distinguishable -- "正式" alone reads as a synonym of
+    /// the default, which is exactly the confusion the switch is meant to avoid.
+    private func buildToneCard() {
+        let card = addCard("語氣")
+
+        let list = NSStackView.column([], spacing: Metrics.space1)
+        for index in toneCodes.indices {
+            let row = ChoiceRowView(title: toneTitles[index], theme: theme)
+            row.onSelect = { [weak self] in self?.selectTone(at: index, notify: true) }
+            addFullWidth(row, to: list)
+            toneRows.append(row)
+        }
+        addFullWidth(list, to: card)
+        addFullWidth(captionText("只影響「AI 整理」改寫出來的樣子；翻譯與語音編輯不受影響。"),
+                     to: card)
     }
 
     private func buildTranslateCard() {
@@ -481,6 +524,25 @@ final class SettingsTabView: NSView, NSTextFieldDelegate {
 
     private func normalizedTranslateCode(_ raw: String) -> String {
         translateCodes.contains(raw) ? raw : "auto"
+    }
+
+    // MARK: - Tone selection
+
+    private func selectTone(at index: Int, notify: Bool) {
+        guard toneCodes.indices.contains(index) else { return }
+        toneSelection = index
+        for (rowIndex, row) in toneRows.enumerated() {
+            row.setSelected(rowIndex == index, theme: theme)
+        }
+        if notify { onToneChange?(toneCodes[index]) }
+    }
+
+    private func selectTone(code: String, notify: Bool) {
+        selectTone(at: toneCodes.firstIndex(of: code) ?? 1, notify: notify)
+    }
+
+    private func normalizedToneCode(_ raw: String) -> String {
+        toneCodes.contains(raw) ? raw : "normal"
     }
 
     // MARK: - Export state

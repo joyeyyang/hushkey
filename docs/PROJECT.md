@@ -62,6 +62,7 @@ ASR_Start / ASR_SubmitAudio / ASR_SubmitTagged / ASR_Peek / ASR_TakeSegments / A
 LLM_RefineText            整理
 LLM_RefineTextWithKeywords
 LLM_RefineTextWithKeywordsStages   分兩段整理
+LLM_RefineTextWithTone    整理，可選語氣（casual／normal／formal）
 LLM_Summarize             會議摘要
 LLM_Translate             翻譯
 LLM_EditText              ★ 語音編輯

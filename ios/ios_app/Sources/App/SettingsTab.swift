@@ -11,6 +11,7 @@ import UIKit
 struct SettingsTab: View {
     @State private var translate = Preferences.translate
     @State private var stages = Preferences.refineStages
+    @State private var tone = SharedStore.refineTone
     @State private var refine = SharedStore.refineEnabled
     @State private var micGranted: Bool?
     @State private var copiedPath = false
@@ -31,6 +32,7 @@ struct SettingsTab: View {
         .onAppear {
             translate = Preferences.translate
             stages = Preferences.refineStages
+            tone = SharedStore.refineTone
             refine = SharedStore.refineEnabled
         }
     }
@@ -72,7 +74,7 @@ struct SettingsTab: View {
 
     private var cleanupCard: some View {
         Card("AI 整理",
-             caption: "段數是模型要跑幾遍：0 讓引擎依長度自己決定，1 直接濃縮，2 先理解再濃縮。") {
+             caption: "段數是模型要跑幾遍：0 讓引擎依長度自己決定，1 直接濃縮，2 先理解再濃縮。語氣只影響改寫出來的樣子，段數只影響跑幾遍；選了輕鬆或正式就是單段。") {
             VStack(alignment: .leading, spacing: 10) {
                 Toggle(isOn: Binding(
                     get: { refine },
@@ -102,6 +104,39 @@ struct SettingsTab: View {
                     }
                 }
                 .padding(.top, 2)
+
+                // The register. Its own row rather than a second ladder next to
+                // 段數: the two are independent choices, and putting them side by
+                // side reads as one six-way setting.
+                Divider().overlay(Palette.dim.opacity(0.25))
+
+                HStack(spacing: 16) {
+                    ForEach(ToneOption.allCases, id: \.self) { option in
+                        Button {
+                            tone = option.rawValue
+                            SharedStore.refineTone = option.rawValue
+                        } label: {
+                            Text(option.title)
+                                .font(.system(size: 12, weight: tone == option.rawValue ? .semibold : .regular))
+                                .foregroundStyle(tone == option.rawValue ? Palette.ink : Palette.dim)
+                                .overlay(alignment: .bottom) {
+                                    Rectangle()
+                                        .fill(tone == option.rawValue ? Palette.ink : .clear)
+                                        .frame(height: 1)
+                                        .offset(y: 3)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 2)
+
+                if let current = ToneOption(rawValue: tone) {
+                    Text(current.detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.dim)
+                }
             }
         }
     }

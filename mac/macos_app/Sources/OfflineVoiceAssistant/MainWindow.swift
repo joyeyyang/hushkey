@@ -24,6 +24,8 @@ final class MainWindow: NSWindow {
     var onConfirmChange: ((Bool) -> Void)?
     /// Announces the chosen translation direction ("auto" / "off" / "en" / "zh").
     var onTranslateChange: ((String) -> Void)?
+    /// Announces the cleanup's register ("casual" / "normal" / "formal").
+    var onToneChange: ((String) -> Void)?
     /// Whether meeting mode also records what the Mac is playing.
     var onSystemAudioChange: ((Bool) -> Void)?
     /// Paste a line picked out of the history into whatever app is in front.
@@ -585,6 +587,10 @@ final class MainWindow: NSWindow {
             UserDefaults.standard.set(code, forKey: "settings.translate")
             self?.onTranslateChange?(code)
         }
+        settingsView.onToneChange = { [weak self] code in
+            UserDefaults.standard.set(code, forKey: "settings.tone")
+            self?.onToneChange?(code)
+        }
         settingsView.onPolishChange = { [weak self] enabled in self?.onPolishChange?(enabled) }
         settingsView.onConfirmChange = { [weak self] confirm in self?.onConfirmChange?(confirm) }
         settingsView.onSystemAudioChange = { [weak self] enabled in self?.onSystemAudioChange?(enabled) }
@@ -651,10 +657,16 @@ final class MainWindow: NSWindow {
         if let index = tab.tabViewItems.firstIndex(of: item) {
             tabStrip.setSelectedIndex(index, notify: false)
         }
-        view.layoutSubtreeIfNeeded()
-        guard view.bounds.width > 1, view.bounds.height > 1,
-              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
-        view.cacheDisplay(in: view.bounds, to: rep)
+        // A tab may be a scroll view whose content is taller than the window --
+        // the settings page is. Snapshot the DOCUMENT view then: a page cut off at
+        // the fold hides exactly the card a reviewer opened the picture for.
+        let target: NSView = view.subviews
+            .compactMap { $0 as? NSScrollView }
+            .first?.documentView ?? view
+        target.layoutSubtreeIfNeeded()
+        guard target.bounds.width > 1, target.bounds.height > 1,
+              let rep = target.bitmapImageRepForCachingDisplay(in: target.bounds) else { return false }
+        target.cacheDisplay(in: target.bounds, to: rep)
         guard let data = rep.representation(using: .png, properties: [:]) else { return false }
         return (try? data.write(to: url)) != nil
     }

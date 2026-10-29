@@ -148,10 +148,16 @@ enum Core {
     /// model made it invent terms rather than spell them better.
     ///
     /// `stages` is the Mac's `OVC_REFINE_STAGES`: 0 lets the engine pick by
-    /// transcript length, 1 condenses once, 2 understands then condenses.
-    static func refine(_ text: String, stages: UInt32 = 0) throws -> String {
+    /// transcript length, 1 condenses once, 2 understands then condenses. It
+    /// only applies to the "normal" register -- the other two are single-pass by
+    /// design (their prompt carries the register, and the two-stage shape's first
+    /// pass has no notion of it).
+    ///
+    /// `tone` is "casual" / "normal" / "formal". The core treats anything else as
+    /// "normal", so a stale setting cannot cost the user a sentence.
+    static func refine(_ text: String, stages: UInt32 = 0, tone: String = "normal") throws -> String {
         var out: UnsafeMutablePointer<CChar>?
-        try check(LLM_RefineTextWithKeywordsStages(text, "", stages, &out))
+        try check(LLM_RefineTextWithTone(text, "", tone, stages, &out))
         guard let p = out else { return text }
         defer { Core_FreeString(p) }
         let refined = String(cString: p).trimmingCharacters(in: .whitespacesAndNewlines)

@@ -492,7 +492,8 @@ final class DictationController: ObservableObject {
             let result = Refiner.refine(
                 raw: raw,
                 polish: true,
-                translateTarget: Preferences.translateTarget
+                translateTarget: Preferences.translateTarget,
+                tone: SharedStore.refineTone
             )
             let served = Core.lastModelName()
             DispatchQueue.main.async {

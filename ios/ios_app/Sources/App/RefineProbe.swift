@@ -41,7 +41,12 @@ enum RefineProbe {
             if initError == nil {
                 let started = Date()
                 do {
-                    let raw = try Core.refine(text)
+                    // The register is taken from the environment so one launch
+                    // per tone can be compared on the same device without
+                    // changing a setting back and forth.
+                    let tone = ProcessInfo.processInfo.environment["OVC_REFINE_TONE"] ?? "normal"
+                    out["tone"] = tone
+                    let raw = try Core.refine(text, tone: tone)
                     out["seconds"] = Date().timeIntervalSince(started)
                     out["raw"] = raw
                     out["traditional"] = TextScript.traditional(raw)

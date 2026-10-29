@@ -192,7 +192,9 @@ enum Refiner {
         // into the sentence. The keyword tab keeps its list, but nothing is
         // injected from it any more.
         let hint = ""
-        guard let refined = try? CoreABI.refine(raw, keywordsHint: hint, stages: config.refineStages) else {
+        guard let refined = try? CoreABI.refine(
+            raw, keywordsHint: hint, stages: config.refineStages, tone: config.refineTone
+        ) else {
             return fallback(raw)
         }
         // Convert again after the model: it may echo Simplified even when asked

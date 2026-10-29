@@ -162,12 +162,16 @@ enum Refiner {
 
     /// The whole chain. `polish == false` returns the script-normalised raw text
     /// untouched, which is the "AI 整理 off" mode.
-    static func refine(raw: String, polish: Bool, translateTarget: String) -> Result {
+    ///
+    /// `tone` is the register the cleanup writes in; translate and the sanity
+    /// guard are unaffected by it (the guard compares against the transcript, not
+    /// against a style).
+    static func refine(raw: String, polish: Bool, translateTarget: String, tone: String) -> Result {
         let base = TextRules.normalizeOutput(
             TextScript.traditional(raw.trimmingCharacters(in: .whitespacesAndNewlines))
         )
         guard polish, !base.isEmpty else { return Result(text: base, note: nil) }
-        let polished = polishOnce(base)
+        let polished = polishOnce(base, tone: tone)
         let translated = translateIfNeeded(polished.text, target: translateTarget)
         return Result(text: translated.text, note: polished.note ?? translated.note)
     }
@@ -181,8 +185,8 @@ enum Refiner {
     }
 
     /// One refine pass, the sanity guard, and the fallback.
-    private static func polishOnce(_ raw: String) -> Result {
-        guard let answer = try? Core.refine(raw) else {
+    private static func polishOnce(_ raw: String, tone: String) -> Result {
+        guard let answer = try? Core.refine(raw, tone: tone) else {
             return Result(text: fallback(raw), note: "整理失敗")
         }
         // Convert again after the model: it may echo Simplified even when asked

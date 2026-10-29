@@ -118,10 +118,16 @@ enum CoreABI {
     /// Cleanup pass with a keywords hint. `stages` is passed straight through to
     /// the engine, which owns the single-vs-two-pass rule. Throws when the LLM
     /// worker is unavailable; callers fall back to the raw transcript.
-    static func refine(_ text: String, keywordsHint: String, stages: UInt32) throws -> String {
+    ///
+    /// `tone` is "casual", "normal" or "formal" -- the register the cleanup
+    /// writes in. The core treats anything else as "normal", so a settings value
+    /// that cannot be parsed costs the user the register, never the dictation.
+    /// `stages` only applies to "normal": the other two registers are
+    /// single-pass by design (see `llm::refine_with_tone`).
+    static func refine(_ text: String, keywordsHint: String, stages: UInt32, tone: String = "normal") throws -> String {
         var out: UnsafeMutablePointer<CChar>?
         let hintC = keywordsHint.isEmpty ? nil : keywordsHint
-        try check(LLM_RefineTextWithKeywordsStages(text, hintC, stages, &out))
+        try check(LLM_RefineTextWithTone(text, hintC, tone, stages, &out))
         guard let p = out else { return "" }
         defer { Core_FreeString(p) }
         return String(cString: p)

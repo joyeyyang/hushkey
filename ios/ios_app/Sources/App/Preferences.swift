@@ -43,6 +43,35 @@ enum TranslateMode: String, CaseIterable {
     }
 }
 
+/// The three registers the cleanup can write in.
+///
+/// The values are the core's own strings ("casual" / "normal" / "formal"), not
+/// an enum of its own: they cross into `SharedStore`, the C ABI and the
+/// keyboard, and a mapping layer here would be a fourth place for a typo to
+/// live. `normal` is the default, exactly as on the Mac.
+enum ToneOption: String, CaseIterable {
+    case casual
+    case normal
+    case formal
+
+    /// Shown in the settings card, in the Mac's wording.
+    var title: String {
+        switch self {
+        case .casual: return "輕鬆"
+        case .normal: return "一般"
+        case .formal: return "正式"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .casual: return "像傳訊息給熟識的同事。"
+        case .normal: return "正式但不生硬，預設。"
+        case .formal: return "對外書信、公文，稱呼用「您」。"
+        }
+    }
+}
+
 /// Preferences the Mac has a settings card for, stored where both sides can read
 /// them.
 ///

@@ -21,6 +21,19 @@ public struct VoiceInputConfig {
     /// Passed straight through to the engine, which owns the rule.
     public var refineStages: UInt32
 
+    /// The register the cleanup writes in: "casual", "normal" (the default) or
+    /// "formal". The engine treats anything else as "normal", so a stale value
+    /// costs the register and never the dictation.
+    ///
+    /// A string rather than an enum for the same reason `translateTarget` is
+    /// one: the value is a settings key that the app, the command-line tool and
+    /// the core all have to agree on, and an enum here would make the three
+    /// copies the thing that drifts.
+    ///
+    /// It only applies to the cleanup (`refineStages`); translate and spoken
+    /// edit have their own jobs and do not take a register.
+    public var refineTone: String
+
     /// What to do about the language of the finished line:
     ///   - "auto" — no separate translate pass; the refine prompt decides.
     ///   - "off"  — no translate pass either, but see `polishEnabled`.
@@ -60,6 +73,7 @@ public struct VoiceInputConfig {
         modelsDirectory: URL = VoiceInputConfig.defaultModelsDirectory(),
         keywords: [String] = [],
         refineStages: UInt32 = 0,
+        refineTone: String = "normal",
         translateTarget: String = "auto",
         llmModel: String? = nil,
         workerExecutable: URL? = nil,
@@ -69,6 +83,7 @@ public struct VoiceInputConfig {
         self.modelsDirectory = modelsDirectory
         self.keywords = keywords
         self.refineStages = refineStages
+        self.refineTone = refineTone
         self.translateTarget = translateTarget
         self.llmModel = llmModel
         self.workerExecutable = workerExecutable

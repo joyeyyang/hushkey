@@ -111,6 +111,50 @@ const UNDERSTAND_SYSTEM: &str = "把下面這段口語改寫成通順、完整�
 - 明顯聽錯的詞，改成合理的詞。\n\
 - 語言跟原文相同，不要翻譯。";
 
+/// Which register the cleanup pass writes in.
+///
+/// The prompt is the only thing that changes between them -- same model, same
+/// examples layout, same code-level rules (Traditional script, no trailing full
+/// stop, keep every fact) -- so a user switching tone is switching one
+/// paragraph, not a different pipeline.
+///
+/// `Normal` is the prompt this app has always shipped. It is deliberately NOT
+/// rebuilt from the other two: its bytes are what every regression case and
+/// every measurement in `docs/` was taken against, so changing it while adding
+/// the other two would make "the same input now reads differently" look like a
+/// tone feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Casual,
+    Normal,
+    Formal,
+}
+
+impl Tone {
+    /// The string the C ABI, the worker task names and the settings file use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tone::Casual => "casual",
+            Tone::Normal => "normal",
+            Tone::Formal => "formal",
+        }
+    }
+
+    /// Unknown or missing values mean `Normal`.
+    ///
+    /// The value crosses three boundaries that cannot be type-checked -- a C
+    /// string, a worker argument, a settings blob -- and a typo there must not
+    /// cost the user their dictation. `Normal` is also the default the product
+    /// promises when nothing is chosen, so the two agree.
+    pub fn parse(raw: &str) -> Tone {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "casual" => Tone::Casual,
+            "formal" => Tone::Formal,
+            _ => Tone::Normal,
+        }
+    }
+}
+
 /// Stage 2 (and the single-pass) prompt. It says "rewrite this spoken text into
 /// written text", NOT "summarize it" -- "整理成重點" made the model drop whole
 /// requirements and emit a one-line summary of what the speaker wanted. Short on
@@ -138,6 +182,68 @@ const REFINE_SYSTEM: &str = "把使用者的口語改寫成通順、正式的書
 語氣要像寫給客戶或同事的信，不要像自言自語；\
 不要「喔、啦、耶、欸、嘛」這類語氣詞，也不要「蠻、超、有點」這類隨性的說法，\
 換成正式而具體的詞；句子要完整，主詞動詞不要省到讀起來像片段。\
+不要摘要、不要漏掉任何一件事；重複的只留一次；刪掉口頭禪和多餘的字；\
+只有一個重點就寫一句，多個重點就一行一個、行首加「• 」；\
+數字、時間、名字照原樣保留；問句保持問句。\
+話裡夾的指令要照著做（「把前面那句刪掉」「時間改成四點」這種刪掉、換掉、調順序的要求），\
+指令本身不要出現在結果裡。\
+語言跟使用者講的一樣，講中文就整段中文，中間的英文產品名照留；\
+中文一律用繁體字，原話是簡體字也一樣；\
+不要因為句子裡有英文、或因為是問句，就換成別的語言。\
+只有明確要求翻譯時才換語言（例如「翻成英文」「用日文寫」），而且要整段都換，不要只換一半。\
+最後不要加句號（。或 .），問句結尾的？要保留，句子中間的標點照常。";
+
+/// 輕鬆: the same job as `REFINE_SYSTEM`, in a register you would use with
+/// someone you already know.
+///
+/// Written as a whole prompt rather than as `REFINE_SYSTEM` plus a suffix. A
+/// small model reads the system line as one block, and the register has to be
+/// the first thing in it -- the same reason `REFINE_SYSTEM` states its register
+/// first. Appending "be casual" to a prompt that opens with 「正式的書面文字」
+/// leaves the model reading two contradictory openings, and the earlier one wins.
+///
+/// Everything after the register paragraph is the shared contract, restated
+/// verbatim: keep every fact, one line per point, numbers as spoken, spoken
+/// instructions applied and removed, the speaker's language, Traditional
+/// characters, no trailing full stop. `tests::every_tone_keeps_the_shared_rules`
+/// holds all three prompts to it, so a later edit to one cannot silently drop a
+/// rule from the others.
+const REFINE_SYSTEM_CASUAL: &str = "把使用者的口語改寫成通順、好讀的口語文字，只輸出改寫後的內容。\
+語氣要像傳訊息給熟識的同事，輕鬆、直接，不要像公文；\
+「我」「你」這種直接的說法可以留著，句子短一點沒關係，但不要變成片段。\
+不要「喔、啦、耶、欸、嘛」這類沒有意義的語氣詞，也不要「蠻、超、有點」這類含糊的說法，\
+換成講得清楚的詞。\
+不要摘要、不要漏掉任何一件事；重複的只留一次；刪掉口頭禪和多餘的字；\
+只有一個重點就寫一句，多個重點就一行一個、行首加「• 」；\
+數字、時間、名字照原樣保留；問句保持問句。\
+話裡夾的指令要照著做（「把前面那句刪掉」「時間改成四點」這種刪掉、換掉、調順序的要求），\
+指令本身不要出現在結果裡。\
+語言跟使用者講的一樣，講中文就整段中文，中間的英文產品名照留；\
+中文一律用繁體字，原話是簡體字也一樣；\
+不要因為句子裡有英文、或因為是問句，就換成別的語言。\
+只有明確要求翻譯時才換語言（例如「翻成英文」「用日文寫」），而且要整段都換，不要只換一半。\
+最後不要加句號（。或 .），問句結尾的？要保留，句子中間的標點照常。";
+
+/// 正式: one step further than `Normal` -- outward-facing correspondence.
+///
+/// The difference from `Normal` is not "more polite adjectives" but three
+/// concrete habits a small model can copy: 您 for the reader, no sentence
+/// fragments, and one idea per sentence. Naming the connectives to prefer
+/// (「因此」「此外」) works the same way as naming the particles to drop in
+/// `REFINE_SYSTEM`: the model follows examples, not adjectives.
+///
+/// There is deliberately NO "turn requests into 敬請…" rule here. It was tried
+/// and measured: with it, an English question ("can you send me the report
+/// before the meeting?") came back as an order ("Please send me the report
+/// prior to the meeting") -- the ask lost its force, which is the same failure
+/// the shared 「問句保持問句」 rule exists to prevent. Politeness is carried by
+/// 您 and by complete sentences; the sentence TYPE stays the speaker's.
+const REFINE_SYSTEM_FORMAL: &str = "把使用者的口語改寫成通順、正式的書面文字，只輸出改寫後的內容。\
+語氣要像對外發的正式書信或公文，稱呼對方一律用「您」；\
+不要「喔、啦、耶、欸、嘛」這類語氣詞，也不要「蠻、超、有點、其實」這類隨性的說法，\
+換成正式而具體的詞；不要用「就是說」「然後」當連接詞，改用「因此」「此外」「另」；\
+句子要完整，主詞動詞不要省到讀起來像片段；一句只講一件事，不要用破折號或括號補充；\
+只改寫原話說的內容，不要自己補上新的事實或新的名詞，原話沒有的詞不要出現。\
 不要摘要、不要漏掉任何一件事；重複的只留一次；刪掉口頭禪和多餘的字；\
 只有一個重點就寫一句，多個重點就一行一個、行首加「• 」；\
 數字、時間、名字照原樣保留；問句保持問句。\
@@ -269,6 +375,58 @@ const REFINE_EXAMPLES_EN: [(&str, &str); 4] = [
     (
         "uh the client meeting is at 2 tomorrow, make that 4",
         "The client meeting has been moved to 4 tomorrow",
+    ),
+];
+
+/// 輕鬆 worked pairs: the same drafts as `REFINE_EXAMPLES_ZH`, answered the way
+/// someone would text a colleague.
+///
+/// They exist for the same reason every other example set does -- a 2B model
+/// copies the shape it just saw far more reliably than it follows a rule -- and
+/// they are a SEPARATE set, not a relabelled one: an example whose answer is
+/// written in the formal register would pull the casual run back toward formal,
+/// which is the whole thing the tone switch is for.
+const REFINE_EXAMPLES_ZH_CASUAL: [(&str, &str); 2] = [
+    (
+        "嗯那個下週三下午三點半你有空嗎，我要跟你討論那個八十萬的案子，然後記得帶合約，喔對你有空嗎",
+        "下週三下午三點半有空嗎？想跟你聊一下八十萬的案子，記得帶合約",
+    ),
+    ("明天下午兩點跟客戶 sync，時間改成四點", "跟客戶的 sync 改成明天下午四點"),
+];
+
+/// 正式 worked pairs: 您, complete sentences, one idea per line.
+const REFINE_EXAMPLES_ZH_FORMAL: [(&str, &str); 2] = [
+    (
+        "嗯那個下週三下午三點半你有空嗎，我要跟你討論那個八十萬的案子，然後記得帶合約，喔對你有空嗎",
+        "請問您下週三下午三點半是否有空？我想與您討論八十萬的案子，請記得攜帶合約",
+    ),
+    ("明天下午兩點跟客戶 sync，時間改成四點", "與客戶的 sync 已改至明天下午四點"),
+];
+
+const REFINE_EXAMPLES_EN_CASUAL: [(&str, &str); 2] = [
+    (
+        "um so I think uh we should probably ship this you know next week because the client is waiting",
+        "I think we should ship this next week, the client's waiting",
+    ),
+    ("uh the client meeting is at 2 tomorrow, make that 4", "Client meeting's moved to 4 tomorrow"),
+];
+
+const REFINE_EXAMPLES_EN_FORMAL: [(&str, &str); 3] = [
+    (
+        "um so I think uh we should probably ship this you know next week because the client is waiting",
+        "It is recommended that we ship this next week, as the client is waiting",
+    ),
+    // A question stays a question. Without this pair the formal run turned
+    // "can you send me the report?" into an order ("Please send me the report
+    // prior to the meeting") -- measured, and exactly the failure the shared
+    // 「問句保持問句」 rule exists to prevent.
+    (
+        "um can you uh send me the report before the meeting? the report before the meeting",
+        "Could you please send me the report before the meeting?",
+    ),
+    (
+        "uh the client meeting is at 2 tomorrow, make that 4",
+        "The client meeting has been rescheduled to 4 tomorrow",
     ),
 ];
 
@@ -584,13 +742,26 @@ fn system_with_hint(base: &str, keywords_hint: &str) -> String {
 
 /// Prompt for cleaning one transcript chunk. `keywords_hint` adds preferred
 /// vocabulary (names, products, jargon) so the model spells them the user's way.
-pub fn refine_prompt_with_hint(text: &str, keywords_hint: &str) -> String {
-    let examples: &[(&str, &str)] = if has_cjk(text) {
-        &REFINE_EXAMPLES_ZH
-    } else {
-        &REFINE_EXAMPLES_EN
+///
+/// `tone` picks the register paragraph AND the worked pairs. Both, not just the
+/// paragraph: the pairs are what a small model actually imitates, so a formal
+/// pair under a casual instruction would answer in the formal register anyway.
+pub fn refine_prompt_with_tone(text: &str, keywords_hint: &str, tone: Tone) -> String {
+    let chinese = has_cjk(text);
+    let (system, examples): (&str, &[(&str, &str)]) = match (tone, chinese) {
+        (Tone::Casual, true) => (REFINE_SYSTEM_CASUAL, &REFINE_EXAMPLES_ZH_CASUAL),
+        (Tone::Casual, false) => (REFINE_SYSTEM_CASUAL, &REFINE_EXAMPLES_EN_CASUAL),
+        (Tone::Formal, true) => (REFINE_SYSTEM_FORMAL, &REFINE_EXAMPLES_ZH_FORMAL),
+        (Tone::Formal, false) => (REFINE_SYSTEM_FORMAL, &REFINE_EXAMPLES_EN_FORMAL),
+        (Tone::Normal, true) => (REFINE_SYSTEM, &REFINE_EXAMPLES_ZH),
+        (Tone::Normal, false) => (REFINE_SYSTEM, &REFINE_EXAMPLES_EN),
     };
-    chatml_few_shot(&system_with_hint(REFINE_SYSTEM, keywords_hint), examples, text)
+    chatml_few_shot(&system_with_hint(system, keywords_hint), examples, text)
+}
+
+/// Prompt for cleaning one transcript chunk in the default register.
+pub fn refine_prompt_with_hint(text: &str, keywords_hint: &str) -> String {
+    refine_prompt_with_tone(text, keywords_hint, Tone::Normal)
 }
 
 /// Prompt for cleaning one transcript chunk.
@@ -984,6 +1155,44 @@ pub fn refine(model_path: &Path, text: &str) -> Result<String> {
 /// (no wrapping quotes, no trailing full stop) hold even when the model ignores
 /// the prompt.
 pub fn refine_with_keywords(model_path: &Path, text: &str, keywords_hint: &str) -> Result<String> {
+    refine_with_tone(model_path, text, keywords_hint, Tone::Normal)
+}
+
+/// Refine in the requested register.
+///
+/// `Normal` is byte-for-byte the old path -- same prompt, same translation
+/// handling -- so choosing the default cannot change an answer that was already
+/// measured.
+///
+/// The other two are single-pass by construction. The two-stage shape starts
+/// with `UNDERSTAND_SYSTEM`, a neutral rewrite that has no notion of register,
+/// so a 2B model hands its neutral sentence to stage 2 and the tone arrives one
+/// rewrite late -- or not at all, because stage 2 then has little left to
+/// change. One pass with a register-specific prompt and register-specific pairs
+/// is both closer to the request and one generation cheaper, so `stages` is
+/// deliberately ignored for these two (see `state::refine_text_with_tone`).
+pub fn refine_with_tone(model_path: &Path, text: &str, keywords_hint: &str, tone: Tone) -> Result<String> {
+    if tone == Tone::Normal {
+        return refine_with_keywords_normal(model_path, text, keywords_hint);
+    }
+    let Some((target, source)) = detect_translation_request(text) else {
+        let raw = generate(model_path, &refine_prompt_with_tone(text, keywords_hint, tone))?;
+        return Ok(tidy_output(&raw));
+    };
+    // One load for both passes: refine in the speaker's language, then translate.
+    let be = backend()?;
+    let model = LlamaModel::load_from_file(be, model_path, &model_params())
+        .map_err(|e| EngineError::new(ErrorCode::ModelLoad, format!("{}: {e}", model_path.display())))?;
+    let refined = tidy_output(&generate_in(
+        &model,
+        &refine_prompt_with_tone(&source, keywords_hint, tone),
+        MAX_NEW_TOKENS,
+    )?);
+    translate_in(&model, &refined, target)
+}
+
+/// The default-register pass, including the translation-request split.
+fn refine_with_keywords_normal(model_path: &Path, text: &str, keywords_hint: &str) -> Result<String> {
     let Some((target, source)) = detect_translation_request(text) else {
         let raw = generate(model_path, &refine_prompt_with_hint(text, keywords_hint))?;
         return Ok(tidy_output(&raw));
@@ -2160,6 +2369,116 @@ mod tests {
     /// The lines of an answer, for the tests that only care about those.
     fn parse_edited_items(answer: &str) -> Vec<String> {
         parse_edited_answer(answer).0
+    }
+
+    // ---- tone ------------------------------------------------------------
+
+    /// The three registers must actually differ, in both languages.
+    ///
+    /// A tone switch that changes only the settings label is the failure this
+    /// test exists for: the three prompts share most of their text on purpose,
+    /// so "they are different strings" is not obvious from reading them.
+    #[test]
+    fn tone_prompts_are_pairwise_different() {
+        for draft in ["嗯那個明天下午三點要跟小林開會", "um so we should ship this next week"] {
+            let casual = refine_prompt_with_tone(draft, "", Tone::Casual);
+            let normal = refine_prompt_with_tone(draft, "", Tone::Normal);
+            let formal = refine_prompt_with_tone(draft, "", Tone::Formal);
+            assert_ne!(casual, normal, "casual vs normal: {draft}");
+            assert_ne!(normal, formal, "normal vs formal: {draft}");
+            assert_ne!(casual, formal, "casual vs formal: {draft}");
+            // Same draft, same tail: only the system line and the worked pairs
+            // may differ, otherwise the comparison is of two different inputs.
+            let user_turn = format!("<|im_start|>user\n{draft}<|im_end|>\n<|im_start|>assistant\n");
+            for prompt in [&casual, &normal, &formal] {
+                assert!(prompt.ends_with(&user_turn), "the draft must be the last user turn");
+            }
+        }
+    }
+
+    /// Choosing nothing must produce the prompt that shipped before the tone
+    /// feature existed. `REFINE_SYSTEM` is not rebuilt from the other two, and
+    /// this is what holds it that way.
+    #[test]
+    fn normal_tone_is_the_prompt_that_shipped() {
+        for draft in ["明天下午三點開會", "we ship next week"] {
+            assert_eq!(
+                refine_prompt_with_tone(draft, "", Tone::Normal),
+                refine_prompt_with_hint(draft, "")
+            );
+            assert_eq!(refine_prompt(draft), refine_prompt_with_tone(draft, "", Tone::Normal));
+        }
+        // And the register paragraph itself is the original text, not a copy
+        // that drifted while the other two were added.
+        assert!(REFINE_SYSTEM.starts_with("把使用者的口語改寫成通順、正式的書面文字"));
+        assert!(REFINE_SYSTEM.contains("不要「喔、啦、耶、欸、嘛」這類語氣詞"));
+    }
+
+    #[test]
+    fn unknown_tone_is_normal() {
+        for raw in ["", " ", "NORMAL", " Normal ", "formal ", "casual", "fast", "正式"] {
+            let expected = match raw.trim().to_ascii_lowercase().as_str() {
+                "casual" => Tone::Casual,
+                "formal" => Tone::Formal,
+                _ => Tone::Normal,
+            };
+            assert_eq!(Tone::parse(raw), expected, "{raw:?}");
+        }
+        // The two known values are matched case-insensitively, so a settings
+        // blob written by a different platform still lands.
+        assert_eq!(Tone::parse("FORMAL"), Tone::Formal);
+        assert_eq!(Tone::parse("Casual"), Tone::Casual);
+        assert_eq!(Tone::Normal.as_str(), "normal");
+        assert_eq!(Tone::parse(Tone::Casual.as_str()), Tone::Casual);
+        assert_eq!(Tone::parse(Tone::Formal.as_str()), Tone::Formal);
+    }
+
+    /// Every register keeps the contract the rest of the product relies on.
+    ///
+    /// These rules are restated in each prompt (a small model reads the system
+    /// line as one block), so this test is what stops a later edit to one
+    /// register from quietly dropping "no summary" from another.
+    #[test]
+    fn every_tone_keeps_the_shared_rules() {
+        let rules = [
+            "不要摘要",
+            "不要漏掉任何一件事",
+            "數字、時間、名字照原樣保留",
+            "中文一律用繁體字",
+            "最後不要加句號",
+        ];
+        for tone in [Tone::Casual, Tone::Normal, Tone::Formal] {
+            let prompt = refine_prompt_with_tone("明天下午三點開會", "", tone);
+            for rule in rules {
+                assert!(prompt.contains(rule), "{tone:?} lost {rule}");
+            }
+        }
+    }
+
+    /// The register paragraph is the first thing in the system line, before any
+    /// worked pair -- the same ordering `REFINE_SYSTEM` uses, for the same
+    /// reason (a small model reads the opening as the instruction).
+    #[test]
+    fn tone_is_stated_before_the_examples() {
+        let draft = "明天下午三點開會";
+        let casual = refine_prompt_with_tone(draft, "", Tone::Casual);
+        let formal = refine_prompt_with_tone(draft, "", Tone::Formal);
+        let casual_at = casual.find("像傳訊息給熟識的同事").expect("casual register");
+        let formal_at = formal.find("像對外發的正式書信或公文").expect("formal register");
+        let first_example_at = casual.find("<|im_start|>user").expect("an example turn");
+        assert!(casual_at < first_example_at, "the register must open the system line");
+        let first_example_at = formal.find("<|im_start|>user").expect("an example turn");
+        assert!(formal_at < first_example_at, "the register must open the system line");
+    }
+
+    /// A keywords hint still rides on the system line in every register, so the
+    /// hint path is not silently dropped by the tone path.
+    #[test]
+    fn tone_prompts_keep_the_keywords_hint() {
+        for tone in [Tone::Casual, Tone::Normal, Tone::Formal] {
+            let prompt = refine_prompt_with_tone("明天開會", "王經理", tone);
+            assert!(prompt.contains("王經理"), "{tone:?}");
+        }
     }
 
     #[test]

@@ -434,6 +434,31 @@ pub fn refine_text_with_keywords(text: &str, keywords_hint: &str) -> Result<Stri
     refine_text_with_keywords_stages(text, keywords_hint, 0)
 }
 
+/// Refine in one of the three registers (`casual` / `normal` / `formal`; anything
+/// else is `normal`).
+///
+/// `stages` keeps its meaning for `normal` only. The other two are single-pass by
+/// design -- the two-stage shape starts with a register-neutral understand pass,
+/// so the tone would arrive one rewrite late (see `llm::refine_with_tone`). A
+/// caller that picked "2 段" and 正式 gets 正式, not 2 段: the register is what
+/// the user asked for out loud, the ladder is a performance knob.
+pub fn refine_text_with_tone(text: &str, keywords_hint: &str, tone: &str, stages: u32) -> Result<String> {
+    let tone = crate::llm::Tone::parse(tone);
+    let _ = text;
+    let model = llm_model_path()?;
+    let stages = match std::env::var("OVC_REFINE_STAGES").ok().and_then(|v| v.trim().parse::<u32>().ok()) {
+        Some(forced @ (1 | 2)) => forced,
+        _ => stages,
+    };
+    let task = match (tone, stages) {
+        (crate::llm::Tone::Normal, 2) => "refine-two-stage",
+        (crate::llm::Tone::Normal, _) => "refine",
+        (crate::llm::Tone::Casual, _) => "refine-casual",
+        (crate::llm::Tone::Formal, _) => "refine-formal",
+    };
+    run_task(task, &model, text, keywords_hint)
+}
+
 /// Refine a transcript, choosing how many model passes to run.
 ///
 /// The two-stage path (understand, then tidy) was tried and measured against the
@@ -1362,6 +1387,11 @@ fn run_in_process(task: &str, model: &Path, text: &str, instruction: &str) -> Re
     match task {
         "refine" => crate::llm::refine_with_keywords(model, text, instruction),
         "refine-two-stage" => crate::llm::refine_two_stage(model, text, instruction),
+        // The tone tasks are separate names rather than an extra argument,
+        // because the worker's contract is positional (`task model instruction`)
+        // and the instruction slot already carries the keywords hint.
+        "refine-casual" => crate::llm::refine_with_tone(model, text, instruction, crate::llm::Tone::Casual),
+        "refine-formal" => crate::llm::refine_with_tone(model, text, instruction, crate::llm::Tone::Formal),
         "summary" => crate::llm::summarize_one(model, instruction, text),
         "translate" => crate::llm::translate(model, text, instruction),
         "edit" => crate::llm::edit_with_instruction(model, text, instruction),
