@@ -121,6 +121,68 @@ enum History {
         entries.reversed().map(\.text).joined(separator: "\n\n")
     }
 
+    /// SubRip (`.srt`), one cue per dictation.
+    ///
+    /// The Mac's SRT comes out of a meeting, where every segment carries the start
+    /// and end the recorder measured. iOS has no meeting mode yet, and the one
+    /// interval it does know is the dictation itself: `HistoryEntry.seconds` is the
+    /// wall-clock time from the first microphone buffer to the published text, so a
+    /// cue runs from the moment the sentence started to the moment it was
+    /// finished. That is the whole truth a phone has here, and it is enough for the
+    /// file to line up with the audio it came from.
+    ///
+    /// `0` seconds is not zero length: it is "nobody measured", which is what an
+    /// entry written before the duration was recorded, or an export of one pasted
+    /// string, looks like. Those get the Mac's half-second floor -- a cue the eye
+    /// can see, rather than a start and an end that are the same instant.
+    static func srt(_ entries: [HistoryEntry] = all()) -> String {
+        // Oldest first: subtitles are read in time order, and so is a video
+        // player, whichever way this list happens to be stored.
+        var spans: [(start: Date, end: Date, text: String)] = []
+        for entry in entries.reversed() {
+            var start = entry.date
+            var end = entry.date.addingTimeInterval(0.5)
+            if entry.seconds > 0 {
+                start = entry.date.addingTimeInterval(-entry.seconds)
+                end = entry.date
+            }
+            // An SRT cue is one line: a newline inside it ends the cue, and the
+            // rest of the sentence is then read as a malformed index.
+            let text = entry.text
+                .replacingOccurrences(of: "\r\n", with: " ")
+                .replacingOccurrences(of: "\r", with: " ")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { continue }
+            spans.append((start, end, text))
+        }
+        // An SRT counts from the start of the media, not from the epoch -- so the
+        // first sentence is 00:00:00,000 and the rest follow it. The origin is the
+        // earliest cue rather than the first entry's `date`, which is a *finish*
+        // time: using it would put the opening sentence at a negative timecode.
+        guard let origin = spans.map(\.start).min() else { return "" }
+        let cues = spans.enumerated().map { offset, span in
+            // Numbered by position, never by anything stored: 1…n with no gaps is
+            // what the format requires.
+            let start = timecode(span.start.timeIntervalSince(origin))
+            let end = timecode(span.end.timeIntervalSince(origin))
+            return "\(offset + 1)\n\(start) --> \(end)\n\(span.text)"
+        }
+        return cues.joined(separator: "\n\n") + "\n"
+    }
+
+    /// `HH:MM:SS,mmm`, clamped at zero. Same shape as the Mac's `timecode`. The
+    /// comma is the format, not a locale.
+    static func timecode(_ seconds: TimeInterval) -> String {
+        let total = Int((max(0, seconds) * 1000).rounded())
+        let milliseconds = total % 1000
+        let whole = total / 1000
+        return String(
+            format: "%02d:%02d:%02d,%03d",
+            whole / 3600, (whole / 60) % 60, whole % 60, milliseconds
+        )
+    }
+
     static func json(_ entries: [HistoryEntry] = all()) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

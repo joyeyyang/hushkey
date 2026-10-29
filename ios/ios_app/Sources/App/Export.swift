@@ -15,6 +15,9 @@ enum Export {
         case markdown
         case txt
         case json
+        /// Subtitles. Not a differently shaped document: an SRT of the same
+        /// sentences, each cue carrying the dictation it came from.
+        case srt
 
         var id: String { rawValue }
 
@@ -23,6 +26,7 @@ enum Export {
             case .markdown: return "Markdown"
             case .txt: return "純文字"
             case .json: return "JSON"
+            case .srt: return "SRT 字幕"
             }
         }
 
@@ -31,6 +35,7 @@ enum Export {
             case .markdown: return "md"
             case .txt: return "txt"
             case .json: return "json"
+            case .srt: return "srt"
             }
         }
     }
@@ -49,6 +54,7 @@ enum Export {
         case .markdown: text = History.markdown(entries)
         case .txt: text = History.plainText(entries)
         case .json: text = History.json(entries)
+        case .srt: text = History.srt(entries)
         }
         do {
             try text.write(to: url, atomically: true, encoding: .utf8)

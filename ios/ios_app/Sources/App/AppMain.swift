@@ -64,6 +64,10 @@ struct OVCApp: App {
         // code appended them. A dictation cannot reproduce it on this recogniser,
         // which normalises English and digits to Chinese, so the rule is checked
         // directly rather than through audio that will not exercise it.
+        if ProcessInfo.processInfo.arguments.contains("-OVC_SRT_PROBE") {
+            Self.runSrtProbe()
+        }
+
         if ProcessInfo.processInfo.arguments.contains("-OVC_MERGE_PROBE") {
             let pairs = [
                 ("開會用Notion記錄", "開會用 Notion 記錄"),
@@ -77,6 +81,40 @@ struct OVCApp: App {
                 )
             }
         }
+    }
+
+    /// `-OVC_SRT_PROBE`: the subtitle file over three synthetic dictations.
+    ///
+    /// The timecodes are the part worth checking, and they cannot be checked by
+    /// eye on a phone: an SRT is read by machines, and a wrong origin -- the epoch,
+    /// midnight, or the first cue's *finish* time instead of its start -- still
+    /// looks exactly like a timecode. The three entries are also chosen for the
+    /// edges: one with a measured duration, one with none (the half-second floor),
+    /// and one with a newline in it (an SRT cue is one line).
+    private static func runSrtProbe() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        // Newest first, the order `History.all()` returns.
+        let entries = [
+            HistoryEntry(id: UUID(), text: "第三句\n有換行。", date: base.addingTimeInterval(90.5),
+                         detail: "", model: "", seconds: 6),
+            HistoryEntry(id: UUID(), text: "第二句沒有時間。", date: base.addingTimeInterval(70),
+                         detail: "", model: "", seconds: 0),
+            HistoryEntry(id: UUID(), text: "今天下午三點要開會。", date: base.addingTimeInterval(12),
+                         detail: "", model: "", seconds: 4),
+        ]
+        let document = History.srt(entries)
+        // Written to `Documents`, not only printed: `simctl launch --console` did
+        // not deliver this app's stdout on the simulator this was checked on, and a
+        // probe nobody can read is not a check. Same reason `DeviceBench` writes
+        // `bench.json` as well as printing.
+        let url = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("srt-probe.srt")
+        try? document.write(to: url, atomically: true, encoding: .utf8)
+        print("OVC_SRT_BEGIN")
+        print(document, terminator: "")
+        print("OVC_SRT_END")
+        Diagnostics.log.notice("srt probe written to \(url.path, privacy: .public)")
     }
 
     private static var isKeyboardProbe: Bool {

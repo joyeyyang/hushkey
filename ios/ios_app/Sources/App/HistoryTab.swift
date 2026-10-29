@@ -166,8 +166,18 @@ struct HistoryTab: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Palette.dim)
 
+            // Four formats, two per row: four across does not fit a phone, and a
+            // menu would hide the one the user came for behind a tap.
             HStack(spacing: 10) {
                 Button("匯出 Markdown") { share = Export.file(.markdown, entries: shown) }
+                    .buttonStyle(QuietButton())
+                    .disabled(shown.isEmpty)
+                Button("匯出 SRT") { share = Export.file(.srt, entries: shown) }
+                    .buttonStyle(QuietButton())
+                    .disabled(shown.isEmpty)
+            }
+            HStack(spacing: 10) {
+                Button("匯出純文字") { share = Export.file(.txt, entries: shown) }
                     .buttonStyle(QuietButton())
                     .disabled(shown.isEmpty)
                 Button("匯出 JSON") { share = Export.file(.json, entries: shown) }
