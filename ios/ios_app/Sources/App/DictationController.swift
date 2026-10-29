@@ -156,6 +156,39 @@ final class DictationController: ObservableObject {
 
     // MARK: start
 
+    /// Gives the LLM's memory back, unless this dictation still needs it.
+    ///
+    /// Called when the app goes to the background. Releasing there is right in
+    /// general — a suspended process holding 1.3 GB is the first thing iOS
+    /// reclaims — and wrong in the middle of a dictation, which is when it usually
+    /// happens: in Mode 1 the user taps the keyboard's microphone, this app comes
+    /// forward and starts recording, and the user goes back to the app they were
+    /// typing in. That is `.background`, and it is the *start* of the pipeline, not
+    /// the end.
+    ///
+    /// The cost of getting this wrong is invisible. The cleanup pass then pays a
+    /// fresh 1.3 GB load inside the ~30 second background window, which a phone
+    /// does not fit in; the deadline fires, the sentence is published 已辨識而未整理,
+    /// and the user's report is the one this project has had twice already: 「AI
+    /// 沒有整理」 — pointing at the model, which was never asked.
+    ///
+    /// A memory warning is a different question and does not come through here:
+    /// there the choice is the sentence or the polish, and the sentence wins.
+    func releaseModelWhenIdle() {
+        // Both outcomes are logged. "The model was released" and "it was not" look
+        // identical from the outside -- both leave the app working, and the
+        // difference only shows up as a cleanup pass that overran later -- so the
+        // decision says which one it made.
+        guard !isBusy else {
+            Diagnostics.log.notice(
+                "model release skipped: a dictation is still in flight"
+            )
+            return
+        }
+        Diagnostics.log.notice("model released: no dictation in flight")
+        Core.releaseModel()
+    }
+
     /// Loads the recogniser before the first dictation.
     ///
     /// The keyboard's microphone tap opens the app and expects it to be recording
@@ -765,7 +798,14 @@ final class DictationController: ObservableObject {
                     guard g == self.generation, self.phase == .recording else { return }
                     for segment in closed { self.transcript += segment.text }
                     self.live = open
-                    SharedStore.setPartial(self.transcript + open)
+                    // The same conversion the final sentence gets, applied here so
+                    // the words do not change script halfway through the sentence
+                    // the user is watching. The recogniser answers in Simplified,
+                    // the delivered text is Traditional, and a strip that shows
+                    // 简体 while speaking and 繁體 once done reads as the text
+                    // having been "corrected" at the end -- when in fact both ends
+                    // are just this transform at two different moments.
+                    SharedStore.setPartial(TextScript.traditional(self.transcript + open))
                 }
             }
         }

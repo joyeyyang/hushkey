@@ -105,8 +105,11 @@ struct RootView: View {
             // Leaving means the app is about to be suspended, and a suspended
             // process holding 1.3 GB of weights is exactly what iOS reclaims
             // first. The next recording prewarms again (`DictationController`).
+            //
+            // Unless a dictation is still in flight, which is the common case
+            // rather than the exception: see `releaseModelWhenIdle`.
             if phase == .background {
-                Core.releaseModel()
+                dictation.releaseModelWhenIdle()
                 // If PiP mode is selected, try to start the PiP window now.
                 // PiP only becomes possible when the app backgrounds.
                 PiPController.shared.startOnBackgroundIfNeeded()
