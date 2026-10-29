@@ -354,6 +354,6 @@ accessibility replacement
 | 台語（Minnan） | 模型支援 `zh-MINNAN`，沒有人用耳朵聽過 |
 | 簽章／公證 | 只做 ad-hoc 簽章 |
 | 資料刪除 UI | 未實作（錄音狀態指示器有） |
-| iOS | M0–M7 見 `docs/milestones.md`：M0–M3、M5 完成，M6 三項數字已量到（2B 整理 2.24–2.91 秒、峰值 1.78 GB，**不需降級**），M7 與 macOS 對齊已補上簡繁轉換、整理守門、翻譯、整理段數、歷史、關鍵字、匯出、音檔匯入、暫停；未完成的是會議模式與語音編輯（附錄 A–E 是五輪複查修掉的東西，附錄 F 是「假降級」根因） |
-| iOS 與 macOS 的實際落差 | 會議模式（iOS 拿不到系統音訊）、語音編輯（iOS 沒有 AX，但鍵盤改得到自己上次插入的字）、5 套主題、SRT、模型 manifest 下載 |
+| iOS | M0–M7 見 `docs/milestones.md`：M0–M3、M5 完成，M6 三項數字已量到（2B 整理 2.24–2.91 秒、峰值 1.78 GB，**不需降級**），M7 與 macOS 對齊已補上簡繁轉換、整理守門、翻譯、整理段數、歷史、關鍵字、匯出、音檔匯入、暫停；App 內與鍵盤上的「修改的提示詞」（B／D2）與三種語氣（E）已完成，guardrail 兩平台共用核心（F）。**待真機**：Mode 2 零跳轉（`docs/evidence/ios-pip-device-checklist.md` 尚未填）、真人用麥克風走一次語音編輯 |
+| iOS 與 macOS 的實際落差 | 會議模式（iOS 拿不到系統音訊）、語音編輯（iOS 沒有 AX，但鍵盤改得到自己上次插入的字；App 內可改整段／第 N 行／選取範圍）、5 套主題、SRT、模型 manifest 下載 |
 | Android | 只有設計筆記 |

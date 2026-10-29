@@ -1571,7 +1571,8 @@ height constraint 而疊在一起，補 `sizeThatFits` 之後才分開）。
 
 ### M.8 驗收與限制
 
-- `xcodebuild` sim／device：BUILD SUCCEEDED。
+- 最終驗收：`cargo test` 107 passed、`swift test` 23 passed、`xcodebuild` sim／device
+  BUILD SUCCEEDED、`scripts/verify.sh` → `ALL CHECKS PASSED`。
 - 模擬器端到端：上面兩次，ack 0.27 s、答案 40 s，文字正確。
 - **Mode 2 的「零跳轉」沒有在真機上驗證**：模擬器沒有 PiP，這條只能真機確認
   （清單見 `docs/evidence/ios-pip-device-checklist.md`）。
