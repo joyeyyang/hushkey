@@ -15,6 +15,27 @@ struct KeyboardProbeView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
+        // `-OVC_KB_PROBE_PANEL` draws the 修改的提示詞 bar on its own, at real
+        // size. It exists because the system keyboard covers the bottom of this
+        // screen -- and a keyboard extension cannot dismiss it -- so the expanded
+        // bar is otherwise only visible on a phone.
+        if ProcessInfo.processInfo.arguments.contains("-OVC_KB_PROBE_PANEL") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("按鉛筆後的樣子（修改的提示詞）")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                VoiceBarPreview(expanded: true)
+                Spacer()
+            }
+            .padding(20)
+            .background(Color(red: 0.08, green: 0.07, blue: 0.065).ignoresSafeArea())
+            .foregroundStyle(Color(red: 0.93, green: 0.90, blue: 0.86))
+        } else {
+            fullProbe
+        }
+    }
+
+    private var fullProbe: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("鍵盤測試")
                 .font(.system(size: 22, weight: .semibold, design: .serif))
@@ -55,6 +76,12 @@ struct KeyboardProbeView: View {
         .foregroundStyle(Color(red: 0.93, green: 0.90, blue: 0.86))
         .onAppear {
             // Focusing in the same runloop pass is ignored; the field has to exist.
+            // `-OVC_KB_PROBE_NOFOCUS` draws the screen without the system
+            // keyboard, which is the only way to photograph the 修改的提示詞
+            // preview underneath it (the keyboard covers the bottom half).
+            guard !ProcessInfo.processInfo.arguments.contains("-OVC_KB_PROBE_NOFOCUS") else {
+                return
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { focused = true }
         }
     }
@@ -76,8 +103,9 @@ struct VoiceBarPreview: UIViewRepresentable {
             bar.showEditPanel(prefill: "把三點改成四點")
             // The field must not take focus here: the probe screen already has
             // one, and a keyboard inside the app's own screen is not the picture
-            // this is for.
-            bar.endEditing(true)
+            // this is for. Resigning has to happen after the view joins the
+            // window, which is where `becomeFirstResponder` finally takes.
+            DispatchQueue.main.async { bar.endEditing(true) }
         }
         return bar
     }

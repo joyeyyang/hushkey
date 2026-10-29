@@ -1,6 +1,7 @@
 import UIKit
 
-/// The whole keyboard: a microphone, a pause button, copy, and the words so far.
+/// The whole keyboard: a microphone, a pause button, copy, the register, and the
+/// words so far.
 ///
 /// There is deliberately **no letter keyboard**. This extension exists for one
 /// thing -- turning speech into text at the cursor -- and a QWERTY row under it
@@ -8,6 +9,12 @@ import UIKit
 /// to type switches back to their own keyboard with the globe on the left; that
 /// button is not decoration, it is the only way out, so it stays even though
 /// nothing else does.
+///
+/// The height is 216 pt, the number the system keyboard uses on a phone. The top
+/// 44 pt is the status strip -- the same band the system spends on its candidate
+/// row -- and it is where the transcript lives, because a keyboard that covers
+/// the text the user is editing has to show what it heard somewhere. Below it is
+/// one control row of 44×44 targets.
 ///
 /// Deliberately not SwiftUI, and deliberately not a capsule: a keyboard extension
 /// gets roughly 30-40 MB of usable memory before the system kills it without an
@@ -37,19 +44,35 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     /// 用說的: ask for a dictation whose result becomes the instruction, rather
     /// than being typed at the cursor.
     var onVoiceInstruction: (() -> Void)?
-    /// 套用: hand the typed instruction to whoever runs the model.
-    var onEditApply: ((String) -> Void)?
+    /// 套用: hand the typed instruction to whoever runs the model. The second
+    /// argument is the region the instruction is about ("whole" / "line" /
+    /// "selection"); the third is the line number, 0 unless the region is a line.
+    var onEditApply: ((String, String, Int) -> Void)?
+    /// The register was changed here: "casual" / "normal" / "formal". The
+    /// controller writes it to the App Group, which is what the app reads.
+    var onToneChange: ((String) -> Void)?
     /// 開啟 Hushkey: the app is not running, so the edit has nowhere to run.
     var onOpenApp: (() -> Void)?
 
-    /// How tall the keyboard is. Everything above this number is spent on the
-    /// transcript, which is the part worth reading.
-    static let height: CGFloat = 126
+    /// The system keyboard's height on a phone, and the number this bar draws at.
+    static let height: CGFloat = 216
 
-    /// With the 修改的提示詞 panel open. The extra is one field and one row of
-    /// buttons; the transcript keeps its two lines, because the user still wants
-    /// to see what is about to be changed.
-    static let expandedHeight: CGFloat = 208
+    /// With the 修改的提示詞 panel open: one region row, one field, one button
+    /// row. The transcript keeps whatever the strip has left, because the user
+    /// still wants to see what is about to be changed.
+    ///
+    /// 216 + 104 + 8 of spacing, less the 34 the home indicator already owns:
+    /// the panel fits without the transcript losing its 44 pt band.
+    static let expandedHeight: CGFloat = 304
+
+    /// The band at the top: the same 44 pt the system spends on candidates. The
+    /// transcript gets it, and grows into the space the control row leaves.
+    static let candidateBarHeight: CGFloat = 44
+
+    /// One target size for every control, per the platform's own guidance.
+    private static let controlSize: CGFloat = 44
+    private static let margin: CGFloat = 12
+    private static let gap: CGFloat = 8
 
     private let ink = UIColor(red: 0.93, green: 0.90, blue: 0.86, alpha: 1)
     private let seal = UIColor(red: 0.76, green: 0.27, blue: 0.18, alpha: 1)
@@ -60,10 +83,18 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     private let copyButton = UIButton(type: .system)
     private let globeButton = UIButton(type: .system)
     private let editButton = UIButton(type: .system)
+    private let toneControl = UISegmentedControl(items: ["輕鬆", "一般", "正式"])
     private let statusLabel = UILabel()
     private let spinner = UIActivityIndicatorView(style: .medium)
 
     private let panel = UIStackView()
+    /// The three regions, as chips rather than a `UISegmentedControl`: the middle
+    /// one has to open a menu of the draft's lines, and a segmented control can
+    /// only take a tap action, not a menu.
+    private let regionRow = UIStackView()
+    private let wholeChip = UIButton(type: .system)
+    private let lineChip = UIButton(type: .system)
+    private let selectionChip = UIButton(type: .system)
     private let instructionField = UITextField()
     private let voiceButton = UIButton(type: .system)
     private let cancelButton = UIButton(type: .system)
@@ -71,10 +102,22 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     private let openButton = UIButton(type: .system)
     private var heightConstraint: NSLayoutConstraint!
 
+    /// "whole" / "line" / "selection" -- the same words the App Group request
+    /// carries and the app's `PromptEditRegion` is built from.
+    private var region = "whole"
+    /// The line the 第 N 行 chip points at, 1-based. Kept here rather than read
+    /// off the chip title, which is localised text.
+    private var lineNumber = 1
+    /// How many lines the draft has, for the line menu. Set by the controller.
+    private var lineCount = 1
+
     /// True while the panel is up. The controller asks before it overwrites the
     /// status line with a phase: the panel's own messages are the ones the user
     /// is acting on.
     var isEditing: Bool { !panel.isHidden }
+
+    /// The register the bar is showing, as the core's own string.
+    private(set) var tone = "normal"
 
     private var look: Look = .idle
     private var paused = false
@@ -93,23 +136,27 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     private func build() {
         let column = UIStackView()
         column.axis = .vertical
-        column.spacing = 10
+        column.spacing = Self.gap
         column.translatesAutoresizingMaskIntoConstraints = false
         addSubview(column)
 
-        // The transcript, two lines of it. The keyboard is where the user is
-        // already looking, so this is the only live view of what was heard that
-        // does not require leaving the app they are typing in.
+        // The transcript, in the band the system would spend on candidates. It
+        // is allowed to grow into whatever the control row leaves, because the
+        // sentence being dictated is the one thing worth reading here.
         statusLabel.font = .systemFont(ofSize: 15)
         statusLabel.textColor = dim
-        statusLabel.numberOfLines = 2
+        statusLabel.numberOfLines = 0
         statusLabel.lineBreakMode = .byTruncatingHead
+        statusLabel.setContentHuggingPriority(.init(1), for: .vertical)
+        statusLabel.heightAnchor
+            .constraint(greaterThanOrEqualToConstant: Self.candidateBarHeight)
+            .isActive = true
         column.addArrangedSubview(statusLabel)
 
         let row = UIStackView()
         row.axis = .horizontal
         row.alignment = .center
-        row.spacing = 12
+        row.spacing = 4
         column.addArrangedSubview(row)
 
         configure(globeButton, symbol: "globe", label: "下一個鍵盤", size: 18)
@@ -122,6 +169,11 @@ final class VoiceBar: UIView, UITextFieldDelegate {
 
         configure(editButton, symbol: "pencil", label: "修改的提示詞", size: 22)
         editButton.addTarget(self, action: #selector(editTapped), for: .touchUpInside)
+        // A long press is 用說的 without opening the panel first: it starts the
+        // same dictation and the panel opens when the words come back.
+        let hold = UILongPressGestureRecognizer(target: self, action: #selector(editHeld(_:)))
+        hold.minimumPressDuration = 0.4
+        editButton.addGestureRecognizer(hold)
         row.addArrangedSubview(editButton)
 
         configure(copyButton, symbol: "doc.on.doc", label: "複製", size: 25)
@@ -134,15 +186,18 @@ final class VoiceBar: UIView, UITextFieldDelegate {
 
         // The microphone is the one control that is always usable and always the
         // biggest: it is what the user came here for.
-        micButton.layer.cornerRadius = 26
+        micButton.layer.cornerRadius = Self.controlSize / 2
         micButton.layer.borderWidth = 1
         micButton.layer.borderColor = seal.cgColor
         micButton.tintColor = seal
         micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
-        micButton.widthAnchor.constraint(equalToConstant: 52).isActive = true
-        micButton.heightAnchor.constraint(equalToConstant: 52).isActive = true
+        micButton.widthAnchor.constraint(equalToConstant: Self.controlSize).isActive = true
+        micButton.heightAnchor.constraint(equalToConstant: Self.controlSize).isActive = true
         micButton.accessibilityLabel = "Hushkey 麥克風"
         row.addArrangedSubview(micButton)
+
+        buildToneControl()
+        row.addArrangedSubview(toneControl)
 
         spinner.translatesAutoresizingMaskIntoConstraints = false
         spinner.hidesWhenStopped = true
@@ -157,27 +212,81 @@ final class VoiceBar: UIView, UITextFieldDelegate {
         column.addArrangedSubview(panel)
 
         heightConstraint = heightAnchor.constraint(equalToConstant: Self.height)
+        // The bottom is the SAFE AREA's, not the view's: the extension's frame
+        // reaches under the home indicator, and a row pinned to the view's bottom
+        // would sit in the swipe-up area where the system eats the taps.
         NSLayoutConstraint.activate([
-            column.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            column.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            column.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            column.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -12),
+            column.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.margin),
+            column.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.margin),
+            column.topAnchor.constraint(equalTo: topAnchor, constant: Self.gap),
+            column.bottomAnchor.constraint(
+                equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -Self.gap),
             heightConstraint,
         ])
     }
 
-    /// The 修改的提示詞 panel: one field, three buttons.
+    /// 輕鬆 / 一般 / 正式, immediately to the microphone's right.
+    ///
+    /// A segmented control rather than three buttons: one of three is always
+    /// chosen, and the shape says so. It writes through `onToneChange` instead of
+    /// touching the App Group itself, so the value has exactly one owner (the
+    /// controller, which also reads it back when the app's settings change).
+    private func buildToneControl() {
+        toneControl.selectedSegmentIndex = 1
+        toneControl.selectedSegmentTintColor = UIColor.white.withAlphaComponent(0.16)
+        toneControl.backgroundColor = UIColor.white.withAlphaComponent(0.06)
+        toneControl.setTitleTextAttributes(
+            [.foregroundColor: dim, .font: UIFont.systemFont(ofSize: 11, weight: .medium)],
+            for: .normal
+        )
+        toneControl.setTitleTextAttributes(
+            [.foregroundColor: ink, .font: UIFont.systemFont(ofSize: 11, weight: .semibold)],
+            for: .selected
+        )
+        toneControl.accessibilityLabel = "回答模式"
+        toneControl.addTarget(self, action: #selector(toneChanged), for: .valueChanged)
+        // It must never truncate its own labels -- "…" three times is not a mode
+        // picker. The spacer on the row's left is what gives up the width, not
+        // this control.
+        toneControl.setContentCompressionResistancePriority(.init(999), for: .horizontal)
+        toneControl.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    }
+
+    /// The 修改的提示詞 panel: a region, one field, one row of buttons.
+    ///
+    /// The region is first because it decides what the instruction means. 整段
+    /// hands the whole draft to the core; 第 N 行 prepends the position the core
+    /// resolves ("第3點…") and leaves the user's words untouched; 選取範圍 hands
+    /// the selected slice over as if it were the whole text, so the rest of the
+    /// draft cannot be rewritten.
     ///
     /// The field is editable with a hardware keyboard, which is what an iPad with
     /// a keyboard case has. It is NOT how a phone types: iOS does not present a
     /// system keyboard for a field inside a keyboard extension, so on a phone the
     /// instruction arrives through 用說的 -- the app records it, transcribes it,
     /// and the panel shows the words for the user to fix or apply. Both routes end
-    /// at the same `套用`, which is the only thing that calls the model.
+    /// at the same 套用, which is the only thing that calls the model.
     private func buildPanel() {
         panel.axis = .vertical
-        panel.spacing = 8
+        panel.spacing = 6
         panel.isHidden = true
+
+        regionRow.axis = .horizontal
+        regionRow.spacing = 6
+        regionRow.distribution = .fillEqually
+        styleChip(wholeChip, title: "整段")
+        styleChip(lineChip, title: "第 1 行")
+        styleChip(selectionChip, title: "選取範圍")
+        wholeChip.addTarget(self, action: #selector(wholeTapped), for: .touchUpInside)
+        selectionChip.addTarget(self, action: #selector(selectionTapped), for: .touchUpInside)
+        // The middle chip is a menu button: tapping it lists the draft's lines
+        // instead of selecting the region, and picking one does both.
+        lineChip.showsMenuAsPrimaryAction = true
+        regionRow.addArrangedSubview(wholeChip)
+        regionRow.addArrangedSubview(lineChip)
+        regionRow.addArrangedSubview(selectionChip)
+        panel.addArrangedSubview(regionRow)
+        paintRegion()
 
         instructionField.delegate = self
         instructionField.font = .systemFont(ofSize: 14)
@@ -228,6 +337,31 @@ final class VoiceBar: UIView, UITextFieldDelegate {
         panel.addArrangedSubview(panelRow)
     }
 
+    /// One region chip: the same dark-on-dark shape as the field, so the panel
+    /// reads as one block rather than three controls from three eras.
+    private func styleChip(_ button: UIButton, title: String) {
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
+        button.layer.cornerRadius = 7
+        button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        button.accessibilityLabel = title
+        paintChip(button, selected: false)
+    }
+
+    private func paintChip(_ button: UIButton, selected: Bool) {
+        button.backgroundColor = UIColor.white.withAlphaComponent(selected ? 0.16 : 0.06)
+        button.setTitleColor(selected ? ink : dim, for: .normal)
+        button.titleLabel?.font = .systemFont(
+            ofSize: 12, weight: selected ? .semibold : .medium
+        )
+    }
+
+    private func paintRegion() {
+        paintChip(wholeChip, selected: region == "whole")
+        paintChip(lineChip, selected: region == "line")
+        paintChip(selectionChip, selected: region == "selection")
+    }
+
     private func style(_ button: UIButton, title: String, symbol: String?) {
         var config = UIButton.Configuration.plain()
         config.title = title
@@ -267,12 +401,92 @@ final class VoiceBar: UIView, UITextFieldDelegate {
         heightConstraint.constant = Self.height
         instructionField.resignFirstResponder()
         instructionField.text = ""
+        region = "whole"
+        paintRegion()
         superview?.layoutIfNeeded()
     }
 
     /// The instruction as it stands, trimmed.
     var instructionText: String {
         (instructionField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// "whole" / "line" / "selection", the same words the App Group request
+    /// carries and the app's `PromptEditRegion` is built from.
+    var editRegion: String { region }
+
+    /// The line the 第 N 行 chip points at, 1-based; 0 for the other regions.
+    var editLine: Int { region == "line" ? lineNumber : 0 }
+
+    /// The lines the line picker offers, in the order the core numbers them.
+    ///
+    /// The keyboard cannot number the draft the way the core does without
+    /// duplicating `numbered_items`, so the caller passes the lines it counted
+    /// (`PromptEdit.lines` on the app side is the same rule). What the user picks
+    /// here is what the core resolves, because the number goes into the
+    /// instruction verbatim.
+    func setDraftLines(_ lines: [String]) {
+        currentLines = lines
+        lineCount = max(1, lines.count)
+        lineNumber = min(max(1, lineNumber), lineCount)
+        rebuildLineMenu()
+    }
+
+    /// Kept so `selectLine` can rebuild the menu with the new check mark without
+    /// the caller handing the lines over again.
+    private var currentLines: [String] = []
+
+    private func rebuildLineMenu() {
+        lineChip.setTitle("第 \(lineNumber) 行 ▾", for: .normal)
+        let actions = currentLines.enumerated().map { index, text in
+            UIAction(
+                title: "第 \(index + 1) 行：\(Self.preview(text))",
+                state: index + 1 == lineNumber ? .on : .off
+            ) { [weak self] _ in
+                self?.selectLine(index + 1)
+            }
+        }
+        lineChip.menu = UIMenu(children: actions.isEmpty
+            ? [UIAction(title: "沒有可選的行", attributes: .disabled) { _ in }]
+            : actions)
+    }
+
+    private func selectLine(_ number: Int) {
+        lineNumber = min(max(1, number), lineCount)
+        region = "line"
+        paintRegion()
+        rebuildLineMenu()
+    }
+
+    private static func preview(_ text: String) -> String {
+        let flat = text.replacingOccurrences(of: "\n", with: " ")
+        return flat.count <= 14 ? flat : String(flat.prefix(14)) + "…"
+    }
+
+    /// The non-empty lines of a draft, in the order the core numbers them.
+    ///
+    /// Bullets and existing numbers are stripped for the menu's title only; the
+    /// COUNT is what has to agree with the core, because the number the user
+    /// picks is the number the core resolves. Same rule as the app's
+    /// `PromptEdit.lines`, which the keyboard cannot import (different target).
+    static func lines(of text: String) -> [String] {
+        text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { line in
+                var body = line
+                for bullet in ["• ", "- ", "・"] where body.hasPrefix(bullet) {
+                    body = String(body.dropFirst(bullet.count))
+                }
+                if let dot = body.firstIndex(where: { $0 == "." || $0 == "、" || $0 == ")" }) {
+                    let head = body[body.startIndex..<dot]
+                    if !head.isEmpty, head.allSatisfy({ $0.isNumber }) {
+                        body = String(body[body.index(after: dot)...])
+                    }
+                }
+                return body.trimmingCharacters(in: .whitespaces)
+            }
+            .filter { !$0.isEmpty }
     }
 
     /// A one-line progress message that keeps the panel usable.
@@ -392,9 +606,59 @@ final class VoiceBar: UIView, UITextFieldDelegate {
 
     @objc private func micTapped() { onMic?() }
     @objc private func editTapped() { onEdit?() }
+
+    /// A long press on the pencil starts 用說的 directly: the panel is where the
+    /// instruction ends up, so opening it first is a step the user does not need.
+    @objc private func editHeld(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        onVoiceInstruction?()
+    }
+
     @objc private func voiceInstructionTapped() { onVoiceInstruction?() }
     @objc private func cancelTapped() { hideEditPanel() }
     @objc private func openTapped() { onOpenApp?() }
+
+    @objc private func wholeTapped() {
+        region = "whole"
+        paintRegion()
+    }
+
+    @objc private func selectionTapped() {
+        region = "selection"
+        paintRegion()
+    }
+
+    @objc private func toneChanged() {
+        tone = Self.toneValue(for: toneControl.selectedSegmentIndex)
+        onToneChange?(tone)
+    }
+
+    /// Shows the register the app's settings hold, without telling anyone about
+    /// it: this is the reading half of the two-way sync, and reporting it back
+    /// would be a write loop between two processes.
+    func setTone(_ value: String) {
+        guard value != tone else { return }
+        tone = value
+        let index = Self.toneIndex(for: value)
+        guard toneControl.selectedSegmentIndex != index else { return }
+        toneControl.selectedSegmentIndex = index
+    }
+
+    static func toneIndex(for value: String) -> Int {
+        switch value {
+        case "casual": return 0
+        case "formal": return 2
+        default: return 1
+        }
+    }
+
+    static func toneValue(for index: Int) -> String {
+        switch index {
+        case 0: return "casual"
+        case 2: return "formal"
+        default: return "normal"
+        }
+    }
 
     @objc private func applyTapped() {
         guard !instructionText.isEmpty else {
@@ -402,7 +666,7 @@ final class VoiceBar: UIView, UITextFieldDelegate {
             statusLabel.textColor = seal
             return
         }
-        onEditApply?(instructionText)
+        onEditApply?(instructionText, editRegion, editLine)
     }
 
     /// Return on the hardware keyboard is the same as 套用 -- the field is a
@@ -415,3 +679,201 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     @objc private func pauseTapped() { onPause?() }
     @objc private func nextTapped() { onNext?() }
 }
+
+// MARK: - A spoken line that is an instruction
+
+/// Whether a recognised line is an instruction to EDIT something rather than
+/// text to paste.
+///
+/// Ported from the Mac's `VoiceEdit.swift` (`isVoiceEditInstruction` and its
+/// helpers), where it decides whether a dictation applies to the text before the
+/// cursor instead of being inserted. The predicate is a pure function of its
+/// argument: no model, no draft, no I/O -- which is what lets the keyboard decide
+/// in the half-second after recognition, on a phone that cannot afford a second
+/// inference to ask "did they mean to edit?".
+///
+/// The gate requires BOTH an edit verb and a reference to the thing being
+/// edited, and that conjunction is the entire safety property. A false positive
+/// is expensive: the user's words would be applied as an edit to whatever came
+/// before instead of being inserted where they are speaking. A false negative
+/// costs almost nothing, because the refine prompt already applies a spoken
+/// instruction it finds inside a draft. So this errs towards missing.
+///
+/// Here the verdict is used for one thing only: a dictation that reads as an
+/// instruction opens the 修改的提示詞 panel with those words in it, instead of
+/// being typed at the cursor. Nothing is applied without 套用, so even a false
+/// positive costs one tap rather than the sentence.
+///
+/// Samples this was built against, identical to the Mac's test target
+/// (`VoiceEditInstructionTests`), so the two copies can be re-checked against the
+/// same list:
+///
+///   accepted: 把第二點改成禮拜五下午兩點
+///             第三句刪掉
+///             delete the second one
+///             把最後一句改短一點
+///             把地點改成三樓會議室
+///             把小林改成大衛
+///             把三點改成四點
+///             第二句改短一點
+///   rejected: 顏色改成藍色
+///             我把檔案刪掉了
+///             這個會議改成線上開
+///             我用英文寫了一封信
+///             第一點要改善
+///             最後一段需要修改
+func isVoiceEditInstruction(_ text: String) -> Bool {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return false }
+    return containsEditVerb(trimmed) && containsEditTarget(trimmed)
+}
+
+/// The verb half. Latin verbs match whole words only, so "change" does not fire
+/// inside "exchange". The Chinese list is substring matching, which is what
+/// Chinese allows -- there are no token boundaries to anchor to -- and it includes
+/// bare 改 as a stem so 改短／改一下 all count; a bare stem is safe here precisely
+/// because the verb alone is never enough.
+private func containsEditVerb(_ text: String) -> Bool {
+    let chinese = ["改成", "改為", "換成", "刪掉", "刪除", "拿掉", "去掉", "移除",
+                   "縮短", "精簡", "重寫", "變成", "移到", "調順序", "加一句", "補一句",
+                   "改短", "改長", "改小", "改大", "改多", "改少", "改簡", "改複"]
+    if chinese.contains(where: { text.contains($0) }) { return true }
+    // The bare stem 改 only counts inside an imperative frame: on its own it is a
+    // substring of 改善／修改／改天, so "第一點要改善" -- an ordinary sentence about
+    // text -- would read as an instruction.
+    if text.contains("改") && ["把", "請", "幫", "將", "給我"].contains(where: { text.contains($0) }) {
+        return true
+    }
+
+    let latin = ["change", "replace", "delete", "remove", "shorten", "rewrite", "make it"]
+    let lower = text.lowercased()
+    return latin.contains { containsWord(lower, $0) }
+}
+
+/// The target half: a pointer at the line the instruction is about.
+///
+/// The core resolves the target in one of two ways, and this gate has to
+/// recognise the same two, or it turns away instructions the core can carry
+/// out: a POSITION ("第二句", "the third one") and a CONTENT WORD ("把地點改成
+/// 三樓會議室").
+private func containsEditTarget(_ text: String) -> Bool {
+    // 第 + a number + a unit: 第二點, 第3句, 第十段. 最後一句 is handled below.
+    if text.range(of: "第[0-9一二三四五六七八九十兩]+[段句點行條個]",
+                  options: .regularExpression) != nil { return true }
+    // The line or paragraph just written.
+    if ["這句", "這段", "這一段"].contains(where: { text.contains($0) }) { return true }
+    // A positional pointer. 那 is optional: 最後一句 and 最後那句 mean the same.
+    if text.range(of: "(前面|最後|後面|上面|下面)(那|一)?[段句點行條個]",
+                  options: .regularExpression) != nil { return true }
+
+    // Latin pointers: a bare "that line", or an ordinal acting as a determiner.
+    let lower = text.lowercased()
+    if ["that line", "that sentence", "that paragraph"].contains(where: { lower.contains($0) }) {
+        return true
+    }
+    for ordinal in ["the first", "the second", "the last"] {
+        var search = lower.startIndex..<lower.endIndex
+        while let range = lower.range(of: ordinal, range: search) {
+            if ordinalFollowedByNoun(lower, after: range.upperBound) { return true }
+            search = range.upperBound..<lower.endIndex
+        }
+    }
+    // A CONTENT WORD: the thing named before the change verb ("把地點改成…" names
+    // 地點). The same extraction the core does, so the gate agrees with what the
+    // core can actually resolve.
+    if editContentWord(text) != nil { return true }
+    return false
+}
+
+/// The word an instruction names as the thing to change, if it names one.
+///
+/// Take what comes BEFORE the change verb (that is the target; what comes after
+/// is the replacement), strip the framing words, and keep what is left. The
+/// instruction has to READ as an instruction, not as a sentence about changing
+/// something: "把地點改成…" is an order, "顏色改成藍色" is a statement.
+private func editContentWord(_ text: String) -> String? {
+    guard hasImperativeFrame(text) else { return nil }
+    let verbs = ["改成", "換成", "改為", "換", "改", "刪掉", "刪除", "拿掉", "去掉"]
+    var head = text
+    for verb in verbs {
+        if let at = head.range(of: verb) {
+            head = String(head[head.startIndex..<at.lowerBound])
+            break
+        }
+    }
+    // The framing words are the ones that say nothing about WHAT is changing.
+    let framing = ["請幫我", "幫我", "請", "幫", "把", "給我", "我要", "我想", "要", "的", "了"]
+    for word in framing {
+        head = head.replacingOccurrences(of: word, with: " ")
+    }
+    let parts = head.split(whereSeparator: { $0.isWhitespace || "，,。.、；;：:！!？?「」『』".contains($0) })
+    for part in parts {
+        let candidate = part.trimmingCharacters(in: .whitespaces)
+        // A single character is too short to be a target on its own, and a bare
+        // number is a position, which is handled above.
+        guard candidate.count >= 2 else { continue }
+        if candidate.allSatisfy({ $0.isNumber }) { continue }
+        return candidate
+    }
+    return nil
+}
+
+/// True when the instruction opens like an order rather than like a statement.
+///
+/// The frame has to be at the FRONT: "把地點改成三樓會議室" is an order, and
+/// "我把檔案刪掉了" has the same 把 with 我 in front of it, which makes it a
+/// report of something already done.
+private func hasImperativeFrame(_ text: String) -> Bool {
+    var rest = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    // The politeness that can come first: 請 / 幫我 / 麻煩 / 能不能.
+    let lead = ["請幫我", "幫我", "請", "麻煩", "能不能", "可以"]
+    var changed = true
+    while changed {
+        changed = false
+        for word in lead where rest.hasPrefix(word) {
+            rest = String(rest.dropFirst(word.count))
+            rest = rest.trimmingCharacters(in: .whitespaces)
+            changed = true
+        }
+    }
+    // The Chinese order frame.
+    if ["把", "將"].contains(where: { rest.hasPrefix($0) }) { return true }
+    // The English one: the verb opens the sentence. "I deleted the file" has
+    // the verb in the middle and is a statement.
+    let lower = rest.lowercased()
+    let verbs = ["change", "replace", "delete", "remove", "shorten", "rewrite", "make it"]
+    return verbs.contains { lower.hasPrefix($0) }
+}
+
+/// True when an ordinal is a determiner for a following word: "the second one"
+/// is a target, a trailing "the second" is not, and "the second-guess" is not
+/// either -- a hyphen is not the space a noun needs.
+private func ordinalFollowedByNoun(_ lower: String, after index: String.Index) -> Bool {
+    var i = index
+    var sawSpace = false
+    while i < lower.endIndex {
+        let character = lower[i]
+        if character.isLetter { return sawSpace }
+        guard character == " " else { return false }
+        sawSpace = true
+        i = lower.index(after: i)
+    }
+    return false
+}
+
+/// Whole-word lookup in already-lowercased text: neither character flanking the
+/// match may be a letter. Latin gets this and Chinese does not because only
+/// Latin writes words without spaces between them.
+private func containsWord(_ lower: String, _ needle: String) -> Bool {
+    var search = lower.startIndex..<lower.endIndex
+    while let range = lower.range(of: needle, range: search) {
+        let beforeIsBoundary = range.lowerBound == lower.startIndex
+            || !lower[lower.index(before: range.lowerBound)].isLetter
+        let afterIsBoundary = range.upperBound == lower.endIndex
+            || !lower[range.upperBound].isLetter
+        if beforeIsBoundary && afterIsBoundary { return true }
+        search = range.upperBound..<lower.endIndex
+    }
+    return false
+}
+

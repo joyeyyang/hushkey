@@ -359,6 +359,16 @@ enum SharedStore {
         /// What to change, verbatim: the user's own words, never paraphrased.
         var instruction: String
         var at: Double
+        /// Which part of the draft the instruction is about: "whole", "line" or
+        /// "selection". Optional because requests written before the region
+        /// picker existed carry no such key, and a decode failure would strand
+        /// them in the group forever.
+        var region: String?
+        /// The 1-based line for `region == "line"`; 0 or nil otherwise.
+        var line: Int?
+        /// The text the user selected in the document, for `region ==
+        /// "selection"`. The app finds it in the draft and edits only that slice.
+        var selection: String?
     }
 
     /// The app's answer to one `EditRequest`. `text` and `error` are exclusive;
@@ -403,10 +413,16 @@ enum SharedStore {
     }
 
     /// Writes the request and announces it. Returns the sequence to wait on.
+    ///
+    /// `region` is "whole" / "line" / "selection"; `selection` is the selected
+    /// text, needed only for the last one. Both default to the whole draft, which
+    /// is what the panel did before it had a region picker.
     @discardableResult
-    static func requestEdit(draft: String, instruction: String) -> Int {
+    static func requestEdit(draft: String, instruction: String,
+                            region: String = "whole", line: Int = 0,
+                            selection: String? = nil) -> Int {
         guard let defaults else { return 0 }
-        let previous = (try? defaults.data(forKey: EditKey.request))
+        let previous = defaults.data(forKey: EditKey.request)
             .flatMap { try? JSONDecoder().decode(EditRequest.self, from: $0) }
         let seq = max(
             previous?.seq ?? 0,
@@ -415,7 +431,8 @@ enum SharedStore {
         ) + 1
         let request = EditRequest(
             seq: seq, draft: draft, instruction: instruction,
-            at: Date().timeIntervalSince1970
+            at: Date().timeIntervalSince1970,
+            region: region, line: line, selection: selection
         )
         if let data = try? JSONEncoder().encode(request) {
             defaults.set(data, forKey: EditKey.request)

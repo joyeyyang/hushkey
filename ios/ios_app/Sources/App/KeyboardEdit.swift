@@ -52,12 +52,38 @@ enum KeyboardEdit {
             )
             return
         }
+        // The region decides what the core is handed. "line" prepends the
+        // position the core resolves ("第3點…") and leaves the user's words
+        // untouched; "selection" hands the selected slice over as if it were the
+        // whole draft, so the rest of the text cannot be rewritten; anything
+        // else is the whole draft.
+        let region = request.region ?? "whole"
+        var target = request.draft
+        var instruction = request.instruction
+        var slice: Range<String.Index>?
+        switch region {
+        case "line":
+            instruction = "第\(max(1, request.line ?? 0))點" + instruction
+        case "selection":
+            let selected = (request.selection ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !selected.isEmpty, let found = target.range(of: selected) else {
+                SharedStore.publishEditResult(
+                    seq: request.seq, text: nil,
+                    error: "選取範圍不在剛才插入的文字裡，原文沒有變動。"
+                )
+                return
+            }
+            slice = found
+            target = selected
+        default:
+            break
+        }
         do {
             // Idempotent in `Core`, and required before any `LLM_*` call: it is
             // what points the engine at the model tree.
             try Core.initialize(models: SharedStore.modelsRoot)
             let edited = TextScript.traditional(
-                try Core.edit(request.draft, instruction: request.instruction)
+                try Core.edit(target, instruction: instruction)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             )
             guard !edited.isEmpty else {
@@ -66,7 +92,7 @@ enum KeyboardEdit {
                 )
                 return
             }
-            guard edited != request.draft else {
+            guard edited != target else {
                 // The core refuses an answer that changed nothing, so this is a
                 // model that repeated the draft -- measured as the common
                 // outcome for a vague instruction.
@@ -76,12 +102,12 @@ enum KeyboardEdit {
                 )
                 return
             }
-            let verdict = TextRules.sanityCheck(edited, comparedTo: request.draft, mode: "edit")
+            let verdict = TextRules.sanityCheck(edited, comparedTo: target, mode: "edit")
             guard verdict.ok else {
                 Diagnostics.log.error("keyboard edit rejected: \(verdict.reason, privacy: .public)")
                 HallucinationLog.record(
                     mode: "edit", tone: SharedStore.refineTone,
-                    raw: request.draft, refined: edited, reason: verdict.reason
+                    raw: target, refined: edited, reason: verdict.reason
                 )
                 SharedStore.publishEditResult(
                     seq: request.seq, text: nil,
@@ -89,7 +115,10 @@ enum KeyboardEdit {
                 )
                 return
             }
-            SharedStore.publishEditResult(seq: request.seq, text: edited, error: nil)
+            // The slice goes back where it came from; the whole-draft path has
+            // no slice and returns the answer as it stands.
+            let result = slice.map { request.draft.replacingCharacters(in: $0, with: edited) } ?? edited
+            SharedStore.publishEditResult(seq: request.seq, text: result, error: nil)
         } catch {
             Diagnostics.log.error("keyboard edit failed: \(error.localizedDescription, privacy: .public)")
             SharedStore.publishEditResult(

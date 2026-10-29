@@ -81,6 +81,11 @@ final class KeyboardViewController: UIInputViewController {
 
         if let ready = session.text, !ready.isEmpty { lastText = ready }
 
+        // The register is the app's setting; the bar only draws it. Read back on
+        // every tick so a change made in Settings shows up here, and so the two
+        // processes cannot end up showing different modes.
+        bar.setTone(SharedStore.refineTone)
+
         // The panel's status line is the one the user is acting on, so a phase
         // update must not paint over "修改中…" or "請先開啟 Hushkey 一次".
         if editSeq == nil {
@@ -119,7 +124,17 @@ final class KeyboardViewController: UIInputViewController {
             let draft = SharedStore.instructionDictationDraft
             SharedStore.instructionDictationDraft = ""
             if !draft.isEmpty { lastText = draft }
-            bar.showEditPanel(prefill: pending.text)
+            openInstructionPanel(prefill: pending.text)
+            return
+        }
+        // A dictation that reads as an instruction ("把第二點改成四點") is not
+        // text for the cursor. It opens the 修改的提示詞 panel with those words in
+        // it, so the user confirms with 套用 and nothing is rewritten behind their
+        // back. The predicate is a pure function (ported from the Mac's
+        // `VoiceEdit.swift`): no model, so the decision costs nothing here.
+        if !lastText.isEmpty, isVoiceEditInstruction(pending.text) {
+            SharedStore.markConsumed(pending.seq)
+            openInstructionPanel(prefill: pending.text)
             return
         }
         textDocumentProxy.insertText(pending.text)
@@ -139,7 +154,10 @@ final class KeyboardViewController: UIInputViewController {
         bar.onNext = { [weak self] in self?.advanceToNextInputMode() }
         bar.onEdit = { [weak self] in self?.toggleEditPanel() }
         bar.onVoiceInstruction = { [weak self] in self?.speakInstruction() }
-        bar.onEditApply = { [weak self] instruction in self?.applyEdit(instruction) }
+        bar.onEditApply = { [weak self] instruction, region, line in
+            self?.applyEdit(instruction, region: region, line: line)
+        }
+        bar.onToneChange = { SharedStore.refineTone = $0 }
         bar.onOpenApp = { [weak self] in self?.openAppForEdit() }
         bar.onCopy = { [weak self] in
             guard let self, !self.lastText.isEmpty else { return }
@@ -179,7 +197,13 @@ final class KeyboardViewController: UIInputViewController {
             bar.showNotice("錄音中不能修改，先停下來。")
             return
         }
-        bar.showEditPanel()
+        openInstructionPanel(prefill: "")
+    }
+
+    /// Opens the panel with the draft's lines filled in, so 第 N 行 can name one.
+    private func openInstructionPanel(prefill: String) {
+        bar.setDraftLines(VoiceBar.lines(of: lastText))
+        bar.showEditPanel(prefill: prefill)
     }
 
     /// 用說的: the instruction is dictated like any other sentence, but its
@@ -211,7 +235,7 @@ final class KeyboardViewController: UIInputViewController {
     /// acknowledgement within a beat means the app is not running -- a 20-second
     /// edit is not evidence of that, so a single timeout would either give up on
     /// a working edit or tell the user to open an app that is already open.
-    private func applyEdit(_ instruction: String) {
+    private func applyEdit(_ instruction: String, region: String, line: Int) {
         let draft = lastText
         guard !draft.isEmpty else {
             bar.showNotice("先插入一段文字，再修改它。")
@@ -221,7 +245,26 @@ final class KeyboardViewController: UIInputViewController {
             bar.showWorking("還在改上一次的，請等一下。")
             return
         }
-        let seq = SharedStore.requestEdit(draft: draft, instruction: instruction)
+        // 選取範圍 without a selection is a refusal, not a silent fallback to the
+        // whole draft: "只改我選的那段" must never rewrite the rest.
+        var selection: String?
+        if region == "selection" {
+            let selected = textDocumentProxy.selectedText?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !selected.isEmpty else {
+                bar.showNotice("先在文字上選取要改的那一段。")
+                return
+            }
+            guard draft.contains(selected) else {
+                bar.showNotice("選取範圍不在剛才插入的文字裡。")
+                return
+            }
+            selection = selected
+        }
+        let seq = SharedStore.requestEdit(
+            draft: draft, instruction: instruction,
+            region: region, line: line, selection: selection
+        )
         editSeq = seq
         bar.showWorking("修改中…")
 
