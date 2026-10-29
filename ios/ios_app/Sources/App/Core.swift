@@ -19,9 +19,9 @@ enum CoreError: LocalizedError {
 
 /// The C ABI, reduced to what dictation needs.
 ///
-/// `LLM_*` is deliberately absent: on macOS the model runs in a separate worker
-/// process, and iOS cannot fork one. The recogniser is the part that fits here;
-/// the cleanup pass needs an in-process path in the core first.
+/// The recogniser and the LLM both live here. On macOS the model runs in a
+/// separate worker process; iOS cannot fork one, so the core runs it in-process
+/// and the app decides when it is loaded (`prewarmModel` / `releaseModel`).
 enum Core {
     private static var initialized = false
     /// One report per launch for each silent failure path: the poll runs four
@@ -140,9 +140,10 @@ enum Core {
     /// The cleanup pass: punctuation, no filler, the speaker's own words.
     ///
     /// Same C ABI the desktop calls, but a different place underneath. macOS hands
-    /// the work to `ovc-llm-worker` so the weights leave the parent's memory when
-    /// it exits; iOS cannot fork, so the core runs the model in this process and
-    /// drops it when the call returns. The caller sees no difference.
+    /// the work to `ovc-llm-worker`; iOS cannot fork, so the core runs the model in
+    /// this process and KEEPS it there -- the load and the prompt's shared prefix
+    /// are paid once per session, not once per sentence (see `prewarmModel` and
+    /// `releaseModel` for when it comes and goes). The caller sees no difference.
     ///
     /// `keywords` stays empty: the product decided a stored keyword list fed to the
     /// model made it invent terms rather than spell them better.
@@ -217,6 +218,26 @@ enum Core {
         guard let p = out else { return "" }
         defer { Core_FreeString(p) }
         return String(cString: p)
+    }
+
+    /// Loads the model now instead of on the next task.
+    ///
+    /// Called when a recording starts. The load is 1.3 GB of weights and the app
+    /// has seconds of speaking to hide it in; without this it happens after the
+    /// user stops, in the middle of the pause they are waiting out. Best-effort:
+    /// a failure here is not reported, because the next real task will fail with
+    /// the same reason and a message the user can act on.
+    static func prewarmModel() {
+        _ = LLM_Prewarm()
+    }
+
+    /// Gives the model's memory back: background, or a memory warning.
+    ///
+    /// The next dictation loads again. Nothing is left half-initialised, so this
+    /// is safe to call at any time; it is the counterpart of `prewarmModel`, and
+    /// the reason the app does not sit on a gigabyte while it is not being used.
+    static func releaseModel() {
+        _ = LLM_ReleaseModel()
     }
 
     /// The file that actually answered the last LLM task.

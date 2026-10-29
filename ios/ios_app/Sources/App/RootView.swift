@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The app's five pages, the same five the Mac has.
 ///
@@ -68,7 +69,22 @@ struct RootView: View {
             if url.host == "record" { handleRecordRequest(channel: "url") }
             if url.host == "edit" { KeyboardEdit.handlePending(channel: "url") }
         }
+        // A memory warning means the system is about to kill something, and the
+        // LLM is the largest thing this app holds. Dropping it costs the next
+        // dictation a reload; keeping it can cost the dictation itself.
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.didReceiveMemoryWarningNotification
+        )) { _ in
+            Core.releaseModel()
+        }
         .onChange(of: scenePhase) { _, phase in
+            // Leaving means the app is about to be suspended, and a suspended
+            // process holding 1.3 GB of weights is exactly what iOS reclaims
+            // first. The next recording prewarms again (`DictationController`).
+            if phase == .background {
+                Core.releaseModel()
+                return
+            }
             // The other two. A keyboard cannot be trusted to reach a running app:
             // iOS declines `extensionContext.open()` while the containing app is
             // resident, and a Darwin notification only reaches a listener. So the

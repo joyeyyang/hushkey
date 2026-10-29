@@ -230,6 +230,11 @@ final class DictationController: ObservableObject {
         work.async {
             do {
                 try Core.initialize(models: SharedStore.modelsRoot)
+                // The cleanup pass needs the LLM, and loading it takes seconds.
+                // Start that now, while the user is still speaking, on its own
+                // queue: the recording must not wait for it, and the core
+                // serialises model work anyway.
+                DispatchQueue.global(qos: .utility).async { Core.prewarmModel() }
                 try Core.start()
             } catch {
                 DispatchQueue.main.async { self.fail(error.localizedDescription, g: g) }
