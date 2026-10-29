@@ -305,7 +305,9 @@ pip: unsupported on this device; falling back to Mode 1
 
 所以 M4 在模擬器上的正確結果就是「不支援並退回 Mode 1」，UI 也會顯示
 「這台裝置不支援小窗（PiP），已改回跳回 App。」。**PiP 視窗本身、背景存活、
-零跳轉落字，只能在真機驗（M6）。**
+零跳轉落字，只能在真機驗（M6）。** 真機步驟、預期 log 與判定見
+`docs/evidence/ios-pip-device-checklist.md`——在它被填完之前，專案裡沒有任何一處
+可以宣稱「零跳轉已驗證」。
 
 **這一步的設計要點**：Mode 2 不信任「使用者選了」這個事實，而是信任
 `SharedStore.pipAlive`（PiP 心跳）。PiP 沒真的起來時，鍵盤按麥克風仍走
