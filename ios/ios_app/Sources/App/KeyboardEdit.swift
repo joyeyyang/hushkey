@@ -79,6 +79,10 @@ enum KeyboardEdit {
             let verdict = TextRules.sanityCheck(edited, comparedTo: request.draft, mode: "edit")
             guard verdict.ok else {
                 Diagnostics.log.error("keyboard edit rejected: \(verdict.reason, privacy: .public)")
+                HallucinationLog.record(
+                    mode: "edit", tone: SharedStore.refineTone,
+                    raw: request.draft, refined: edited, reason: verdict.reason
+                )
                 SharedStore.publishEditResult(
                     seq: request.seq, text: nil,
                     error: "AI 這次的回覆不像修改後的文字，原文沒有變動。"

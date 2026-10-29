@@ -152,7 +152,15 @@ enum Refiner {
         let candidate = Text.normalizeOutput(
             Text.toTraditional(Text.stripLabel(refined.trimmingCharacters(in: .whitespacesAndNewlines))))
         let verdict = Text.sanityCheck(candidate, comparedTo: raw, tone: config.refineTone)
-        guard verdict.ok else { return fallback(raw) }
+        guard verdict.ok else {
+            // Kept for the next prompt fix: the reason alone does not say what
+            // the model was trying to do.
+            HallucinationLog.record(
+                mode: "refine", tone: config.refineTone,
+                raw: raw, refined: candidate, reason: verdict.reason
+            )
+            return fallback(raw)
+        }
         return candidate
     }
 

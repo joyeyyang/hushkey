@@ -103,6 +103,92 @@ enum TextRules {
     }
 }
 
+/// Every model answer the guardrail refused, kept in `Documents/hallucination_log.json`.
+///
+/// The gate in `rust/core_engine/src/guardrail.rs` is arithmetic, so it can say
+/// exactly why an answer was thrown away but not what the model was trying to
+/// do. That needs the text, and the text is the only place the next prompt fix
+/// can come from: every rule in the guard started as a rejected sample.
+///
+/// Written from the app process only. The keyboard extension has a different
+/// container and no business holding the app's transcripts; its edits are
+/// answered by the app (`KeyboardEdit`), which records them here.
+///
+/// The file is capped and rewritten as a whole. Rejections are rare (they are
+/// the exception the guard exists for), so an append-only log would grow without
+/// ever being read; 200 entries is enough to see a pattern and small enough that
+/// reading it costs nothing. Failure to write is swallowed on purpose: this is
+/// diagnostics, and a dictation must not fail because a log file could not be
+/// opened.
+enum HallucinationLog {
+
+    struct Entry: Codable {
+        let timestamp: String
+        let mode: String
+        let tone: String
+        let reason: String
+        let raw: String
+        let refined: String
+    }
+
+    /// Serial, so two rejections on different threads cannot lose one another's
+    /// entry to a read-modify-write race.
+    private static let queue = DispatchQueue(label: "ovc.hallucination-log")
+
+    private static let limit = 200
+
+    static var fileURL: URL? {
+        FileManager.default
+            .urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("hallucination_log.json")
+    }
+
+    /// - Parameter mode: "refine" or "edit", the same word `LLM_CheckOutput`
+    ///   took, so a log line can be replayed against the guard.
+    /// - Parameter raw: what the model saw (the transcript, or the draft).
+    /// - Parameter refined: what it answered, before the caller's fallback.
+    /// - Parameter reason: the guard's own reason string, verbatim.
+    static func record(mode: String, tone: String, raw: String, refined: String, reason: String) {
+        queue.async {
+            guard let url = fileURL else { return }
+            var entries = read(url)
+            entries.append(Entry(
+                timestamp: ISO8601DateFormatter().string(from: Date()),
+                mode: mode,
+                tone: tone,
+                reason: reason,
+                raw: raw,
+                refined: refined
+            ))
+            if entries.count > limit {
+                entries.removeFirst(entries.count - limit)
+            }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let data = try? encoder.encode(entries) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// Blocks until every queued entry has been written. For tests; the record
+    /// path stays asynchronous so a rejection never blocks the caller.
+    static func flush() {
+        queue.sync {}
+    }
+
+    /// The entries on disk, newest last. Exposed for the diagnostics screen and
+    /// for tests; an unreadable or half-written file is treated as empty.
+    static func entries() -> [Entry] {
+        guard let url = fileURL else { return [] }
+        return read(url)
+    }
+
+    private static func read(_ url: URL) -> [Entry] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder().decode([Entry].self, from: data)) ?? []
+    }
+}
+
 /// The cleanup chain: raw transcript → Traditional → refine → translate.
 ///
 /// Same order as the Mac, and the order matters. Refine must never change the
@@ -149,6 +235,11 @@ enum Refiner {
         let verdict = TextRules.sanityCheck(candidate, comparedTo: raw, tone: tone)
         guard verdict.ok else {
             Diagnostics.log.error("refine rejected: \(verdict.reason, privacy: .public) — \(TextRules.preview(candidate), privacy: .public)")
+            // Kept for the next prompt fix: the reason alone does not say what
+            // the model was trying to do.
+            HallucinationLog.record(
+                mode: "refine", tone: tone, raw: raw, refined: candidate, reason: verdict.reason
+            )
             return Result(text: fallback(raw), note: "整理被退回")
         }
         return Result(text: candidate, note: nil)

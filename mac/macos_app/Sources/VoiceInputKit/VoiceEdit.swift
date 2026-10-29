@@ -273,7 +273,14 @@ public func applyVoiceEdit(_ instruction: String, to text: String,
     // itself ("以下是修改後的版本") or runs three times the length of the draft is
     // not an edit. `applyVoiceEdit` then returns nil and the caller keeps its
     // draft.
-    guard Text.sanityCheck(edited, comparedTo: current, mode: "edit").ok else { return nil }
+    let verdict = Text.sanityCheck(edited, comparedTo: current, mode: "edit")
+    guard verdict.ok else {
+        HallucinationLog.record(
+            mode: "edit", tone: config.refineTone,
+            raw: current, refined: edited, reason: verdict.reason
+        )
+        return nil
+    }
     return edited
 }
 
@@ -310,7 +317,14 @@ public func applyVoiceEdit(_ instruction: String, to text: String,
         guard let answer = try? CoreABI.edit(slice, instruction: instruction) else { return nil }
         let edited = Text.toTraditional(answer.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !edited.isEmpty, edited != slice else { return nil }
-        guard Text.sanityCheck(edited, comparedTo: slice, mode: "edit").ok else { return nil }
+        let verdict = Text.sanityCheck(edited, comparedTo: slice, mode: "edit")
+        guard verdict.ok else {
+            HallucinationLog.record(
+                mode: "edit", tone: config.refineTone,
+                raw: slice, refined: edited, reason: verdict.reason
+            )
+            return nil
+        }
         return current.replacingCharacters(in: selection, with: edited)
     }
 }
