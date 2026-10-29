@@ -100,13 +100,13 @@ fi
 # model instead would measure something the user never sees: the model's
 # answer is a numbered list, and the product's job is to find the named line
 # and put the draft's own shape back.
-step "voice edit probe (11 cases)"
+step "voice edit probe (15 cases)"
 OVC_LLM_WORKER="$ROOT/core_engine/target/release/ovc-llm-worker" \
     ./core_engine/target/release/examples/edit_batch tests/edit_expected.tsv \
     >/tmp/ovc-verify-edit-batch.log 2>&1
 EDIT_BATCH_STATUS=$?
 record "voice edit probe" $EDIT_BATCH_STATUS
-if grep -qE "^=== 11/11 right$" /tmp/ovc-verify-edit-batch.log; then
+if grep -qE "^=== 15/15 right$" /tmp/ovc-verify-edit-batch.log; then
     printf 'PASS  voice edit probe landed on the right line in every case\n'
 else
     printf 'FAIL  voice edit probe did not land on the right line in every case\n'

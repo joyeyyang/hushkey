@@ -1,99 +1,4 @@
 import SwiftUI
-import UIKit
-
-/// The 轉錄 page's transcript, made selectable so a region can be named.
-///
-/// SwiftUI's `Text` + `.textSelection(.enabled)` lets the user select and copy,
-/// but gives the app no way to read WHAT was selected -- and 「目前選取範圍」 is
-/// one of the three regions the 修改提示詞 button offers. A `UITextView` reports
-/// its range, so the region the user pointed at is the region the core is
-/// handed instead of a guess made from the whole sentence.
-///
-/// Not editable: the text on this page is the sentence the app produced. The
-/// user changes it with a 修改提示詞, which is the whole point of the panel
-/// below -- an editable field here would be a second, silent way to edit that
-/// bypasses the model and never reaches the history.
-struct SelectableTranscript: UIViewRepresentable {
-    let text: String
-    let placeholder: String
-    @Binding var selection: NSRange
-
-    func makeUIView(context: Context) -> GrowingTextView {
-        let view = GrowingTextView()
-        view.isEditable = false
-        view.isSelectable = true
-        view.isScrollEnabled = false
-        view.backgroundColor = .clear
-        view.textContainerInset = .zero
-        view.textContainer.lineFragmentPadding = 0
-        view.adjustsFontForContentSizeCategory = true
-        view.delegate = context.coordinator
-        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return view
-    }
-
-    func updateUIView(_ view: GrowingTextView, context: Context) {
-        context.coordinator.parent = self
-        let shown = text.isEmpty ? placeholder : text
-        if view.text != shown {
-            view.text = shown
-            // The old range belongs to a sentence that is no longer there.
-            view.selectedRange = NSRange(location: 0, length: 0)
-            selection = view.selectedRange
-            view.invalidateIntrinsicContentSize()
-        }
-        view.font = Self.font
-        view.textColor = text.isEmpty ? UIColor(Palette.dim) : UIColor(Palette.ink)
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
-
-    /// The Mac's transcript face, one size down: serif, because the sentence is
-    /// something to read rather than a form field.
-    static let font: UIFont = {
-        let base = UIFont.systemFont(ofSize: 20)
-        guard let descriptor = base.fontDescriptor.withDesign(.serif) else { return base }
-        return UIFont(descriptor: descriptor, size: 20)
-    }()
-
-    final class Coordinator: NSObject, UITextViewDelegate {
-        var parent: SelectableTranscript
-
-        init(parent: SelectableTranscript) {
-            self.parent = parent
-        }
-
-        func textViewDidChangeSelection(_ textView: UITextView) {
-            // Reported on every caret move, so a tap that only places the caret
-            // (length 0) clears the region rather than leaving a stale one.
-            guard parent.selection != textView.selectedRange else { return }
-            parent.selection = textView.selectedRange
-        }
-    }
-}
-
-/// A `UITextView` that reports its own height.
-///
-/// `isScrollEnabled = false` alone does not give a usable intrinsic size inside
-/// a SwiftUI `ScrollView` on every iOS version; the width is only known after
-/// layout, so the size is recomputed when it changes.
-final class GrowingTextView: UITextView {
-    private var lastWidth: CGFloat = 0
-
-    override var intrinsicContentSize: CGSize {
-        let width = bounds.width > 0 ? bounds.width : UIScreen.main.bounds.width
-        let fitted = sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-        return CGSize(width: UIView.noIntrinsicMetric, height: ceil(fitted.height))
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        if abs(bounds.width - lastWidth) > 0.5 {
-            lastWidth = bounds.width
-            invalidateIntrinsicContentSize()
-        }
-    }
-}
 
 /// The 修改提示詞 panel: the instruction, the region, and one button.
 ///
@@ -111,11 +16,25 @@ struct PromptEditPanel: View {
 
     @StateObject private var runner = PromptEditRunner()
     @State private var instruction = ""
-    @State private var region: PromptEditRegion = .whole
+    @State private var kind: RegionKind = .whole
     @State private var line = 1
     @State private var result: String?
 
     private var lines: [String] { PromptEdit.lines(of: text) }
+
+    /// The three segments. The line number rides beside this, not inside it.
+    private enum RegionKind: Hashable { case whole, line, selection }
+
+    /// What is handed to the core. The line case clamps, so a stepper that ran
+    /// past the end can never produce a "第 9 行" for a three-line sentence --
+    /// which the core would read as a position it cannot find.
+    private var region: PromptEditRegion {
+        switch kind {
+        case .whole: return .whole
+        case .line: return .line(max(1, min(line, max(1, lines.count))))
+        case .selection: return .selection
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -188,21 +107,33 @@ struct PromptEditPanel: View {
             // meaningless. The instruction is the user's and stays.
             line = 1
             result = nil
-            if region == .selection { region = .whole }
+            if kind == .selection { kind = .whole }
         }
     }
 
-    /// 整段 / 選取範圍 / 第 N 行, as flat words with the current one underlined --
-    /// the same shape as the mode switch, rather than a third kind of control on
-    /// one screen.
+    /// 整段 / 第 N 行 / 選取範圍, as a segmented control.
+    ///
+    /// A `Picker` rather than three custom buttons: these are mutually exclusive
+    /// options, which is what the control means. The line number is deliberately
+    /// NOT part of the selection's identity -- otherwise every step of the
+    /// stepper would rebuild the picker and the segment would flicker.
     private var regionPicker: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 14) {
-                regionButton(.whole)
-                regionButton(.selection)
-                regionButton(.line(max(1, min(line, max(1, lines.count)))))
+            Picker("區域", selection: $kind) {
+                Text("整段").tag(RegionKind.whole)
+                Text("第 N 行").tag(RegionKind.line)
+                Text("選取範圍").tag(RegionKind.selection)
             }
-            if case .line = region {
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            switch kind {
+            case .whole:
+                Text("整段交給 AI 改寫。轉換型的指令（例如「改短一點」）走這條。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            case .line:
                 HStack(spacing: 10) {
                     stepButton("minus") { line = max(1, line - 1) }
                     Text(linePreview)
@@ -212,43 +143,14 @@ struct PromptEditPanel: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     stepButton("plus") { line = min(max(1, lines.count), line + 1) }
                 }
-            } else if region == .selection {
+            case .selection:
                 Text(selectionText)
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.dim)
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-    }
-
-    private func regionButton(_ target: PromptEditRegion) -> some View {
-        // The line button carries the live number, so its identity changes as
-        // the stepper moves; comparing by case keeps the underline steady.
-        let active: Bool
-        switch (region, target) {
-        case (.whole, .whole), (.selection, .selection): active = true
-        case (.line, .line): active = true
-        default: active = false
-        }
-        return Button {
-            switch target {
-            case .whole: region = .whole
-            case .selection: region = .selection
-            case .line: region = .line(max(1, min(line, max(1, lines.count))))
-            }
-        } label: {
-            Text(target.title)
-                .font(.system(size: 12, weight: active ? .semibold : .regular))
-                .foregroundStyle(active ? Palette.ink : Palette.dim)
-                .overlay(alignment: .bottom) {
-                    Rectangle()
-                        .fill(active ? Palette.ink : .clear)
-                        .frame(height: 1)
-                        .offset(y: 3)
-                }
-        }
-        .buttonStyle(.plain)
     }
 
     private func stepButton(_ symbol: String, _ action: @escaping () -> Void) -> some View {

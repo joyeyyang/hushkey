@@ -3,7 +3,9 @@
 //!
 //! Usage: edit_batch <cases-file>
 //! The file holds one case per line: `<instruction>\t<draft>` -- a tab between
-//! the two, the draft may contain spaces and commas. Each line prints the
+//! the two, the draft may contain spaces and commas. A case that is about a
+//! MULTI-LINE draft writes `\n` for its line breaks: the file is line-oriented,
+//! so a literal newline would end the case. Each line prints the
 //! instruction, the draft, the raw answer, and whether the answer differs from
 //! the draft.
 //!
@@ -33,6 +35,12 @@ fn main() {
     // `<instruction>\t<draft>\t<expected>`. The columns are split off the
     // TABS, not on a whitespace boundary: the draft is Chinese prose and may
     // contain spaces, and the expected answer may too.
+    // `\n` is the only escape: a multi-line draft is the whole point of the
+    // line/region cases, and a real newline would split the row.
+    fn unescape(s: &str) -> String {
+        s.replace("\\n", "\n")
+    }
+
     let mut cases: Vec<(String, String, Option<String>)> = Vec::new();
     for line in body.lines() {
         if line.trim().is_empty() {
@@ -43,8 +51,8 @@ fn main() {
         let Some(draft) = parts.next() else { continue };
         cases.push((
             instruction.trim().to_string(),
-            draft.trim().to_string(),
-            parts.next().map(|e| e.trim().to_string()),
+            unescape(draft.trim()),
+            parts.next().map(|e| unescape(e.trim())),
         ));
     }
     if cases.is_empty() {
@@ -89,7 +97,7 @@ fn main() {
                     }
                 }
                 println!("--- {instruction}");
-                println!("  draft:  {draft}");
+                println!("  draft:  {}", draft.replace('\n', " | "));
                 println!("  answer: {}", answer.trim().replace('\n', " | "));
                 println!("  changed: {}", if differs { "YES" } else { "no" });
                 println!("  verdict: {verdict}");

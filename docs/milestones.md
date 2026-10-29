@@ -1247,3 +1247,27 @@ sim:    platform IOSSIMULATOR   minos 17.0
 device: platform IOS            minos 17.0
 shim:   platform IOS            minos 17.0
 ```
+
+### I.8 區域改成 SegmentedControl，並把「不同區域→不同輸出」變成回歸測試
+
+三段的選擇用 `Picker(.segmented)`（整段／第 N 行／選取範圍）；行號不進 selection 的
+識別值，否則 stepper 每按一下整個 picker 會重建。`SelectableTranscript` 也從
+`PromptEditPanel.swift` 拆成自己的檔案。
+
+`tests/edit_expected.tsv` 從 11 筆增加到 15 筆，新增的 4 筆是多行原文：
+
+```text
+第1點改成大衛拜訪   → 大衛拜訪 | 討論第四季時程 | 地點還沒確定
+第3點改成大衛拜訪   → 明天下午三點跟小林開會 | 討論第四季時程 | 大衛拜訪
+第2點改短一點       → 明天下午三點跟小林開會 | 討論第四季 | 地點還沒確定
+第2點刪掉           → 明天下午三點跟小林開會 | 地點還沒確定
+```
+
+前兩筆是「同一個指令、不同區域」，後兩筆是「同一個區域、不同指令」——這正是
+`scripts/verify.sh` 現在會擋的兩件事（`=== 15/15 right`）。TSV 是逐行的，所以
+`edit_batch` 新增 `\n` 轉義，多行原文才寫得進一列。
+
+```text
+=== 15/15 changed
+=== 15/15 right
+```
