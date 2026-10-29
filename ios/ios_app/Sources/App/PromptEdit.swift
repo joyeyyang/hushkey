@@ -68,7 +68,9 @@ enum PromptEdit {
         guard !spoken.isEmpty else { throw PromptEditError.emptyInstruction }
         switch region {
         case .whole, .line:
-            return try Core.edit(text, instruction: instruction(spoken, region: region))
+            let edited = try Core.edit(text, instruction: instruction(spoken, region: region))
+            try requireUsable(edited, comparedTo: text)
+            return edited
         case .selection:
             guard let selection, !selection.isEmpty else {
                 throw PromptEditError.noSelection
@@ -81,7 +83,29 @@ enum PromptEdit {
             // model that answers with more than the slice edited is refused by
             // the core's own shape checks instead of leaking into the rest.
             let edited = try Core.edit(slice, instruction: spoken)
+            try requireUsable(edited, comparedTo: slice)
             return text.replacingCharacters(in: selection, with: edited)
+        }
+    }
+
+    /// The same guardrail the cleanup runs, on the spoken-edit path.
+    ///
+    /// The core already refuses an answer that is commentary or that does not
+    /// account for every line it numbered -- but it numbers the draft, and the
+    /// `.selection` path hands it a slice, so the two paths disagree about what
+    /// "every line" means. This check is the part that does not depend on the
+    /// numbering: did the model answer with text at all (not a remark, not an
+    /// essay), and did it keep the script. An edit may DELETE lines, which is why
+    /// the mode is `edit` and the floor is not the cleanup's.
+    ///
+    /// A rejection is thrown rather than returned so the panel shows a message
+    /// and the transcript is left exactly as it was: pasting a model's remark
+    /// about the instructions is the failure this exists for.
+    private static func requireUsable(_ edited: String, comparedTo original: String) throws {
+        let verdict = TextRules.sanityCheck(edited, comparedTo: original, mode: "edit")
+        guard verdict.ok else {
+            Diagnostics.log.error("prompt edit rejected: \(verdict.reason)")
+            throw PromptEditError.unusableResult
         }
     }
 
@@ -119,11 +143,15 @@ enum PromptEdit {
 enum PromptEditError: LocalizedError {
     case emptyInstruction
     case noSelection
+    /// The model answered, but with something that is not an edit: a remark
+    /// about the instructions, a summary, or a change of script.
+    case unusableResult
 
     var errorDescription: String? {
         switch self {
         case .emptyInstruction: return "先輸入修改的提示詞。"
         case .noSelection: return "先在文字上選取要改的那一段。"
+        case .unusableResult: return "AI 這次的回覆不像修改後的文字，原文沒有變動。請再試一次。"
         }
     }
 }

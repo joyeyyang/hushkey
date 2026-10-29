@@ -85,6 +85,14 @@ int32_t LLM_RefineTextWithKeywordsStages(const char *text, const char *keywords_
  * only; the other two are single-pass by design (their prompt carries the
  * register, and the two-stage shape's first pass has no notion of it). */
 int32_t LLM_RefineTextWithTone(const char *text, const char *keywords_hint, const char *tone, uint32_t stages, char **out_text);
+/* Checks a model's answer before the caller treats it as the user's own text.
+ * `raw` is what the model was given (the transcript, or the draft for an edit),
+ * `refined` its answer; `mode` is "edit" for the spoken-edit path and anything
+ * else for the cleanup; `tone` adds the register rule ("casual"/"normal"/"formal",
+ * NULL = normal). Writes "" to *out_reason when the answer may be used, or a short
+ * reason (for a log, not for the user) when it may not. Pure arithmetic on the
+ * core side: no model call, no measurable cost. Free with Core_FreeString. */
+int32_t LLM_CheckOutput(const char *raw, const char *refined, const char *mode, const char *tone, char **out_reason);
 /* The .gguf that answered the most recent LLM task, or "" when none has run.
  * A downgrade is invisible in the answer -- the core retries with a smaller model
  * and returns its text -- so this is how a caller learns which one actually

@@ -63,6 +63,7 @@ LLM_RefineText            整理
 LLM_RefineTextWithKeywords
 LLM_RefineTextWithKeywordsStages   分兩段整理
 LLM_RefineTextWithTone    整理，可選語氣（casual／normal／formal）
+LLM_CheckOutput           ★ guardrail：模型輸出能不能用（純啟發式，不呼叫模型）
 LLM_Summarize             會議摘要
 LLM_Translate             翻譯
 LLM_EditText              ★ 語音編輯

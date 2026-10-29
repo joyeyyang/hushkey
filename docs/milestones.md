@@ -1347,3 +1347,110 @@ formal  Could you please send me the report before the meeting?
 - `xcodebuild` sim／device：BUILD SUCCEEDED。
 - `scripts/verify.sh` 新增 `refine tone (3 registers)`：同一句跑三次必須兩兩不同，
   第四次省略 `--tone` 必須等於 normal（「未指定＝普通」）。
+
+## 附錄 L：模型輸出的 guardrail 搬進核心（2026-10-29）
+
+### L.1 為什麼搬：兩份「說好要一樣」的規則
+
+規則原本寫在兩個地方：`mac/macos_app/Sources/VoiceInputKit/TextPostprocess.swift`
+的 `Text.sanityCheck`，和 `ios/ios_app/Sources/App/RefineChain.swift` 的
+`TextRules.sanityCheck`。第二份的檔頭自己承認「iPhone 有幾個月完全沒有這層檢查，
+模型對著指令回的廢話被原樣貼進使用者的句子」。兩份靠註解約定「要保持一樣」，就是
+漂移的開始。
+
+現在只有一份：`rust/core_engine/src/guardrail.rs`，C ABI 是 `LLM_CheckOutput`。
+兩邊的 `sanityCheck` 都退成薄包裝（`mode`／`tone` 傳進去、空的 reason 代表可用、
+拿不到結果就 fail-closed），規則本身不再有第二份。
+
+```c
+int32_t LLM_CheckOutput(const char *raw, const char *refined,
+                        const char *mode, const char *tone, char **out_reason);
+/* out_reason 是 "" 代表可用；非空是給 log 看的原因，不是給使用者看的句子 */
+```
+
+`mode` 是 `"edit"`（語音編輯）或其它（整理）；`tone` 是 `casual`／`normal`／
+`formal`，NULL 或不認識一律 normal——跟 `Tone::parse` 同一個理由：這個值跨 C 字串，
+打錯字不能讓使用者損失一次聽寫。
+
+### L.2 規則清單（全部是算術，沒有一次模型呼叫）
+
+| 規則 | 什麼情況擋 | 為什麼 |
+| --- | --- | --- |
+| 空輸出 | 空白／只有換行 | 沒有東西可以貼 |
+| 長度下限 | 整理結果 < 原文字數 15% | 把 40 字縮成 8 字是摘要，不是整理 |
+| 長度上限 | 整理 > 原文 2 倍、編輯 > 原文 3 倍 | 模型在解釋自己，不是在改寫 |
+| meta 開頭 | `以下是`／`很抱歉`／`Sure,`／`Here is`… 開頭 | 模型在回答「指令」，不是在回答「草稿」 |
+| 回聲提示詞 | 答案出現提示詞才有的句子（`不要摘要`、`問句保持問句`…）而原文沒有 | 同上，而且是逐字回聲 |
+| 簡體字 | 答案出現原文沒有的簡體字 | 模型自己把繁體改掉了（原文本來是簡體不算，那是辨識器的輸出，Swift 端用 ICU 轉） |
+| 語言 | 中文原文變成沒有中文（且沒有明說要翻成別的語言）／英文原文被翻掉 | 換語言是使用者的要求，不是模型的決定 |
+| 保留率 | 原文的漢字只剩 < 18% | 合法濃縮最壞量到 0.26，0.18 只抓「改寫成別的東西」 |
+| 正式語氣詞 | `tone=formal` 的答案含 `喔／啦／耶／欸／嘛` | 那正是使用者要求拿掉的東西 |
+| 編輯不設下限 | `mode=edit` 沒有字數下限 | 刪行是「刪掉第 2 點」的正常結果 |
+
+刻意**不**做的事：不檢查行數。哪一行還在、少了幾行，是核心編號解析
+（`llm::check_edited_shape`）的責任——只有它知道編號。guardrail 只管「這是不是一段
+文字」。
+
+### L.3 失敗一律回退，不重試
+
+判斷失敗時的行為是**回退**，不是「再問一次模型」。理由有兩個：重試要多一次推論
+（20 秒級，見下），而 2B 對自己答案的判斷力並不比產生答案好——它會用同樣的慣性再
+產一次同樣的錯。所以呼叫端的處理一律是「保留原文」：
+
+- macOS `Refiner.polish`／iOS `Refiner.polishOnce`：guard 不過就用逐字稿。
+- 語音編輯（`VoiceEdit.applyVoiceEdit` 兩個多載、iOS `PromptEdit.apply`）：guard
+  不過就 `nil`／丟 `unusableResult`，使用者手上的文字不動，面板顯示「AI 這次的回覆
+  不像修改後的文字，原文沒有變動」。
+
+**fail-closed 的取捨**：`sanityCheck` 拿不到核心的答案時（呼叫失敗）回傳「不可用」。
+這意味著核心壞掉時整理會全部退回原文——相對於把模型對指令的碎念貼進客戶的信裡，
+這個方向錯得比較便宜。iOS 的 `PromptEdit` 也走同一條：`TextRules.sanityCheck` 拿不到
+結果就當作這次修改失敗。
+
+### L.4 不呼叫模型：實測成本
+
+```
+1000 次 guardrail::check  = 3.86 ms  → 3.86 µs/次
+一次 voiceinput --refine  = 19.8 / 21.8 / 22.0 s（同一句，worker 每次重新載入權重）
+```
+
+3.86 µs 對 20 秒是 0.00002%，也就是「量不到」。所以它可以直接放在每次整理的必經
+路徑上，不需要快取、不需要小模型、不需要「先跳過再说」。
+
+### L.5 接到哪些路徑
+
+| 平台 | 呼叫點 | mode |
+| --- | --- | --- |
+| macOS | `Refiner.polish`（`refineTranscript` 的整理鏈） | refine |
+| macOS | `applyVoiceEdit`（整段／選取兩個多載） | edit |
+| iOS | `Refiner.polishOnce`（鍵盤與 App 共用的整理鏈） | refine |
+| iOS | `PromptEdit.apply`（整段／第 N 行、選取範圍） | edit |
+
+iOS 的 `PromptEdit` 是這次補上的：`.selection` 把切片當整段丟核心，核心的編號檢查
+因此只看得到切片，guardrail 是那條路上唯一不依賴編號的檢查。
+
+### L.6 驗收
+
+- `cargo test --lib`：107 passed（+11，`guardrail` 模組；含「合法的整理要通過」
+  與「回聲提示詞要擋」兩個方向）。
+- `swift test`：23 passed（+6，`GuardrailTests`：薄包裝的 mode／tone 傳遞、
+  fail-closed、100 次呼叫 < 0.1 秒）。
+- `xcodebuild` sim／device：BUILD SUCCEEDED。
+- `scripts/verify.sh` 新增 `guardrail (C ABI)`：`examples/guardrail_probe.rs` 走
+  `LLM_CheckOutput` 本身，8 個案例（4 個該過、4 個該擋）→ `=== 8/8 as expected`。
+  這是唯一碰得到 `#[no_mangle]` 進入點的 harness——單元測試只能叫 Rust 函式，
+  參數順序寫反或 reason 沒寫進指標，單元測試全綠也照樣出貨。
+- `scripts/verify.sh` → `ALL CHECKS PASSED`。
+
+### L.7 已知限制
+
+- **正式語氣仍會加字**：`QA isn't done yet` → `the QA team is not yet complete`。
+  提示詞加了「不要自己補上新的事實或新的名詞」也壓不住，2B 的改寫慣性比規則強。
+  guardrail 目前**不**擋這種「同義但多一個名詞」的改寫——要擋就得比對名詞集合，
+  誤殺率會高到把正常改寫一起吃掉。
+- **meta 只抓開頭**：`好的，我已經幫你改好了` 不會被擋（它是模型的自述，但沒有
+  固定開頭）。真正該擋的是「少了哪一行」，那件事在編號解析那裡。
+- **簡體偵測是相對的**：只擋「原文沒有、答案有」的簡體字。原文是簡體時不擋——那是
+  辨識器的正常輸出，轉換由 Swift 端的 ICU `Hans-Hant` 負責。
+- **不判斷語意**：兩句完全不同的中文，字數與字集都可能落在合法範圍內。要抓這種
+  只能再問一次模型，成本與可靠性都不划算（見 L.3）。

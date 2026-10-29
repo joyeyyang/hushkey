@@ -133,6 +133,22 @@ enum CoreABI {
         return String(cString: p)
     }
 
+    /// The guardrail, in the core: may this answer be treated as the user's own
+    /// text? Returns an EMPTY string when it may, or a short reason when it may
+    /// not -- the reason is for a log, not for the user.
+    ///
+    /// `mode` is "edit" for the spoken-edit path and "refine" otherwise; `tone`
+    /// adds the register rule (a formal line may not carry 喔／啦／耶). Pure
+    /// arithmetic on the core side: no model call, so it cannot slow a dictation
+    /// down.
+    static func checkOutput(raw: String, refined: String, mode: String, tone: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_CheckOutput(raw, refined, mode, tone, &out))
+        guard let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
+
     /// Separate translate pass, run after refine. `target` is "en" or "zh".
     static func translate(_ text: String, to target: String) throws -> String {
         var out: UnsafeMutablePointer<CChar>?

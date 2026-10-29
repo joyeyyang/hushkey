@@ -164,6 +164,22 @@ enum Core {
         return refined.isEmpty ? text : refined
     }
 
+    /// The guardrail, in the core: may this answer be treated as the user's own
+    /// text? Returns an EMPTY string when it may, or a short reason when it may
+    /// not (for a log, not for the user).
+    ///
+    /// `mode` is "edit" for the spoken-edit path and "refine" otherwise; `tone`
+    /// adds the register rule. The rules themselves live in
+    /// `rust/core_engine/src/guardrail.rs`, which the Mac's `Text.sanityCheck`
+    /// calls too -- one implementation, not two that are supposed to agree.
+    static func checkOutput(raw: String, refined: String, mode: String, tone: String) throws -> String {
+        var out: UnsafeMutablePointer<CChar>?
+        try check(LLM_CheckOutput(raw, refined, mode, tone, &out))
+        guard let p = out else { return "" }
+        defer { Core_FreeString(p) }
+        return String(cString: p)
+    }
+
     /// A dedicated translate pass, run after the cleanup.
     ///
     /// Separate from `refine` on purpose, exactly as on the Mac: one prompt asked

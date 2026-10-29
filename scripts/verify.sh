@@ -127,6 +127,20 @@ if [ $TONE_STATUS -eq 0 ]; then
     fi
 fi
 
+# The guardrail, through the C entry point the two apps call. `cargo test` covers
+# the rules as Rust functions; this is the only harness that reaches
+# `LLM_CheckOutput` itself, so it is what would catch an argument in the wrong
+# order or a reason that never gets written. No model, so it costs a second.
+step "guardrail (C ABI)"
+./rust/core_engine/target/release/examples/guardrail_probe >/tmp/ovc-verify-guardrail.log 2>&1
+GUARD_STATUS=$?
+record "guardrail" $GUARD_STATUS
+if [ $GUARD_STATUS -eq 0 ]; then
+    grep -q "=== 8/8 as expected" /tmp/ovc-verify-guardrail.log \
+        && printf 'PASS  both directions: the bad answers are refused, the good ones are kept\n' \
+        || { printf 'FAIL  guardrail case table did not match\n'; FAILED+=("guardrail cases"); }
+fi
+
 # The edit probe measures the PRODUCT path -- the same call the app makes --
 # against the eleven spoken edits and their expected answers. Checking the raw
 # model instead would measure something the user never sees: the model's

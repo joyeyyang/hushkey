@@ -7,6 +7,7 @@
 mod asr;
 pub mod chunking;
 mod error;
+pub mod guardrail;
 pub mod llm;
 mod memory;
 pub mod segmentation;
@@ -376,6 +377,54 @@ pub unsafe extern "C" fn LLM_RefineTextWithTone(
         let tone = if tone.is_null() { String::new() } else { read_str(tone, "tone")?.to_owned() };
         let refined = state::refine_text_with_tone(input, &hint, &tone, stages)?;
         write_out(out, &refined)
+    })())
+}
+
+/// Checks a model's answer before the caller treats it as the user's own text.
+///
+/// `raw` is what the model was given (the transcript, or the draft for an edit),
+/// `refined` is its answer after the caller's own normalisation. `mode` is
+/// "edit" for the spoken-edit path and anything else for the cleanup. `tone`
+/// selects the register-specific rule (a formal line may not carry 喔／啦／耶);
+/// NULL or an unknown value means "normal".
+///
+/// Writes an EMPTY string to `out_reason` when the answer may be used, or a
+/// short reason when it may not -- so a caller can log why instead of guessing.
+/// The reason is meant for a log, not for the user: the product's fallback is to
+/// keep the transcript, and "only kept 12% of the words used" is not something
+/// to show a person.
+///
+/// The whole check is arithmetic (lengths, character sets, prefixes): no model
+/// call, no allocation beyond the reason string, so it cannot slow a dictation
+/// down. `guardrail.rs` is the single implementation the Mac and the phone both
+/// call.
+///
+/// # Safety
+/// Pointers must follow the header contract. Free the reason with
+/// `Core_FreeString`.
+#[no_mangle]
+pub unsafe extern "C" fn LLM_CheckOutput(
+    raw: *const c_char,
+    refined: *const c_char,
+    mode: *const c_char,
+    tone: *const c_char,
+    out_reason: *mut *mut c_char,
+) -> c_int {
+    status((|| {
+        let raw = read_str(raw, "raw")?;
+        let refined = read_str(refined, "refined")?;
+        let kind = if mode.is_null() {
+            guardrail::Kind::Refine
+        } else {
+            guardrail::Kind::parse(read_str(mode, "mode")?)
+        };
+        let tone = if tone.is_null() {
+            llm::Tone::Normal
+        } else {
+            llm::Tone::parse(read_str(tone, "tone")?)
+        };
+        let verdict = guardrail::check(kind, raw, refined, tone);
+        write_out(out_reason, &verdict.reason)
     })())
 }
 

@@ -80,90 +80,40 @@ enum Text {
         }
     }
 
-    /// Distinctive phrases from the refine instructions in
-    /// `rust/core_engine/src/llm.rs` (`REFINE_SYSTEM`). If the answer repeats one of
-    /// these and the user never said it, the model answered US instead of
-    /// cleaning the draft.
-    private static let instructionPhrases = [
-        "不要摘要", "不要漏掉任何一件事", "重複講的同一件事只留一次", "刪掉口頭禪",
-        "多餘的字", "照原樣保留", "問句保持問句", "預設用繁體中文輸出",
-        "把使用者的口語改寫成通順的書面文字",
-        // Added with the formal-register rule: a longer prompt is a longer thing
-        // for a small model to answer instead of the draft. Kept identical to the
-        // iOS copy on purpose -- two lists that drift are two products.
-        "像寫給客戶或同事的信", "像自言自語", "換成正式而具體的詞",
-    ]
-
-    /// Returns the leaked phrase, or nil when the answer looks like a real edit.
-    static func leakedInstruction(_ refined: String, raw: String) -> String? {
-        for phrase in instructionPhrases where refined.contains(phrase) && !raw.contains(phrase) {
-            return phrase
-        }
-        return nil
-    }
-
     /// One-line excerpt, for callers that log a rejection reason.
     static func preview(_ text: String) -> String {
         let flat = text.replacingOccurrences(of: "\n", with: "⏎")
         return flat.count <= 160 ? flat : String(flat.prefix(160)) + "…"
     }
 
-    /// Guards against the two ways a small model betrays us: answering the
-    /// transcript instead of cleaning it (empty output, meta phrasing, a
-    /// different language), and inventing content that was never said.
+    /// Guards against the ways a small model betrays us: answering the
+    /// instructions instead of the text, translating it, shrinking it into a
+    /// summary, or echoing one of the prompt's own rules.
     ///
-    /// Deliberately permissive about DELETION: condensing away filler and
-    /// repetition is the entire point of the cleanup, so the length floor only
-    /// catches a rewrite-into-something-else.
-    static func sanityCheck(_ refined: String, comparedTo raw: String) -> (ok: Bool, reason: String) {
-        guard !refined.isEmpty else { return (false, "empty output") }
-
-        let rawLen = max(raw.count, 1)
-        let refinedLen = refined.count
-        if refinedLen < Int(Double(rawLen) * 0.15) {
-            return (false, "far too short: \(refinedLen)/\(rawLen) chars")
+    /// The rules live in the CORE (`rust/core_engine/src/guardrail.rs`, reached
+    /// through `LLM_CheckOutput`), not here. They used to be written out twice --
+    /// once in this file and once in the iOS `RefineChain.swift` -- with a
+    /// comment asking the two to stay the same; they are one implementation now,
+    /// so "both platforms the same" is a fact instead of a promise.
+    ///
+    /// - Parameter mode: "edit" for the spoken-edit path, "refine" (the default)
+    ///   for the cleanup. An edit may delete lines, a cleanup may not drop the
+    ///   sentence, so the two have different floors.
+    /// - Parameter tone: adds the register rule -- a 正式 line may not carry
+    ///   喔／啦／耶. The other registers have no extra rule.
+    ///
+    /// Fails CLOSED when the check cannot run. The caller's fallback is the
+    /// transcript, and losing the model's polish is cheaper than pasting the
+    /// remark it made about the instructions.
+    static func sanityCheck(_ refined: String, comparedTo raw: String,
+                            mode: String = "refine",
+                            tone: String = "normal") -> (ok: Bool, reason: String) {
+        guard let reason = try? CoreABI.checkOutput(
+            raw: raw, refined: refined, mode: mode, tone: tone
+        ) else {
+            return (false, "the guard could not run")
         }
-        if refinedLen > Int(Double(rawLen) * 2.0) {
-            return (false, "far too long: \(refinedLen)/\(rawLen) chars")
-        }
-        for prefix in ["以下是", "很抱歉", "抱歉", "對不起", "總結：", "原文：", "Here is", "Sure,"]
-        where refined.hasPrefix(prefix) {
-            return (false, "meta phrasing: \(prefix)")
-        }
-        if let leaked = leakedInstruction(refined, raw: raw) {
-            return (false, "echoed the instructions: \(leaked)")
-        }
-
-        if raw.containsCJK {
-            if !refined.containsCJK {
-                // Losing the Chinese is only legitimate when the dictation asked
-                // for another language; the refine prompt is told to honour that
-                // request and drop the instruction.
-                guard raw.namesAnotherLanguage else {
-                    return (false, "no Chinese left in the output")
-                }
-                guard refined.containsLatinLetter else {
-                    return (false, "asked for another language but wrote none")
-                }
-                return (true, "ok")
-            }
-            let rawCJK = Set(raw.unicodeScalars.filter(\.isCJK))
-            if !rawCJK.isEmpty {
-                let refinedSet = Set(refined.unicodeScalars)
-                let kept = rawCJK.filter { refinedSet.contains($0) }.count
-                let ratio = Double(kept) / Double(rawCJK.count)
-                // Condensing to ~30% is normal; the legitimate worst case
-                // measured 0.26, so 0.18 only catches a rewrite into something
-                // else entirely.
-                if ratio < 0.18 {
-                    return (false, "only kept \(Int(ratio * 100))% of the words used")
-                }
-            }
-        } else if raw.containsLatinLetter {
-            // A non-Chinese transcript must not be translated away.
-            guard refined.containsLatinLetter else { return (false, "translated away") }
-        }
-        return (true, "ok")
+        return reason.isEmpty ? (true, "ok") : (false, reason)
     }
 }
 
@@ -201,7 +151,7 @@ enum Refiner {
         // not to.
         let candidate = Text.normalizeOutput(
             Text.toTraditional(Text.stripLabel(refined.trimmingCharacters(in: .whitespacesAndNewlines))))
-        let verdict = Text.sanityCheck(candidate, comparedTo: raw)
+        let verdict = Text.sanityCheck(candidate, comparedTo: raw, tone: config.refineTone)
         guard verdict.ok else { return fallback(raw) }
         return candidate
     }
@@ -262,20 +212,6 @@ extension String {
         unicodeScalars.contains {
             ($0.value >= 65 && $0.value <= 90) || ($0.value >= 97 && $0.value <= 122)
         }
-    }
-
-    /// True when the speaker named a language to answer in. Used only to let a
-    /// non-Chinese result through `sanityCheck`: a Chinese dictation that comes
-    /// back without a single Chinese character is a bug *unless* it asked for
-    /// one. A short list rather than a parser — a false positive costs one
-    /// unchecked line, a false negative throws away a correct answer.
-    var namesAnotherLanguage: Bool {
-        let needles = [
-            "英文", "英語", "英语", "日文", "日語", "日语", "韓文", "韓語", "韩文",
-            "法文", "德文", "西班牙文", "義大利文", "越南文", "泰文",
-            "English", "Japanese", "Korean", "Spanish", "French", "German",
-        ]
-        return needles.contains { localizedCaseInsensitiveContains($0) }
     }
 }
 

@@ -267,6 +267,13 @@ public func applyVoiceEdit(_ instruction: String, to text: String,
     guard let answer = try? CoreABI.edit(current, instruction: instruction) else { return nil }
     let edited = Text.toTraditional(answer.trimmingCharacters(in: .whitespacesAndNewlines))
     guard !edited.isEmpty, edited != current else { return nil }
+    // Which lines survived is the core's business -- it numbered them, so it is
+    // the only thing that can check them. What is added here is the guardrail
+    // the cleanup already has, on the same rules: an answer that introduces
+    // itself ("以下是修改後的版本") or runs three times the length of the draft is
+    // not an edit. `applyVoiceEdit` then returns nil and the caller keeps its
+    // draft.
+    guard Text.sanityCheck(edited, comparedTo: current, mode: "edit").ok else { return nil }
     return edited
 }
 
@@ -303,6 +310,7 @@ public func applyVoiceEdit(_ instruction: String, to text: String,
         guard let answer = try? CoreABI.edit(slice, instruction: instruction) else { return nil }
         let edited = Text.toTraditional(answer.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !edited.isEmpty, edited != slice else { return nil }
+        guard Text.sanityCheck(edited, comparedTo: slice, mode: "edit").ok else { return nil }
         return current.replacingCharacters(in: selection, with: edited)
     }
 }
