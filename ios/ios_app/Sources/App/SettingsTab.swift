@@ -9,6 +9,10 @@ import UIKit
 /// desktop, and the refine-stage ladder is the same one — because a setting that
 /// behaves differently on the two platforms is worse than a missing one.
 struct SettingsTab: View {
+    /// The paper the app is drawn with. Observed rather than read once, so the row
+    /// the tick is on follows the choice immediately.
+    @ObservedObject private var themes = ThemeStore.shared
+    @Environment(\.colorScheme) private var colorScheme
     @State private var translate = Preferences.translate
     @State private var stages = Preferences.refineStages
     @State private var tone = SharedStore.refineTone
@@ -21,6 +25,7 @@ struct SettingsTab: View {
             VStack(alignment: .leading, spacing: 14) {
                 translateCard
                 cleanupCard
+                appearanceCard
                 permissionsCard
                 aboutCard
                 Spacer(minLength: 0)
@@ -139,6 +144,80 @@ struct SettingsTab: View {
                 }
             }
         }
+    }
+
+    // MARK: appearance
+
+    /// The Mac's 外觀 row, on the phone.
+    ///
+    /// The same six choices in the same order — 跟隨系統 first, then the five
+    /// papers — because "the same on both platforms" was the point of the
+    /// alignment work, and a phone that offered four slightly different papers
+    /// would be the same failure with more steps. The colours themselves live in
+    /// `PaperThemes`, copied hex for hex from the Mac's `Theme.swift`.
+    private var appearanceCard: some View {
+        Card("外觀",
+             caption: "紙與墨。跟在電腦版選的是同一組，逐色相同。跟隨系統會看手機的淺色／深色設定。") {
+            VStack(alignment: .leading, spacing: 0) {
+                themeRow(
+                    id: "system",
+                    name: "跟隨系統",
+                    theme: colorScheme == .dark ? PaperThemes.night : PaperThemes.paper,
+                    detail: "手機在深色模式時用「夜墨」。"
+                )
+                ForEach(PaperThemes.all) { paper in
+                    Divider().overlay(Palette.dim.opacity(0.2))
+                    themeRow(id: paper.id, name: paper.name, theme: paper, detail: nil)
+                }
+            }
+        }
+    }
+
+    private func themeRow(
+        id: String, name: String, theme: PaperTheme, detail: String?
+    ) -> some View {
+        Button {
+            themes.select(id)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                swatch(theme)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Palette.ink)
+                    if let detail {
+                        Text(detail)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Palette.dim)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: themes.id == id ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(themes.id == id ? Palette.ink : Palette.dim)
+                    .padding(.top, 1)
+            }
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Paper, seal, ink — the three colours that say what a theme is, in the order
+    /// you would paint them.
+    private func swatch(_ theme: PaperTheme) -> some View {
+        HStack(spacing: 0) {
+            theme.paper
+            theme.seal
+            theme.ink
+        }
+        .frame(width: 36, height: 20)
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .stroke(Palette.dim.opacity(0.35), lineWidth: 0.5)
+        )
+        .padding(.top, 1)
     }
 
     // MARK: permissions

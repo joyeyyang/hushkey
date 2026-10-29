@@ -619,6 +619,21 @@ enum SharedStore {
         set { defaults?.set(newValue, forKey: "refineTone") }
     }
 
+    /// Which paper the app draws with: "paper", "night", "slate", "moss",
+    /// "clay", or "system" (the default, as on the Mac) to follow the phone's
+    /// appearance.
+    ///
+    /// Lives in the App Group next to the other settings rather than in
+    /// `Preferences`, because it is the same kind of value as the register: a
+    /// choice the user made that the other process may need to read. The
+    /// keyboard draws its own chrome today, so nothing else reads it yet -- but a
+    /// setting that lives only in the app's own defaults is one the keyboard can
+    /// never honour later.
+    static var themeID: String {
+        get { defaults?.string(forKey: "themeID") ?? "system" }
+        set { defaults?.set(newValue, forKey: "themeID") }
+    }
+
     /// How the keyboard asks for a dictation.
     ///
     /// `.toApp` is the default and cannot fail: the keyboard opens `ovc://record`,

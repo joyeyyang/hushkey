@@ -14,6 +14,12 @@ struct OVCApp: App {
         // Before any view exists, so a launch that never reaches one is still readable.
         Diagnostics.emit()
 
+        // The screenshot flags. Both are no-ops on a normal launch, and neither
+        // writes anything down.
+        if let id = Diagnostics.themeOverride {
+            ThemeStore.shared.preview(id)
+        }
+
         // `-OVC_AUDIO_FILE <path>` runs the whole pipeline over a file instead of
         // the microphone. The simulator has no usable microphone, and everything
         // after the sample buffer is the part worth testing.

@@ -125,6 +125,24 @@ enum Diagnostics {
         ProcessInfo.processInfo.arguments.contains("-OVC_LLM_RESET")
     }
 
+    /// `-OVC_TAB <n>`: open on page `n` (0 轉錄 … 4 設定) instead of 轉錄.
+    ///
+    /// For photographs. `simctl` can install and launch an app but cannot tap it,
+    /// so the only way to put a page in front of a camera is to start there. It
+    /// never affects a normal launch.
+    static var startTab: Int? {
+        path(after: "-OVC_TAB").flatMap(Int.init)
+    }
+
+    /// `-OVC_THEME <id>`: draw with a named paper, without recording the choice.
+    ///
+    /// Same reason as `-OVC_TAB`, and one more: the five papers have to be
+    /// photographed side by side, and a screenshot run must not leave the tester's
+    /// own setting changed. See `ThemeStore.preview`.
+    static var themeOverride: String? {
+        path(after: "-OVC_THEME")
+    }
+
     private static func path(after flag: String) -> String? {
         let args = ProcessInfo.processInfo.arguments
         guard let index = args.firstIndex(of: flag),

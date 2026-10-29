@@ -15,7 +15,7 @@ import UIKit
 struct RootView: View {
     @ObservedObject private var dictation = DictationController.shared
     @State private var modelsReady = SharedStore.hasModels
-    @State private var tab = 0
+    @State private var tab = Diagnostics.startTab ?? 0
     /// `prepare` runs once per launch, whoever asks for it first.
     ///
     /// It is attached to two views (the screen and the model page), because either
@@ -30,6 +30,14 @@ struct RootView: View {
     /// line -- so a message about the tap has to live where every page can see it.
     @State private var requestNotice: String?
     @Environment(\.scenePhase) private var scenePhase
+    /// Which paper to draw with. Observed here rather than in each page: the
+    /// colours are read through `Palette`'s static accessors, and a static
+    /// accessor cannot announce a change. The root is the one view that is always
+    /// on screen, so a change here re-reads every page under it.
+    @ObservedObject private var themes = ThemeStore.shared
+    /// What the phone is set to. Only believed while the choice is 跟隨系統 --
+    /// see `preferredColorScheme` below.
+    @Environment(\.colorScheme) private var systemScheme
 
     private let titles = ["轉錄", "歷史", "關鍵字", "模型", "設定"]
 
@@ -61,8 +69,24 @@ struct RootView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
-        .onAppear(perform: prepare)
+        // 跟隨系統 leaves the scheme alone and reads it; a named paper forces it,
+        // because everything iOS draws that is not this SwiftUI tree -- the status
+        // bar, sheets, the keyboard's own chrome, text selection -- only knows
+        // light or dark. Without this, 夜墨 got a black status bar text on black
+        // paper, and 米白紙 got white text on paper.
+        //
+        // The system value is only recorded while the choice is 跟隨系統: an
+        // override makes `colorScheme` report the override, and writing that back
+        // would bake in the last named paper as "what the phone is set to".
+        .preferredColorScheme(themes.id == "system" ? nil : (themes.theme.isDark ? .dark : .light))
+        .onAppear {
+            if themes.id == "system" { themes.systemIsDark = systemScheme == .dark }
+            prepare()
+        }
+        .onChange(of: systemScheme) { _, scheme in
+            guard themes.id == "system" else { return }
+            themes.systemIsDark = scheme == .dark
+        }
         .onOpenURL { url in
             // The keyboard's two buttons, each with the same three ways of
             // arriving: the URL, the group's pending request, a notification.
