@@ -16,7 +16,7 @@
 | M4 PiP 零跳轉 | `[~]` | 模擬器不支援 PiP，PiP 視窗本身只能在真機驗 |
 | M5 真機安裝與模型 | `[x]` | — |
 | M6 真機實測 | `[~]` | 三項數字已有（見 M6 節）；Third-party 落字與 Mode 1/2 全流程要人工操作＋截圖 |
-| M7 與 macOS 對齊 | `[~]` | 見 `## M7 — 與 macOS 對齊`，未完成的是會議模式與語音編輯 |
+| M7 與 macOS 對齊 | `[~]` | 見 `## M7 — 與 macOS 對齊`；剩下的只有會議模式的**錄音端**（ReplayKit，模擬器驗不了）與貼上前確認的「可編輯」 |
 
 ### 2026-10-28 這一輪
 
@@ -424,16 +424,23 @@ Dolphin 與 SenseVoice 的 token 表不同，跟著錯的那個會讓辨識在�
 | 暫停／繼續 | 沒有 | 有；鍵盤上就有一顆，走 Darwin 通道，同一個 spool、同一個 ASR session，不是切兩段（真機已驗） |
 | 五個分頁 | 只有單頁 | 轉錄／歷史／關鍵字／模型／設定，順序與 macOS 相同 |
 
+**2026-10-30 這一輪補上的**
+
+| 功能 | 之前 | 現在 |
+|---|---|---|
+| 5 套紙色主題 | 固定深紙色，`Palette` 六個常數寫死 | 米白紙／夜墨／石板／苔綠／陶土，逐色抄自 Mac 的 `Theme.swift`；設定頁一個「外觀」＋跟隨系統 |
+| 貼上前確認 | 結果一到就 `insertText` | 開關在 App Group（鍵盤要讀）；文字留在鍵盤面板上，按「插入」才進游標，另有「重說一次」與「丟棄」 |
+| 語音編輯（改上一次送出的字） | —— | 已在（前一輪的 `isVoiceEditInstruction`、`replaceDraft`、用說的），本輪只補文件 |
+| SRT 匯出 | 只有 Markdown／JSON 有按鈕（`txt` 連按鈕都沒有） | 四種格式都有按鈕；SRT 一句一個 cue，時間碼從最早那句開始算 |
+| 模型從 manifest 下載與驗證 | 只能靠 Finder／檔案 App 放進去，放進去的沒有辦法檢查 | 讀 Mac 同一份 `models/manifest.json`，下載後比對大小與 SHA-256，通過才放進 `models/` |
+| 會議紀錄（摘要／決議／待辦） | `Core.summarize` 接好了但沒有畫面呼叫 | 歷史頁「整理成會議紀錄」，可複製／分享 .md |
+
 **還沒對齊（明確清單）**
 
 | 功能 | 為什麼還沒 | 要什麼才能做 |
 |---|---|---|
-| 會議模式（摘鈕／決議／待辦） | 核心的 `LLM_Summarize` 已經接好，缺的是錄音端：iOS 拿不到系統音訊，`我：／對方：` 分不出來 | ReplayKit Broadcast Upload Extension + 使用者授權；不是一個下午的事 |
-| 語音編輯（改上一次送出的字） | iOS 沒有 AX，改不到別的 App 的文字；**但鍵盤改得到自己上次插入的字**（`deleteBackward` × N 再 `insertText`） | 共享通道 + 鍵盤端替換；下一輪做 |
-| 貼上前確認（可編輯後才送） | 鍵盤插入是即時的，Mac 的「Enter 才貼上」在鍵盤上要另一套 UI | 同上，與語音編輯一起做 |
-| 5 套紙色主題 | iOS 固定深紙色 | 純外觀；`Palette` 已經是單一來源，改起來不難 |
-| SRT 匯出 | Markdown／txt／JSON 已足夠 | 會議模式有時間段之後才有意義 |
-| 模型從 manifest 下載與驗證 | iOS 靠 Finder／檔案 App 放入（已寫在畫面上） | 手機上的下載器＋SHA-256 驗證；與 macOS 的 `ModelInstaller` 對齊 |
+| 會議模式的**錄音端**（系統音訊、`我：／對方：`） | 摘要／決議／待辦已經有了（2026-10-30）；缺的是音源：iOS 讀不到別的 App 的聲音，所以分不出「我」和「對方」，句子只能不加標籤 | ReplayKit Broadcast Upload Extension（新 target＋`NSExtensionPointIdentifier: com.apple.broadcast-services-upload`）＋使用者授權；**而且完全沒辦法在模擬器驗**，一定要真機 |
+| 貼上前確認的**可編輯** | 面板上的欄位在手機上沒人能打字：iOS 不會為鍵盤擴充裡的欄位叫出系統鍵盤。現在那格是收起來的，句子顯示在多行的狀態列上，改字的辦法是「重說一次」 | iPad 外接鍵盤可以走欄位（已保留程式碼路徑），手機上要的是別的輸入法，不是這個欄位 |
 
 ---
 
@@ -1742,3 +1749,163 @@ guardrail、同一個語氣），再把整理後的文字貼出去，主視窗�
   用麥克風走一次語音編輯、預熱對第一次聽寫延遲的實際改善。
 - **已知限制**：2B 的正式語域仍會把 `QA isn't done yet` 寫成
   `the QA team is not yet complete`；guardrail 不檢查行數；簡體偵測是相對的。
+
+---
+
+## 附錄 O：M7 的五個缺口（2026-10-30）
+
+M7 的「還沒對齊」表上有六條。這一輪做完五條，只留下會議模式的**錄音端**，
+而留下的那一條寫得比之前清楚：摘要／決議／待辦已經是有的，缺的是「聽得到
+對方」這件事。
+
+### O.1 五套紙色主題（iPhone 也是同一組紙）
+
+iOS 只有一張紙，而且是暗的：`Palette` 的六個常數寫死，`RootView` 又
+`.preferredColorScheme(.dark)`。M7 的對齊清單裡這條掛了很久，因為它看起來
+只是外觀——但「兩個系統內容一模一樣」正是靠這種東西在支撐的。
+
+- `PaperTheme`／`PaperThemes`：米白紙、夜墨、石板、苔綠、陶土，色值逐一抄自
+  `mac/macos_app/Sources/OfflineVoiceAssistant/Theme.swift`（sRGB），連
+  `theme(id:)` 對未知字串與舊代碼 `"dark"` 的退路都照抄。
+- `ThemeStore`：`Palette` 是靜態存取子，它自己不會通知 SwiftUI，所以主題變更
+  需要一個可觀察的物件；`Palette` 讀它。"system" 走手機的淺色／深色設定。
+- `RootView` 把寫死的 `.dark` 換成由主題決定。狀態列、sheet、文字選取這些不是
+  這棵 SwiftUI 樹畫的東西只認淺／深。系統值**只在「跟隨系統」時記錄**，否則
+  override 會把上一次選的紙寫成「手機的設定」。
+- `SharedStore.themeID` 放 App Group：鍵盤現在自己畫外觀，還沒有東西讀它，但
+  只放在 App 自己 defaults 裡的設定，鍵盤以後永遠不可能遵守。
+
+證據：`docs/evidence/ios-theme-picker-paper.png`（預設，狀態列深色）、
+`ios-theme-picker-night.png`（夜墨，狀態列淺色）。
+
+### O.2 貼上前確認（Mac 的 Enter，在手機上叫「插入」）
+
+Mac 的 `settings.confirmInsert` 開起來會先顯示文字，按 Enter 才貼上。手機上
+沒有 Enter，所以鍵盤收到結果就立刻 `insertText`。
+
+- 開關在 App Group（`SharedStore.confirmBeforeInsert`），因為要讀它的是鍵盤。
+  預設關，和 Mac 一樣：第一次聽寫要按第二顆按鈕才有反應，看起來像壞掉。
+- `VoiceBar` 的同一塊面板多一個 `PanelMode`。edit 是區域＋欄位＋用說的／取消／
+  套用；confirm 只有一顆按鈕列——重說一次／丟棄／插入。欄位在 confirm 時
+  **刻意收起來**：iOS 不會為鍵盤擴充裡的欄位叫出系統鍵盤，它在手機上是沒人
+  能打字的方框；而這個狀態唯一要做的事是「讀」，多行的是上面那條狀態列。
+- `insertPending` 把待插入的句子交給面板而不是打字，並且**當下就
+  `markConsumed`**：留在 group 裡的意義是「鍵盤還沒打出去的字」，面板一開，
+  它就改成在等使用者。不回報的話，鍵盤被重建會把使用者還在讀的句子打出去。
+- 丟棄只清掉「還是我手上這一句」的 session（比對 seq），並把 `lastText` 一起
+  清掉，否則下面那條會在下一個 tick 把沒插入的句子顯示得像是插入了。
+- 重說一次不需要任何旗標：貼上前確認開著，下一個結果本來就會回到同一個面板。
+- 面板開著時 phase tick 不畫狀態列（`isConfirming`）。和 `editSeq` 那條不同：
+  指令面板可以撐過一次錄音（Mode 2 在小窗裡錄），所以它還是要顯示即時的字。
+- 鉛筆在 confirm 時不做事：面板已經開著，關掉它等於丟棄、在上面再開指令面板
+  則是要模型改一段還沒進到文件裡的字。長按仍是重說一次。
+
+證據：`docs/evidence/ios-keyboard-confirm.png`。真機人工步驟見 O.6。
+
+### O.3 SRT 匯出（順便補上一顆一直漏掉的按鈕）
+
+`Export.Format` 有第三種格式（txt）卻沒有按鈕，SRT 整個沒有。
+
+- `History.srt`：一句一個 cue。Mac 的 SRT 來自會議，每段有錄音端量到的起訖；
+  iOS 還沒有一場會議，它唯一知道的區間就是那次聽寫本身（
+  `HistoryEntry.seconds`），所以 cue 就是「這句開始說到說完」。
+- 時間碼的原點是**最早那個 cue 的開始**，不是第一筆的 `date`：`date` 是說完的
+  時間，拿它當 0 會讓第一句變成負數。SRT 的時間從媒體開頭算，不是從 epoch 算。
+- `seconds == 0` 不是零長度，是「沒有人量過」，這種給 Mac 的 0.5 秒下限。
+- cue 是一行：句子裡的換行壓成空白，編號照位置。
+
+`-OVC_SRT_PROBE` 的輸出（三個合成聽寫，原點 = 12−4 = 8 秒）：
+
+```
+1
+00:00:00,000 --> 00:00:04,000
+今天下午三點要開會。
+
+2
+00:01:02,000 --> 00:01:02,500
+第二句沒有時間。
+
+3
+00:01:16,500 --> 00:01:22,500
+第三句 有換行。
+```
+
+### O.4 模型下載器與 SHA-256（讀的是 Mac 那一份清單）
+
+- 清單**不複製**：`project.yml` 直接引用 `../../models/manifest.json`，也就是
+  Mac 建置時複製進 `Contents/Resources/models-manifest.json` 的同一個檔案。
+  兩份雜湊清單就是其中一份會過期，而過期的雜湊比沒有雜湊更糟——它會把好檔案
+  報成壞的，使用者的下一步是刪掉一個還能用的 1.3 GB 檔案。
+- `ModelManifest`：解析、串流雜湊（1 MiB 一次）、三種判定
+  （`missing`／`wrongSize`／`wrongHash`）。沒有 sha256 或寫 `PENDING` 的條目
+  跳過，不給一顆無法驗證的下載按鈕。
+- `ModelDownloads`：`download:true` 不是「只有這些能下載」，而是「Mac 首次啟動
+  會抓的」，所以 Dolphin 與另外三種 LLM 尺寸都列出來。順序是大小 → SHA-256 →
+  才搬進 `models/`。列相對路徑而不是檔名：清單裡有兩個 `model.int8.onnx`。
+- 前景 session，不是背景：背景 session 要處理「App 被重啟後接手檔案」，那是
+  第二套狀態；畫面上寫清楚請留在前景，比多一套機制誠實。
+- 「關於」那句話也修了：原本寫「App 不連任何伺服器」，現在改成「除了你自己按
+  『下載』抓模型，App 不對外連線」。
+
+模擬器上的實測（`-OVC_MODEL_FETCH asr-sensevoice-tokens`，315,894 bytes）：
+
+```
+f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc  asr/tokens.txt
+f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc  清單
+```
+
+`-OVC_MODEL_VERIFY asr-sensevoice-tokens`（三個分支跑在同一個真實檔案上）：
+
+```
+as-is=ok
+truncated=wrongSize(315830)
+flipped=wrongHash(8ee8b22db53f)
+restored=ok
+```
+
+證據：`docs/evidence/ios-models-manifest.png`。
+
+### O.5 會議紀錄的摘要端（錄音端還沒做）
+
+`Core.summarize` 早就接好了，沒有任何畫面呼叫它。
+
+- `MeetingMinutes` 把選取的句子**依時間排序**（歷史是新到舊存的）交給核心；
+  結構是核心的（摘要／決議／待辦各一次呼叫，長逐字稿先 map-reduce）。
+- 歷史頁多一顆「整理成會議紀錄」，整理的是畫面上那個列表——搜尋後的結果就是
+  「哪幾句」的答案。
+- 等待是一張畫面而不是按鈕上的轉圈，而且寫明**不能中途取消**：核心在生成中
+  沒有取消點，一顆取消鈕只會說謊或把模型留在背景空轉。
+- **沒有 我：／對方：**，這句話寫在 O.6 與畫面註解裡。
+
+模擬器實測（qwen2.5-0.5B、CPU、6 句）：
+
+```
+## 摘要
+會議決定明天下午三點討論第四季時程。地點還沒確定。
+
+## 決議
+決定明天下午三點跟小林開會討論第四季時程。
+
+## 待辦
+（無）
+```
+
+證據：`docs/evidence/ios-history-minutes.png`。
+
+### O.6 剩下的、以及真機才做得到的事
+
+**會議模式的錄音端**：要 ReplayKit Broadcast Upload Extension（新 target、
+`com.apple.broadcast-services-upload`）＋使用者授權，而且**模擬器完全驗不了**
+——廣播擴充不會在模擬器上跑。這不是這一輪能誠實交付的東西。
+
+真機清單（`docs/evidence/ios-pip-device-checklist.md` 之外，這一輪新增的）：
+
+1. 貼上前確認：開啟 → 說一句 → 文字是否留在鍵盤上沒有進游標 → 「插入」是否
+   正確落入游標、「重說一次」是否回到同一張面板、「丟棄」後下方那條是否清空。
+2. 貼上前確認 + 語音編輯一起：確認面板開著時鉛筆不做事（應該沒有任何反應）。
+3. 主題：五張紙各選一次，看鍵盤以外的每個畫面（含權限跳出的系統對話框）是否
+   跟著換；深色模式下手機設「跟隨系統」是否變成夜墨。
+4. 模型下載：真機的網路下 239 MB 的 ASR 權重（模擬器只驗了 316 KB 的
+   tokens.txt），以及「下載中切到別 App」之後回來會怎樣（預期：失敗，要重試）。
+5. 會議紀錄：真機三分鐘的會議逐字稿，量一次實際秒數（模擬器 CPU 上很慢，數字
+   不可用）。

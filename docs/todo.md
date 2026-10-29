@@ -841,3 +841,25 @@ J 的數字（debug build，`tests/edit_expected.tsv` 15 題，答案逐字相�
 - 真機驗證（Mode 2 零跳轉、真人念一次語音編輯、預熱對第一次聽寫延遲的實際改善）。
 - 2B 的正式語域仍會把 `QA isn't done yet` 寫成 `the QA team is not yet complete`。
 - guardrail 不檢查行數；簡體偵測是相對的。
+
+---
+
+## 8.11 M7 的五個缺口（2026-10-30）
+
+| # | 項目 | 驗收 |
+|---|---|---|
+| 3.1 | 會議紀錄（**摘要端**）：歷史頁「整理成會議紀錄」，`MeetingMinutes` + `Core.summarize` | `-OVC_MINUTES_PROBE`，截圖 `ios-history-minutes.png` |
+| 3.2 | 貼上前確認：`SharedStore.confirmBeforeInsert`、VoiceBar 的 `PanelMode`、重說一次／丟棄／插入 | 截圖 `ios-keyboard-confirm.png`；真機清單見附錄 O.6 |
+| 3.3 | 五套紙色主題：`PaperTheme`／`PaperThemes`／`ThemeStore`，與 Mac 逐色相同 | 截圖 `ios-theme-picker-paper.png`、`ios-theme-picker-night.png` |
+| 3.4 | SRT 匯出：`History.srt`，時間碼原點是最早那一個 cue 的開始 | `-OVC_SRT_PROBE`，輸出見附錄 O.3 |
+| 3.5 | 模型下載器＋SHA-256：`ModelManifest`／`ModelDownloads`，讀 Mac 同一份 manifest | `-OVC_MODEL_FETCH`（316 KB 實下）、`-OVC_MODEL_VERIFY`（三種判定），截圖 `ios-models-manifest.png` |
+
+**留下來的（誠實清單）**
+
+1. **會議模式的錄音端**：ReplayKit Broadcast Upload Extension。新 target＋使用者
+   授權，而且廣播擴充**不會在模擬器上跑**，整條路只能真機驗。摘鈕／決議／待辦已
+   經有了（3.1），所以這條現在只差音源與 `我：／對方：`。
+2. **貼上前確認的「可編輯」**：iOS 不會為鍵盤擴充裡的欄位叫出系統鍵盤，所以那格
+   收起來了，改字的辦法是「重說一次」。iPad 外接鍵盤的路徑還在程式碼裡。
+3. **真機五項**（附錄 O.6）：貼上前確認的四個動作、面板開著時鉛筆無反應、五張紙
+   在系統對話框上的樣子、239 MB 權重的下載與「切走再回來」、真機的會議紀錄秒數。
