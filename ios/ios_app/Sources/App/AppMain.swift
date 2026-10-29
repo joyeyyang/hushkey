@@ -64,6 +64,20 @@ struct OVCApp: App {
         // code appended them. A dictation cannot reproduce it on this recogniser,
         // which normalises English and digits to Chinese, so the rule is checked
         // directly rather than through audio that will not exercise it.
+        // `-OVC_MODEL_FETCH <id>` starts a real download. The screen it lands on is
+        // the model page, so the launch flag is useful with `-OVC_TAB 3`.
+        if let id = Diagnostics.modelFetch {
+            if let item = ModelManifest.item(id: id) {
+                ModelDownloads.shared.download(item)
+            } else {
+                Diagnostics.log.error("model fetch: no manifest entry \(id, privacy: .public)")
+            }
+        }
+
+        if ProcessInfo.processInfo.arguments.contains("-OVC_MODEL_VERIFY") {
+            Self.runModelVerifyProbe(id: Diagnostics.modelVerify ?? "")
+        }
+
         if ProcessInfo.processInfo.arguments.contains("-OVC_SRT_PROBE") {
             Self.runSrtProbe()
         }
@@ -81,6 +95,72 @@ struct OVCApp: App {
                 )
             }
         }
+    }
+
+    /// `-OVC_MODEL_VERIFY <id>`: the manifest's three verification branches, over
+    /// one real file.
+    ///
+    /// `verify` returns `.ok` for the file that is right, and two different wrong
+    /// ones: the same bytes-missing case (a transfer that stopped) and the same
+    /// size with different contents (the case the hash exists for). Only the first
+    /// is reachable by tapping 驗證 on a good install, and the two failure branches
+    /// are exactly the ones nobody finds out about until a dictation fails — so the
+    /// probe damages the file itself, checks, and puts it back.
+    ///
+    /// Small entries only: it holds the file in memory and rewrites it twice.
+    private static func runModelVerifyProbe(id: String) {
+        let root = SharedStore.modelsRoot
+        guard let item = ModelManifest.item(id: id) else {
+            write(["item=\(id)", "error=no such manifest entry"])
+            return
+        }
+        let url = root.appendingPathComponent(item.file)
+        var out = ["item=\(item.id)", "file=\(item.file)", "bytes=\(item.bytes)"]
+        out.append("as-is=\(describe(ModelManifest.verify(item, at: root)))")
+
+        guard item.bytes < 8 << 20, let original = try? Data(contentsOf: url) else {
+            out.append("note=file too big or unreadable for this probe")
+            write(out)
+            return
+        }
+        do {
+            // A download that ended early: fewer bytes than the manifest promises.
+            try original.dropLast(min(64, original.count)).write(to: url, options: .atomic)
+            out.append("truncated=\(describe(ModelManifest.verify(item, at: root)))")
+            // The right size, one byte different: what the hash is for.
+            var flipped = original
+            flipped[flipped.count - 1] ^= 0xFF
+            try flipped.write(to: url, options: .atomic)
+            out.append("flipped=\(describe(ModelManifest.verify(item, at: root)))")
+            // Put back, so the probe leaves the device as it found it.
+            try original.write(to: url, options: .atomic)
+            out.append("restored=\(describe(ModelManifest.verify(item, at: root)))")
+        } catch {
+            out.append("error=\(error.localizedDescription)")
+        }
+        write(out)
+        print("OVC_MODEL_VERIFY")
+        print(out.joined(separator: "\n"))
+        print("OVC_MODEL_VERIFY_END")
+    }
+
+    private static func describe(_ verdict: ModelManifest.Verdict) -> String {
+        switch verdict {
+        case .ok: return "ok"
+        case .missing: return "missing"
+        case .wrongSize(let bytes): return "wrongSize(\(bytes))"
+        case .wrongHash(let hash): return "wrongHash(\(hash.prefix(12)))"
+        }
+    }
+
+    /// `stdout` did not come through `simctl launch --console` on the simulator
+    /// this was checked on, so the probe writes a file it can be read from.
+    private static func write(_ lines: [String]) {
+        let url = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("model-verify.txt")
+        try? (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+        Diagnostics.log.notice("model verify probe: \(lines.joined(separator: " | "), privacy: .public)")
     }
 
     /// `-OVC_SRT_PROBE`: the subtitle file over three synthetic dictations.

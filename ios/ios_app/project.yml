@@ -31,6 +31,12 @@ targets:
       # draws the real bar so its layout can be checked on a machine, and a copy of
       # it in the app would be a second thing to keep in sync.
       - path: Sources/Keyboard/VoiceBar.swift
+      # The model manifest, referenced rather than copied: it is the same file the
+      # Mac's build puts in `Contents/Resources/models-manifest.json`, and two
+      # copies of a hash list is how one of them ends up stale -- which reports a
+      # good download as corrupt. The name in the bundle differs (this is added
+      # as `manifest.json`), so `ModelManifest` looks for both.
+      - path: ../../models/manifest.json
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.offlinevoiceassistant.ios

@@ -125,6 +125,23 @@ enum Diagnostics {
         ProcessInfo.processInfo.arguments.contains("-OVC_LLM_RESET")
     }
 
+    /// `-OVC_MODEL_FETCH <id>`: download one manifest entry at launch.
+    ///
+    /// The same call the 下載 button makes, so what this exercises is the real path
+    /// -- URLSession, the size check, the SHA-256, and the move into `models/`. It
+    /// exists because `simctl` cannot tap: without it, "does a phone download and
+    /// verify a model" is a question only a human with a phone can answer, and the
+    /// answer would arrive on the day a 1.3 GB model is needed.
+    static var modelFetch: String? {
+        path(after: "-OVC_MODEL_FETCH")
+    }
+
+    /// `-OVC_MODEL_VERIFY <id>`: run the manifest's three verification branches
+    /// over one installed file, and write the result to `Documents/model-verify.txt`.
+    static var modelVerify: String? {
+        path(after: "-OVC_MODEL_VERIFY")
+    }
+
     /// `-OVC_TAB <n>`: open on page `n` (0 轉錄 … 4 設定) instead of 轉錄.
     ///
     /// For photographs. `simctl` can install and launch an app but cannot tap it,

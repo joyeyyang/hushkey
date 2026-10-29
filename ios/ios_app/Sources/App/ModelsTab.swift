@@ -4,16 +4,29 @@ import UniformTypeIdentifiers
 /// The 模型 tab: what is installed, how to put more there, and how to undo a
 /// downgrade.
 ///
-/// The Mac's model manager downloads and verifies from a manifest; a phone cannot
-/// afford to. iOS gets the files from Finder/Files (file sharing is on) or from the
-/// document picker, so this screen's job is to say *what is here*, *what the engine
-/// will actually load*, and *what happened to the model choice* — the three things
-/// that turn "the AI stopped working" into an answer.
+/// The Mac's model manager, on a phone: the same manifest, the same size and
+/// SHA-256 checks, and the same 下載 button — plus the two routes a phone has that a
+/// Mac does not need (Finder/Files with file sharing on, and the document picker).
+///
+/// Whatever gets the files here, this screen's job is to say *what is here*, *what
+/// the engine will actually load*, and *what happened to the model choice* — the
+/// three things that turn "the AI stopped working" into an answer.
 struct ModelsTab: View {
     @Binding var ready: Bool
     @ObservedObject private var dictation = DictationController.shared
+    @ObservedObject private var downloads = ModelDownloads.shared
     @State private var importing = false
     @State private var busy = false
+    /// The manifest, read once: it is a file in this bundle, not something that
+    /// changes while the screen is up.
+    @State private var manifest = ModelManifest.items()
+    /// The last verification per item, from 驗證. A dictionary rather than one
+    /// slot: the point of checking is comparing two entries, and one result at a
+    /// time overwrites the first before it has been read.
+    @State private var verdicts: [String: ModelManifest.Verdict] = [:]
+    /// The item being hashed right now. Hashing 1.3 GB takes a visible moment and
+    /// happens off the main thread, so the row has to say so.
+    @State private var checking: String?
 
     var body: some View {
         ScrollView {
@@ -36,6 +49,8 @@ struct ModelsTab: View {
                     ready: SharedStore.hasLLM,
                     required: false
                 )
+
+                downloadCard
 
                 Button(busy ? "匯入中…" : "選擇檔案或資料夾匯入") { importing = true }
                     .buttonStyle(QuietButton())
@@ -112,6 +127,180 @@ struct ModelsTab: View {
         ) { result in
             guard case .success(let urls) = result else { return }
             importModels(from: urls)
+        }
+    }
+
+    // MARK: download
+
+    /// 從清單下載: the manifest's models, fetched and checked on the phone.
+    ///
+    /// This is the Mac's model manager, on the phone, and it exists for one reason
+    /// the Files route cannot cover: a phone has no way to check a file it received
+    /// from Files, and a truncated 1.3 GB model is indistinguishable from a complete
+    /// one until the engine refuses it at the first dictation. Here the size and the
+    /// SHA-256 come from the same list the Mac uses, and a file that fails is not
+    /// left in `models/` to be loaded later.
+    private var downloadCard: some View {
+        Card("從清單下載",
+             caption: "檔案來自 models/manifest.json，下載完先比對大小與 SHA-256，通過才放進 models/。下載期間請讓 App 留在前景：手機不允許一個 1.3 GB 的下載在背景慢慢跑，被暫停就得從頭再來。") {
+            VStack(alignment: .leading, spacing: 12) {
+                if manifest.isEmpty {
+                    Text("這份組建沒有帶清單檔，只能用下面的 Finder／檔案方式放模型。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(groups, id: \.role) { group in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(group.role)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Palette.ink)
+                        ForEach(group.items) { downloadRow($0) }
+                    }
+                }
+            }
+        }
+        .onChange(of: downloads.installedSomething) { _, _ in
+            // A model that just arrived changes what the engine can load, which is
+            // the number this screen and the recorder both show.
+            ready = SharedStore.hasModels
+            if ready { dictation.prewarm() }
+        }
+    }
+
+    /// ASR first, then the language models: the order of "what is necessary" and
+    /// then "what makes it better".
+    private var groups: [(role: String, items: [ModelManifest.Item])] {
+        [("辨識", manifest.filter { $0.role == "ASR" }),
+         ("AI 整理", manifest.filter { $0.role == "LLM" })]
+            .filter { !$0.1.isEmpty }
+            .map { (role: $0.0, items: $0.1) }
+    }
+
+    private func downloadRow(_ item: ModelManifest.Item) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: itemSymbol(item))
+                    .font(.system(size: 13))
+                    .foregroundStyle(itemInstalled(item) ? Palette.ink : Palette.dim)
+                // The path, not the basename: the manifest ships two files called
+                // `model.int8.onnx` (SenseVoice at `asr/`, Dolphin at
+                // `asr/dolphin/`), and two rows with the same title is a screen
+                // where the wrong one gets deleted.
+                Text(item.file)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if item.fetchedOnInstall {
+                    Text("預設")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.dim)
+                }
+                Spacer(minLength: 0)
+                Text(ModelManifest.size(item.bytes))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Palette.dim)
+            }
+            if !item.summary.isEmpty {
+                Text(item.summary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            controls(item)
+            if let line = statusLine(item) {
+                Text(line)
+                    .font(.system(size: 11))
+                    .foregroundStyle(verdicts[item.id] == .ok ? Palette.ink : Palette.seal)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(10)
+        .background(Palette.wash, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func controls(_ item: ModelManifest.Item) -> some View {
+        switch downloads.state[item.id] {
+        case .downloading(let fraction):
+            HStack(spacing: 10) {
+                ProgressView(value: fraction)
+                    .tint(Palette.seal)
+                Text("\(Int(fraction * 100))%")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Palette.dim)
+                Button("取消") { downloads.cancel(item.id) }
+                    .buttonStyle(QuietButton())
+            }
+        case .checking:
+            HStack(spacing: 8) {
+                ProgressView().tint(Palette.seal)
+                Text("比對中…").font(.system(size: 11)).foregroundStyle(Palette.dim)
+            }
+        case .failed(let reason):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(reason)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.seal)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Button("重試") { downloads.download(item) }
+                    Button("驗證已放進去的檔案") { verify(item) }
+                    Spacer(minLength: 0)
+                }
+                .buttonStyle(QuietButton())
+            }
+        case .installed, .none:
+            HStack(spacing: 10) {
+                Button(itemInstalled(item) ? "重新下載" : "下載") { downloads.download(item) }
+                Button(checking == item.id ? "比對中…" : "驗證") { verify(item) }
+                    .disabled(checking != nil)
+                Spacer(minLength: 0)
+            }
+            .buttonStyle(QuietButton())
+        }
+    }
+
+    private func itemInstalled(_ item: ModelManifest.Item) -> Bool {
+        FileManager.default.fileExists(atPath: SharedStore.modelsRoot.appendingPathComponent(item.file).path)
+    }
+
+    private func itemSymbol(_ item: ModelManifest.Item) -> String {
+        itemInstalled(item) ? "checkmark.circle.fill" : "arrow.down.circle"
+    }
+
+    /// What 驗證 found, if it has been asked. A verdict is only shown for the entry
+    /// it belongs to, so a failed check on one model cannot be read as a statement
+    /// about another.
+    private func statusLine(_ item: ModelManifest.Item) -> String? {
+        guard let verdict = verdicts[item.id] else { return nil }
+        switch verdict {
+        case .ok:
+            return "驗證通過：大小與 SHA-256 都和清單一致。"
+        case .missing:
+            return "這裡還沒有這個檔案。"
+        case .wrongSize(let bytes):
+            return "大小不符：磁碟上是 \(ModelManifest.size(bytes))，清單說是 \(ModelManifest.size(item.bytes))。"
+        case .wrongHash(let hash):
+            return "SHA-256 不符（\(hash.prefix(12))…）：這個檔案不是清單上的那一份。"
+        }
+    }
+
+    /// Hashes the file on disk against the manifest, off the main thread.
+    ///
+    /// The explicit button is not a convenience. It is the only way to answer "is
+    /// the model I dragged in from Files actually the model?" -- a question the
+    /// engine answers much later and less clearly.
+    private func verify(_ item: ModelManifest.Item) {
+        guard checking == nil else { return }
+        checking = item.id
+        DispatchQueue.global(qos: .userInitiated).async {
+            let verdict = ModelManifest.verify(item, at: SharedStore.modelsRoot)
+            DispatchQueue.main.async {
+                verdicts[item.id] = verdict
+                checking = nil
+            }
         }
     }
 

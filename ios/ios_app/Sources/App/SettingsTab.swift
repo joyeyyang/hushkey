@@ -327,7 +327,11 @@ struct SettingsTab: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copiedPath = false }
                 }
                 .buttonStyle(QuietButton())
-                Text("所有音訊與逐字稿都留在這台裝置上；App 不連任何伺服器。")
+                // Not "the app never connects": 從清單下載 is a connection to a
+                // model host, made because the user pressed 下載. What is true --
+                // and what this line is for -- is that no audio and no transcript
+                // is ever sent anywhere.
+                Text("所有音訊與逐字稿都留在這台裝置上；除了你自己按「下載」抓模型，App 不對外連線。")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.dim)
                     .fixedSize(horizontal: false, vertical: true)
