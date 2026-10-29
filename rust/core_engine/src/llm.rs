@@ -447,12 +447,25 @@ const REFINE_EXAMPLES_EN_FORMAL: [(&str, &str); 3] = [
 ///
 /// The delete rule is stated with the number: the deleted line simply disappears
 /// from the answer (there is no blank numbered line to parse).
+///
+/// The last two sentences are a failure list, and it is deliberately blunt. The
+/// measured failure of the edit pass was not a wrong edit but a REMARK: the
+/// model answered "好的，我已經幫你改好了" and the app typed that into the
+/// document. Naming the exact strings -- including the ones this prompt family
+/// uses ("以下是", "很抱歉") -- gives the model a shape to avoid instead of an
+/// adjective to interpret, which is the same trade the refine examples make in
+/// the other direction. Listing failure strings in a prompt can prime a small
+/// model to produce them; that risk is why `guardrail.rs` checks the same
+/// strings in the answer, so a primed remark is refused rather than shipped.
 const EDIT_SYSTEM: &str = "使用者已經打好一份文字，每一行都編好號了。\
 使用者會說一句要怎麼改的指令，你要照著改寫整份文字，只輸出改寫後的內容。\
 輸出要保留原本的編號：改哪一行就只動那一行，沒改到的行照原樣輸出、不要重新編號，\
 也不要只輸出改過的那一行；被刪掉的那一行整行都不要出現。\
 不要加說明、不要加標題、不要翻譯。\
-使用者的訊息裡，第一行是指令，空一行之後才是要改的文字。";
+使用者的訊息裡，第一行是指令，空一行之後才是要改的文字。\
+輸出只能是改寫後的文字，不可以包含任何確認語、道歉語、解釋語。\
+輸出出現下面任何一個詞就算失敗：以下是、很抱歉、不要摘要、重複講的同一件事只留一次、\
+刪掉口頭禪、多餘的字、照原樣保留、問句保持問句、好的我改好了、沒問題、收到。";
 
 /// Worked pairs for the voice-edit pass: `(instruction + blank line + numbered
 /// draft, edited result)`. Few-shot for the same reason as everywhere else in
