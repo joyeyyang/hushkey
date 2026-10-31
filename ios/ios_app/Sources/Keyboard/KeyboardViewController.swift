@@ -86,10 +86,11 @@ final class KeyboardViewController: UIInputViewController {
 
         if let ready = session.text, !ready.isEmpty { lastText = ready }
 
-        // The register is the app's setting; the bar only draws it. Read back on
-        // every tick so a change made in Settings shows up here, and so the two
-        // processes cannot end up showing different modes.
+        // The register and the AI 整理 switch are the app's settings; the bar only
+        // draws them. Read back on every tick so a change made in Settings shows up
+        // here, and so the two processes cannot end up showing different modes.
         bar.setTone(SharedStore.refineTone)
+        bar.setRefineEnabled(SharedStore.refineEnabled)
 
         // The panel's status line is the one the user is acting on, so a phase
         // update must not paint over "修改中…" or "請先開啟 Hushkey 一次".
@@ -269,6 +270,11 @@ final class KeyboardViewController: UIInputViewController {
             self?.applyEdit(instruction, region: region, line: line)
         }
         bar.onToneChange = { SharedStore.refineTone = $0 }
+        // Written straight to the group, which is where `DictationController` reads
+        // it before every cleanup pass -- so the switch takes effect on the next
+        // sentence, not on the next launch, and the app's 設定 page shows the same
+        // value when it is next opened.
+        bar.onAIChange = { SharedStore.refineEnabled = $0 }
         bar.onOpenApp = { [weak self] in self?.openAppForEdit() }
         bar.onCopy = { [weak self] in
             guard let self, !self.lastText.isEmpty else { return }

@@ -56,6 +56,9 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     /// The register was changed here: "casual" / "normal" / "formal". The
     /// controller writes it to the App Group, which is what the app reads.
     var onToneChange: ((String) -> Void)?
+    /// AI 整理 was switched here. Same value as the app's 設定 ›「開啟 AI 整理」:
+    /// one setting, two places it can be reached from.
+    var onAIChange: ((Bool) -> Void)?
     /// 開啟 Hushkey: the app is not running, so the edit has nowhere to run.
     var onOpenApp: (() -> Void)?
 
@@ -88,7 +91,14 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     private let copyButton = UIButton(type: .system)
     private let globeButton = UIButton(type: .system)
     private let editButton = UIButton(type: .system)
-    private let toneControl = UISegmentedControl(items: ["輕鬆", "一般", "正式"])
+    /// 語氣 and AI 整理 as two compact controls rather than a segmented control
+    /// plus a switch: the row already holds the globe, the pencil, ⧉, pause and the
+    /// microphone, and a three-segment control wide enough to read costs about
+    /// sixty points of width that the row does not have. Both are still selections
+    /// -- 語氣 opens a menu of the three registers (the same pattern the 第 N 行
+    /// chip already uses), AI 整理 is on or off and says which.
+    private let toneButton = UIButton(type: .system)
+    private let aiButton = UIButton(type: .system)
     private let statusLabel = UILabel()
     private let spinner = UIActivityIndicatorView(style: .medium)
 
@@ -135,6 +145,10 @@ final class VoiceBar: UIView, UITextFieldDelegate {
 
     /// The register the bar is showing, as the core's own string.
     private(set) var tone = "normal"
+    /// Whether AI 整理 is on, as the bar is showing it. Off until the controller
+    /// reads the group and says otherwise, which is one tick after the keyboard
+    /// appears.
+    private(set) var refineOn = true
 
     /// What the panel is for. The same stack view serves both, because a keyboard
     /// extension has no room for two of anything -- see `configurePanel`.
@@ -218,8 +232,10 @@ final class VoiceBar: UIView, UITextFieldDelegate {
         micButton.accessibilityLabel = "Hushkey 麥克風"
         row.addArrangedSubview(micButton)
 
-        buildToneControl()
-        row.addArrangedSubview(toneControl)
+        buildToneButton()
+        row.addArrangedSubview(toneButton)
+        buildAIButton()
+        row.addArrangedSubview(aiButton)
 
         spinner.translatesAutoresizingMaskIntoConstraints = false
         spinner.hidesWhenStopped = true
@@ -247,31 +263,55 @@ final class VoiceBar: UIView, UITextFieldDelegate {
         ])
     }
 
-    /// 輕鬆 / 一般 / 正式, immediately to the microphone's right.
+    /// 輕鬆 / 一般 / 正式: a button that names the current register and opens the
+    /// three as a menu.
     ///
-    /// A segmented control rather than three buttons: one of three is always
-    /// chosen, and the shape says so. It writes through `onToneChange` instead of
-    /// touching the App Group itself, so the value has exactly one owner (the
-    /// controller, which also reads it back when the app's settings change).
-    private func buildToneControl() {
-        toneControl.selectedSegmentIndex = 1
-        toneControl.selectedSegmentTintColor = UIColor.white.withAlphaComponent(0.16)
-        toneControl.backgroundColor = UIColor.white.withAlphaComponent(0.06)
-        toneControl.setTitleTextAttributes(
-            [.foregroundColor: dim, .font: UIFont.systemFont(ofSize: 11, weight: .medium)],
-            for: .normal
-        )
-        toneControl.setTitleTextAttributes(
-            [.foregroundColor: ink, .font: UIFont.systemFont(ofSize: 11, weight: .semibold)],
-            for: .selected
-        )
-        toneControl.accessibilityLabel = "回答模式"
-        toneControl.addTarget(self, action: #selector(toneChanged), for: .valueChanged)
-        // It must never truncate its own labels -- "…" three times is not a mode
-        // picker. The spacer on the row's left is what gives up the width, not
-        // this control.
-        toneControl.setContentCompressionResistancePriority(.init(999), for: .horizontal)
-        toneControl.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    /// It writes through `onToneChange` instead of touching the App Group itself, so
+    /// the value has exactly one owner (the controller, which also reads it back
+    /// when the app's settings change).
+    private func buildToneButton() {
+        toneButton.showsMenuAsPrimaryAction = true
+        toneButton.accessibilityLabel = "回答風格"
+        // Above the menu on purpose: the row has a microphone and a stop button on
+        // it, and a control that clips its own label is worse than a slightly wide
+        // one.
+        toneButton.setContentCompressionResistancePriority(.init(999), for: .horizontal)
+        paintChip(toneButton, selected: false)
+        paintTone()
+    }
+
+    /// AI 整理, on or off, with the state in the title.
+    ///
+    /// The phone's copy of the Mac HUD's「AI 整理：開／關」button, and the same value:
+    /// `SharedStore.refineEnabled`, which the app's 設定 page writes and
+    /// `DictationController` reads before every cleanup pass.
+    private func buildAIButton() {
+        aiButton.addTarget(self, action: #selector(aiTapped), for: .touchUpInside)
+        aiButton.accessibilityLabel = "AI 整理"
+        paintAI()
+    }
+
+    /// The menu is rebuilt rather than prebuilt: the check mark is on the current
+    /// register, and that changes.
+    private func paintTone() {
+        let titles = ["casual": "輕鬆", "normal": "一般", "formal": "正式"]
+        toneButton.setTitle(titles[tone] ?? "一般", for: .normal)
+        toneButton.menu = UIMenu(children: Self.toneCodes.map { code in
+            UIAction(
+                title: titles[code] ?? code,
+                state: code == tone ? .on : .off
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.setTone(code)
+                self.onToneChange?(code)
+            }
+        })
+    }
+
+    private func paintAI() {
+        aiButton.setTitle(refineOn ? "AI 開" : "AI 關", for: .normal)
+        aiButton.accessibilityValue = refineOn ? "開" : "關"
+        paintChip(aiButton, selected: refineOn)
     }
 
     /// The 修改的提示詞 panel: a region, one field, one row of buttons.
@@ -719,36 +759,28 @@ final class VoiceBar: UIView, UITextFieldDelegate {
         paintRegion()
     }
 
-    @objc private func toneChanged() {
-        tone = Self.toneValue(for: toneControl.selectedSegmentIndex)
-        onToneChange?(tone)
-    }
-
     /// Shows the register the app's settings hold, without telling anyone about
     /// it: this is the reading half of the two-way sync, and reporting it back
     /// would be a write loop between two processes.
     func setTone(_ value: String) {
         guard value != tone else { return }
         tone = value
-        let index = Self.toneIndex(for: value)
-        guard toneControl.selectedSegmentIndex != index else { return }
-        toneControl.selectedSegmentIndex = index
+        paintTone()
     }
 
-    static func toneIndex(for value: String) -> Int {
-        switch value {
-        case "casual": return 0
-        case "formal": return 2
-        default: return 1
-        }
+    /// The same half of the same sync for AI 整理.
+    func setRefineEnabled(_ on: Bool) {
+        guard on != refineOn else { return }
+        refineOn = on
+        paintAI()
     }
 
-    static func toneValue(for index: Int) -> String {
-        switch index {
-        case 0: return "casual"
-        case 2: return "formal"
-        default: return "normal"
-        }
+    static let toneCodes = ["casual", "normal", "formal"]
+
+    @objc private func aiTapped() {
+        refineOn.toggle()
+        paintAI()
+        onAIChange?(refineOn)
     }
 
     @objc private func applyTapped() {
