@@ -158,15 +158,6 @@ enum Diagnostics {
         path(after: "-OVC_TAB").flatMap(Int.init)
     }
 
-    /// `-OVC_THEME <id>`: draw with a named paper, without recording the choice.
-    ///
-    /// Same reason as `-OVC_TAB`, and one more: the five papers have to be
-    /// photographed side by side, and a screenshot run must not leave the tester's
-    /// own setting changed. See `ThemeStore.preview`.
-    static var themeOverride: String? {
-        path(after: "-OVC_THEME")
-    }
-
     private static func path(after flag: String) -> String? {
         let args = ProcessInfo.processInfo.arguments
         guard let index = args.firstIndex(of: flag),

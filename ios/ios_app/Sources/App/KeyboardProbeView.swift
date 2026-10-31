@@ -28,8 +28,8 @@ struct KeyboardProbeView: View {
                 Spacer()
             }
             .padding(20)
-            .background(Color(red: 0.08, green: 0.07, blue: 0.065).ignoresSafeArea())
-            .foregroundStyle(Color(red: 0.93, green: 0.90, blue: 0.86))
+            .background(Color(Palette.keyboardBackground).ignoresSafeArea())
+            .foregroundStyle(Color(Palette.keyboardInk))
         } else {
             fullProbe
         }
@@ -88,8 +88,8 @@ struct KeyboardProbeView: View {
             }
         }
         .padding(20)
-        .background(Color(red: 0.08, green: 0.07, blue: 0.065).ignoresSafeArea())
-        .foregroundStyle(Color(red: 0.93, green: 0.90, blue: 0.86))
+        .background(Color(Palette.keyboardBackground).ignoresSafeArea())
+        .foregroundStyle(Color(Palette.keyboardInk))
         .onAppear {
             // Focusing in the same runloop pass is ignored; the field has to exist.
             // `-OVC_KB_PROBE_NOFOCUS` draws the screen without the system

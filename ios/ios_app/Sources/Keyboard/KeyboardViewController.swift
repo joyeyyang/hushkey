@@ -35,7 +35,9 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(red: 0.10, green: 0.09, blue: 0.085, alpha: 1)
+        // The keyboard's dark green sheet; VoiceBar carries the same numbers (this
+        // target has no `Palette`).
+        view.backgroundColor = UIColor(red: 0.055, green: 0.098, blue: 0.067, alpha: 1)
         build()
         SharedStore.observe { [weak self] in self?.refresh() }
     }

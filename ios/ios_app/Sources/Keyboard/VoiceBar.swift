@@ -82,9 +82,14 @@ final class VoiceBar: UIView, UITextFieldDelegate {
     private static let margin: CGFloat = 12
     private static let gap: CGFloat = 8
 
-    private let ink = UIColor(red: 0.93, green: 0.90, blue: 0.86, alpha: 1)
-    private let seal = UIColor(red: 0.76, green: 0.27, blue: 0.18, alpha: 1)
-    private let dim = UIColor(red: 0.58, green: 0.55, blue: 0.51, alpha: 1)
+    /// The keyboard's own greens, spelled out rather than read from the app's
+    /// `Palette`: this file is compiled into the keyboard target as well, and that
+    /// target does not contain `Palette.swift`. The three values are
+    /// `Palette.keyboard*` by hand -- the same kind of copy the app's own
+    /// `KeyboardProbeView` exists to keep honest.
+    private let ink = UIColor(red: 0.882, green: 0.929, blue: 0.886, alpha: 1)   // #E1EDE2
+    private let seal = UIColor(red: 0.259, green: 0.663, blue: 0.278, alpha: 1)  // #42A947
+    private let dim = UIColor(red: 0.576, green: 0.647, blue: 0.584, alpha: 1)   // #93A595
 
     private let micButton = UIButton(type: .system)
     private let pauseButton = UIButton(type: .system)
