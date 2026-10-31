@@ -93,6 +93,13 @@ enum Diagnostics {
         ProcessInfo.processInfo.arguments.contains("-OVC_PAUSE_PROBE")
     }
 
+    /// `-OVC_STOP_PROBE`: start a dictation, leave it alone for six seconds of
+    /// silence, then post the same stop request the keyboard's button posts, and
+    /// record the phase at each step.
+    static var probesStop: Bool {
+        ProcessInfo.processInfo.arguments.contains("-OVC_STOP_PROBE")
+    }
+
     /// `-OVC_STUCK_PROBE`: leave the recorder page on screen and record what the
     /// pipeline's phase does after a decode that never comes back.
     ///

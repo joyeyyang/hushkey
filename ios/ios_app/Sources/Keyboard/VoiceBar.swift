@@ -662,6 +662,9 @@ final class VoiceBar: UIView, UITextFieldDelegate {
         micButton.backgroundColor = recording ? seal : .clear
         micButton.tintColor = recording ? .white : (look == .failed ? dim : seal)
         micButton.layer.borderColor = (look == .failed ? dim : seal).cgColor
+        // The button means both things now, so it has to say which one it means
+        // right now: start, or end the dictation that is already running.
+        micButton.accessibilityLabel = recording ? "Hushkey 停止" : "Hushkey 麥克風"
         micButton.isEnabled = !working
         if working { spinner.startAnimating() } else { spinner.stopAnimating() }
 

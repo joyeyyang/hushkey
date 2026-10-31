@@ -13,29 +13,43 @@ import UIKit
 ///
 /// Two details make it feel fast rather than just work. The phase is set to
 /// `.recording` before the microphone opens, so the first frame the user sees is
-/// already the recording state. And stopping is *automatic* on silence, so the
-/// user never has to press stop and then find the back button: they speak, stop,
-/// and leave -- the decode runs in the background time they just freed up.
+/// already the recording state. And the recording ends exactly when the user says
+/// so: pressing start starts it, pressing stop ends it, and nothing in between
+/// does either (see `stop(reason:)`).
 @MainActor
 final class DictationController: ObservableObject {
     static let shared = DictationController()
 
     init() {
-        // The keyboard's pause / resume buttons. Registered here rather than in a
-        // view: the recording outlives every screen (that is the whole point of
-        // Mode 1 and Mode 2), and a subscription owned by a view would stop
-        // working exactly when the app is in the background with a microphone
-        // open -- the only situation the buttons exist for.
-        SharedStore.observePauseRequest { [weak self] paused in
+        // The keyboard's pause / resume / stop buttons. Registered here rather than
+        // in a view: the recording outlives every screen (that is the whole point of
+        // Mode 1 and Mode 2), and a subscription owned by a view would stop working
+        // exactly when the app is in the background with a microphone open -- the
+        // only situation the buttons exist for.
+        SharedStore.observeTransportRequest { [weak self] request in
             guard let self else { return }
-            if paused { self.pause() } else { self.resume() }
+            switch request {
+            case .pause: self.pause()
+            case .resume: self.resume()
+            // The reason is empty on purpose: "靜音" was the gate's word, and there
+            // is no gate any more. This is the user having said everything.
+            case .stop: self.stop()
+            }
         }
         // A stale `true` from a process the system killed would leave the keyboard
         // showing ▶ while nothing is listening.
         SharedStore.isPaused = false
     }
 
-    @Published private(set) var phase: SharedStore.Phase = .idle
+    @Published private(set) var phase: SharedStore.Phase = .idle {
+        didSet { if phase != oldValue { stateChangedAt = Date() } }
+    }
+    /// When `phase` last changed, so a probe (or a stuck-state question) can tell
+    /// "辨識中" for one second from "辨識中" for ten minutes.
+    private var stateChangedAt = Date()
+
+    /// How long the current phase has been true.
+    var secondsSinceStateChange: Double { Date().timeIntervalSince(stateChangedAt) }
     /// Settled words, accumulated as the recogniser closes utterances.
     @Published private(set) var transcript = ""
     /// The utterance still open, shown while it is being spoken.
@@ -67,7 +81,6 @@ final class DictationController: ObservableObject {
 
     private var mic: MicCapture?
     private var spool: AudioSpool?
-    private var gate: SilenceGate?
     private var pollTimer: Timer?
     private var background: UIBackgroundTaskIdentifier = .invalid
     /// The transcript as heard, kept while the cleanup pass runs so a timeout can
@@ -231,11 +244,21 @@ final class DictationController: ObservableObject {
             // broken button -- which is exactly how this was reported: "the
             // microphone will not press". The pipeline is fine; it is busy, and it
             // says so.
-            error = decodeTimedOut
-                ? "上一次辨識沒有回應。如果這次也沒有開始錄音，請把 App 關掉再開一次。"
-                : (recovering
-                    ? "正在補回上一次的錄音，完成後就會開始。"
-                    : "上一句還在處理，完成後就會開始。")
+            // Three different situations said three different ways. "Already
+            // recording" used to read "上一句還在處理，完成後就會開始" -- a sentence
+            // about a previous dictation, shown while this one is live, which is
+            // how a start/stop button comes to look like it is doing nothing.
+            if isRecording {
+                error = isPaused
+                    ? "已經在錄音（暫停中）。按繼續接著說，或按停止結束。"
+                    : "已經在錄音。按停止才會結束。"
+            } else if decodeTimedOut {
+                error = "上一次辨識沒有回應。如果這次也沒有開始錄音，請把 App 關掉再開一次。"
+            } else if recovering {
+                error = "正在補回上一次的錄音，完成後就會開始。"
+            } else {
+                error = "上一句還在處理，完成後就會開始。"
+            }
             return
         }
         let g = nextGeneration()
@@ -284,16 +307,13 @@ final class DictationController: ObservableObject {
             // file would be the only thing recovery could find.
             let spool = try self.spool ?? AudioSpool()
             let mic = MicCapture()
-            let gate = SilenceGate()
             let spooled = spool
 
-            gate.onFire = { [weak self] reason in
-                DispatchQueue.main.async { self?.stop(reason: reason) }
-            }
+            // Nothing here decides when the sentence is over. Every buffer is kept
+            // and handed to the recogniser; the user's stop is what ends it.
             mic.onSamples = { samples in
                 spooled.append(samples)
                 Core.submit(samples)
-                gate.consume(samples)
             }
 
             do {
@@ -307,7 +327,6 @@ final class DictationController: ObservableObject {
             }
             self.spool = spool
             self.mic = mic
-            self.gate = gate
             self.isPaused = false
             SharedStore.isPaused = false
             startPolling(g: g)
@@ -323,10 +342,9 @@ final class DictationController: ObservableObject {
     ///
     /// The ASR session stays open (`Core.stop` is what finishes it) and the spool
     /// stays on disk, so resuming appends to the same recording rather than
-    /// starting a second one. The silence gate is dropped with the microphone: it
-    /// fires on *absence* of audio, so leaving it armed while paused would auto-stop
-    /// the dictation a second later and publish the half the user was pausing to
-    /// protect.
+    /// starting a second one. Nothing else has to be disarmed while paused: the
+    /// microphone going away is the only thing that was listening, and the sentence
+    /// ends when the user says so, not when it goes quiet.
     func pause() {
         guard phase == .recording, !isPaused else { return }
         pollTimer?.invalidate()
@@ -340,7 +358,6 @@ final class DictationController: ObservableObject {
         mic?.onSamples = nil
         mic?.stop(keepAlive: keepsAudioSession)
         mic = nil
-        gate = nil
         SharedStore.setPhase(.recording, detail: "已暫停")
         Diagnostics.log.notice("dictation paused")
     }
@@ -357,8 +374,23 @@ final class DictationController: ObservableObject {
 
     // MARK: stop
 
-    /// Ends the dictation and decodes what is left. `reason` is shown to the user
-    /// ("靜音" when they simply stopped talking).
+    /// Ends the dictation and decodes what is left. `reason` is shown to the user;
+    /// it is empty for a stop the user asked for, which is now every ordinary stop.
+    ///
+    /// **Nothing else ends a dictation.** There was a `SilenceGate` that fired after
+    /// 1.2 seconds of quiet (once 0.35 s had been spoken) and a 60-second ceiling
+    /// beside it, on the theory that the user should never have to press stop. The
+    /// theory was wrong in the way that matters: on a phone, dictation *is*
+    /// interrupted -- a pause to think, a second person talking, a sentence that
+    /// takes longer than a minute -- and every one of those was the app deciding the
+    /// user was finished. The rule now is the one the user asked for: start is a
+    /// press, end is a press, and nothing here guesses in between.
+    ///
+    /// The cost is real and is the user's to manage: a recording left running stays
+    /// running. What is *not* silent is the state -- the keyboard's strip shows the
+    /// words as they arrive and its button becomes a stop button, and the app's own
+    /// screen shows 錄音中 -- so a forgotten dictation is visible rather than
+    /// discovered later.
     func stop(reason: String = "") {
         guard phase == .recording else { return }
         pollTimer?.invalidate()
@@ -367,7 +399,6 @@ final class DictationController: ObservableObject {
         mic?.onSamples = nil
         mic?.stop(keepAlive: keepsAudioSession)
         mic = nil
-        gate = nil
 
         decode(accumulated: transcript, reason: reason, g: generation)
     }
@@ -732,7 +763,6 @@ final class DictationController: ObservableObject {
         mic?.onSamples = nil
         mic?.stop(keepAlive: keepsAudioSession)
         mic = nil
-        gate = nil
         // `MicCapture.start` sets the category and activates the session *before*
         // it starts the engine. When the engine itself throws, `self.mic` was never
         // assigned, so nothing below deactivates what was already opened -- and the
@@ -1209,69 +1239,5 @@ final class DictationController: ObservableObject {
     /// core returned nothing.
     nonisolated static func merge(_ accumulated: String, _ final: String) -> String {
         final.isEmpty ? accumulated : final
-    }
-}
-
-/// Decides when the user has finished speaking.
-///
-/// Called from the audio thread on every buffer, so it holds no reference to the
-/// controller and does the arithmetic under a lock. Two thresholds: the noise
-/// floor measured during the first half second, and a hard silence window. The
-/// floor matters -- a quiet room and a train both work without a settings screen.
-final class SilenceGate {
-    /// Fired once, on the audio thread. The caller hops to main.
-    var onFire: ((String) -> Void)?
-
-    private let lock = NSLock()
-    private var elapsed: Double = 0
-    private var spoken: Double = 0
-    private var quiet: Double = 0
-    private var floorSample: Double = 1
-    private var floorWindow: Double = 0
-    private var didFire = false
-
-    private let sampleRate: Double = AudioSpool.sampleRate
-    private let silenceWindow: Double = 1.2
-    private let minimumSpeech: Double = 0.35
-    private let maximumLength: Double = 60
-
-    func consume(_ samples: [Float]) {
-        guard !samples.isEmpty else { return }
-        let seconds = Double(samples.count) / sampleRate
-
-        var sum: Double = 0
-        for sample in samples { sum += Double(sample * sample) }
-        let rms = (sum / Double(samples.count)).squareRoot()
-
-        lock.lock()
-        guard !didFire else { lock.unlock(); return }
-
-        elapsed += seconds
-        // Learn the room for the first half second, before anything is said.
-        if floorWindow < 0.5 {
-            floorSample = min(floorSample, rms)
-            floorWindow += seconds
-        }
-        let threshold = min(max(floorSample * 3.0, 0.0045), 0.02)
-
-        if rms > threshold {
-            spoken += seconds
-            quiet = 0
-        } else {
-            quiet += seconds
-        }
-
-        var reason: String?
-        if elapsed >= maximumLength {
-            reason = "60 秒上限"
-        } else if spoken >= minimumSpeech, quiet >= silenceWindow {
-            reason = "靜音"
-        }
-        if reason != nil { didFire = true }
-        lock.unlock()
-
-        // Outside the lock: the callback hops to the main queue, and a lock held
-        // across that hop is how a debugger session ends in a mystery hang.
-        if let reason { onFire?(reason) }
     }
 }

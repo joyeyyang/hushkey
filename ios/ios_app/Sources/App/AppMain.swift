@@ -45,6 +45,10 @@ struct OVCApp: App {
             Task { @MainActor in PauseProbe.run() }
         }
 
+        if Diagnostics.probesStop {
+            Task { @MainActor in PauseProbe.runStop() }
+        }
+
         if Diagnostics.probesStuck {
             Task { @MainActor in StuckProbe.run() }
         }

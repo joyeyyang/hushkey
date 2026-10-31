@@ -451,6 +451,27 @@ final class KeyboardViewController: UIInputViewController {
             bar.showNotice("請到 設定 › 一般 › 鍵盤 開啟「允許完全取用」")
             return
         }
+        // A dictation is running, so this button ends it.
+        //
+        // The recording no longer ends itself: there is no silence timeout and no
+        // length ceiling any more (`DictationController.stop`), because both were
+        // the app deciding the user had finished when all that had happened was a
+        // pause for thought. That makes this the only way to finish a sentence from
+        // here -- and from here is where the user is, in somebody else's app.
+        if SharedStore.current().phase == .recording {
+            SharedStore.requestStop()
+            bar.showWorking("結束中…")
+            // No acknowledgement channel, the same as pause: if the phase has not
+            // moved within a beat, say so instead of leaving a button that looks
+            // like it worked. A suspended app is the usual reason.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, SharedStore.current().phase == .recording else { return }
+                self.bar.showNotice(SharedStore.isPaused
+                    ? "暫停中。切回「Hushkey」按繼續或停止。"
+                    : "App 沒有回應，請切回「Hushkey」按停止。")
+            }
+            return
+        }
         // Written down before anything is attempted, on both paths. `open()` can be
         // refused (iOS declines it while the containing app is already resident) and
         // a Darwin notification only reaches a process that is listening, so the

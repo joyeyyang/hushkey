@@ -852,6 +852,7 @@ J 的數字（debug build，`tests/edit_expected.tsv` 15 題，答案逐字相�
 | 3.2 | 貼上前確認：`SharedStore.confirmBeforeInsert`、VoiceBar 的 `PanelMode`、重說一次／丟棄／插入 | 截圖 `ios-keyboard-confirm.png`；真機清單見附錄 O.6 |
 | 3.3 | 五套紙色主題：`PaperTheme`／`PaperThemes`／`ThemeStore`，與 Mac 逐色相同 | 截圖 `ios-theme-picker-paper.png`、`ios-theme-picker-night.png` |
 | 3.4 | SRT 匯出：`History.srt`，時間碼原點是最早那一個 cue 的開始 | `-OVC_SRT_PROBE`，輸出見附錄 O.3 |
+| 0 | 取消自動結束：只有按下開始與結束才動作；傳輸通道多 `stop`；鍵盤的麥克風在錄音時是停止鍵 | `-OVC_STOP_PROBE`、截圖 `ios-keyboard-recording.png` |
 | 3.5 | 模型下載器＋SHA-256：`ModelManifest`／`ModelDownloads`，讀 Mac 同一份 manifest | `-OVC_MODEL_FETCH`（316 KB 實下）、`-OVC_MODEL_VERIFY`（三種判定），截圖 `ios-models-manifest.png` |
 
 **留下來的（誠實清單）**

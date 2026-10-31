@@ -21,9 +21,7 @@ struct KeyboardProbeView: View {
         // an expanded bar is otherwise only visible on a phone.
         if let solo = soloPanel {
             VStack(alignment: .leading, spacing: 6) {
-                Text(solo == .confirm
-                     ? "貼上前確認（按「插入」前的樣子）"
-                     : "按鉛筆後的樣子（修改的提示詞）")
+                Text(soloLabel(solo))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 VoiceBarPreview(state: solo)
@@ -37,9 +35,18 @@ struct KeyboardProbeView: View {
         }
     }
 
+    private func soloLabel(_ state: VoiceBarPreview.State) -> String {
+        switch state {
+        case .confirm: return "貼上前確認（按「插入」前的樣子）"
+        case .recording: return "錄音中：這一顆是停止，不是麥克風"
+        case .editPanel, .idle: return "按鉛筆後的樣子（修改的提示詞）"
+        }
+    }
+
     private var soloPanel: VoiceBarPreview.State? {
         let args = ProcessInfo.processInfo.arguments
         if args.contains("-OVC_KB_PROBE_CONFIRM") { return .confirm }
+        if args.contains("-OVC_KB_PROBE_RECORDING") { return .recording }
         if args.contains("-OVC_KB_PROBE_PANEL") { return .editPanel }
         return nil
     }
@@ -108,6 +115,8 @@ struct VoiceBarPreview: UIViewRepresentable {
         case editPanel
         /// 貼上前確認 holding a sentence.
         case confirm
+        /// Mid-dictation: the microphone is a stop button and the words are live.
+        case recording
     }
 
     var state: State = .idle
@@ -130,6 +139,15 @@ struct VoiceBarPreview: UIViewRepresentable {
             DispatchQueue.main.async { bar.endEditing(true) }
         case .confirm:
             bar.showConfirmPanel(text: "下週一上午十點前把預算表寄給王經理，副本給財務部。")
+        case .recording:
+            // The state that used to end itself. The microphone is a stop button
+            // here, and this is the only picture of it that does not need a phone.
+            bar.apply(
+                phase: .recording,
+                text: "下週一上午十點前把預算表寄給王經理，副本給財務部。",
+                needsSwitch: false,
+                paused: false
+            )
         }
         return bar
     }

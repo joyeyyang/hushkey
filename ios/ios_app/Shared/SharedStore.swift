@@ -28,12 +28,13 @@ enum SharedStore {
     ///
     /// Same channel as `recordRequestName` and for the same reason: the keyboard
     /// owns no microphone, so every microphone decision is a message to the app.
-    /// These two matter more than they look. In Mode 1 the app is backgrounded
-    /// while it records, and the silence gate auto-stops after 1.2 seconds -- so
-    /// without a pause the only way to hold a sentence together through an
-    /// interruption is to keep talking.
+    /// These matter more than they look. In Mode 1 the app records from the
+    /// background, where the keyboard's buttons are the only controls the user can
+    /// reach -- and since the dictation no longer ends itself on silence, `stop` is
+    /// the only way to finish a sentence without switching apps.
     static let pauseRequestName = "com.example.offlinevoiceassistant.pause"
     static let resumeRequestName = "com.example.offlinevoiceassistant.resume"
+    static let stopRequestName = "com.example.offlinevoiceassistant.stop"
 
     enum Phase: String, Codable {
         case idle
@@ -788,31 +789,46 @@ enum SharedStore {
         }
     }
 
-    /// The keyboard's pause / resume buttons.
+    /// Which of the three listening controls the keyboard pressed.
+    ///
+    /// One channel with three names rather than three of everything: they are one
+    /// decision about one recording, and a keyboard that can pause but not resume
+    /// leaves a button that can only ever stop listening.
+    enum Transport: String {
+        case pause
+        case resume
+        /// End the sentence now. The dictation no longer ends itself (see
+        /// `DictationController`), so this is the button that finishes it.
+        case stop
+    }
+
+    /// The keyboard's pause / resume / stop buttons.
     static func requestPause() { post(name: pauseRequestName) }
     static func requestResume() { post(name: resumeRequestName) }
+    static func requestStop() { post(name: stopRequestName) }
 
-    /// Runs `handler` on the main queue when the keyboard asks to pause or resume.
-    ///
-    /// One registration for both, because they are one decision: a keyboard that
-    /// hears "pause" but not "resume" leaves a button that can only ever stop
-    /// listening. The handler is handed `true` for pause.
-    static func observePauseRequest(_ handler: @escaping (Bool) -> Void) {
-        PauseRequest.handler = handler
-        guard !PauseRequest.registered, let center = poster else { return }
-        PauseRequest.registered = true
-        let observer = Unmanaged.passUnretained(PauseRequest.shared).toOpaque()
-        for name in [pauseRequestName, resumeRequestName] {
+    /// Runs `handler` on the main queue when the keyboard asks for pause, resume
+    /// or stop.
+    static func observeTransportRequest(_ handler: @escaping (Transport) -> Void) {
+        TransportRequest.handler = handler
+        guard !TransportRequest.registered, let center = poster else { return }
+        TransportRequest.registered = true
+        let observer = Unmanaged.passUnretained(TransportRequest.shared).toOpaque()
+        for name in [pauseRequestName, resumeRequestName, stopRequestName] {
             CFNotificationCenterAddObserver(
                 center, observer,
-                // The callback cannot capture -- not the handler, not even the
-                // name it was registered for -- so which button was pressed is read
-                // back off the notification's own name, spelled out here rather
-                // than referenced.
+                // The callback cannot capture -- not the handler, not even the name
+                // it was registered for -- so which button was pressed is read back
+                // off the notification's own name: spelled out here rather than
+                // referenced, and matched on the last component so the three cases
+                // are one comparison instead of three literal strings that would
+                // each have to be kept in step with the constants above.
                 { _, _, delivered, _, _ in
                     let which = (delivered?.rawValue as String?) ?? ""
+                    let kind = which.components(separatedBy: ".").last ?? ""
                     DispatchQueue.main.async {
-                        PauseRequest.handler?(which == "com.example.offlinevoiceassistant.pause")
+                        guard let request = Transport(rawValue: kind) else { return }
+                        TransportRequest.handler?(request)
                     }
                 },
                 name as CFString,
@@ -822,9 +838,9 @@ enum SharedStore {
         }
     }
 
-    private final class PauseRequest {
-        static let shared = PauseRequest()
-        static var handler: ((Bool) -> Void)?
+    private final class TransportRequest {
+        static let shared = TransportRequest()
+        static var handler: ((Transport) -> Void)?
         static var registered = false
     }
 
